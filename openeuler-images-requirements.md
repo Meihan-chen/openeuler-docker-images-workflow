@@ -29,7 +29,7 @@ openEuler社区官方维护了一批应用容器镜像的Dockerfile和相关的�
 
 2. 新增一个应用镜像的时候，必须提供基础的功能测试用例，这个测试用例必须具备公众可信性，至于每个镜像的所有版本共享一组测试用例还是每个版本独有一组测试，需要你深度研究下
 
-3. 在提交PR前，必须通过基础的功能测试并在PR内包含测试结果，测试结果的归档可参考：https://gitcode.com/openeuler/openeuler-docker-images/tree/master/tests/rust，https://gitcode.com/openeuler/openeuler-docker-images/tree/master/tests/rust。但是我认为这种测试用例以及Dockerfile的归档目录不是很建议，你可以深度研究下给出合理的方案
+3. 在提交PR前，必须通过基础的功能测试并在PR内包含测试结果，测试结果的归档可参考：https://gitcode.com/openeuler/openeuler-docker-images/tree/master/tests/rust，https://gitcode.com/openeuler/openeuler-docker-images/tree/master/tests/rust 但是我认为这种测试用例以及Dockerfile的归档目录不是很建议，你可以深度研究下给出合理的方案
 
 # 参考信息
 
