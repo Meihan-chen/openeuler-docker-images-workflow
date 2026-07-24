@@ -1,5 +1,8 @@
 name: New Image
 
+# Triggered by GitCode Issue with [new-image] label.
+# Standalone: runs adversarial pairs, then build+test+fix loop (3 rounds), then PR.
+
 on:
   issues:
     types: [opened, labeled]
@@ -22,13 +25,13 @@ jobs:
       - id: parse
         run: python scripts/harness/parse_issue.py "${{ github.event.issue.body }}" >> "$GITHUB_OUTPUT"
 
-  adversarial-pairs:
+  generate:
     needs: triage
     runs-on: [self-hosted, Linux, x64]
     steps:
       - uses: actions/checkout@v4
 
-      - name: Run Image Creator + QA
+      - name: Image Creator + QA (adversarial pair 1)
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           PACKAGE: ${{ needs.triage.outputs.package }}
@@ -38,12 +41,12 @@ jobs:
           APP_VERSION: ${{ needs.triage.outputs.app_version }}
         run: python scripts/harness/run.py adversarial-pair --role image
 
-      - name: Run Testcase Creator + QA
+      - name: Testcase Creator + QA (adversarial pair 2)
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: python scripts/harness/run.py adversarial-pair --role testcase
 
-      - name: Validate meta.yml
+      - name: Validate meta
         run: python scripts/harness/validate_meta.py
 
       - name: Upload generated files
@@ -57,8 +60,9 @@ jobs:
             */doc/
             */tests/
 
-  build-and-test:
-    needs: adversarial-pairs
+  # --- Round 1: build + test ---
+  verify-r1:
+    needs: generate
     strategy:
       fail-fast: false
       matrix:
@@ -71,78 +75,159 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
-        with:
-          name: generated-files
+        with: { name: generated-files }
 
-      - name: Build image
+      - name: Build
         run: |
           set -o pipefail
-          APP=$(python scripts/harness/run.py get-app-name)
-          docker buildx build \
-            --platform ${{ matrix.arch.platform }} \
-            --tag "openeuler/${APP}:test" \
-            --load \
-            . 2>&1 | tee /tmp/build-${{ matrix.arch.platform }}.log
+          docker buildx build --platform ${{ matrix.arch.platform }} \
+            --tag "openeuler/${APP}:test" --load . 2>&1 | tee /tmp/build-r1-${{ matrix.arch.platform }}.log
+        env: { APP: ${{ needs.triage.outputs.package }} }
 
-      - name: Run tests
-        run: |
-          APP=$(python scripts/harness/run.py get-app-name)
-          python scripts/harness/run.py test --app "$APP" --platform ${{ matrix.arch.platform }}
+      - name: Test
+        run: python scripts/harness/run.py test --app "$APP" --platform ${{ matrix.arch.platform }}
+        env: { APP: ${{ needs.triage.outputs.package }} }
 
-      - name: Upload test results
+      - name: Upload results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-results-${{ matrix.arch.platform }}
+          name: test-results-r1-${{ matrix.arch.platform }}
           path: |
-            /tmp/build-${{ matrix.arch.platform }}.log
+            /tmp/build-r1-${{ matrix.arch.platform }}.log
             **/results/**/*.junit.xml
 
-  fix-loop:
-    needs: build-and-test
+  # --- Fix round 1 ---
+  fix-r1:
+    needs: verify-r1
     if: failure()
     runs-on: [self-hosted, Linux, x64]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
-        with:
-          pattern: test-results-*
-          merge-multiple: true
+        with: { pattern: test-results-r1-*, merge-multiple: true }
+      - run: python scripts/harness/run.py fix
+        env: { ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }} }
 
-      - name: Run Fixer
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: python scripts/harness/run.py fix
+  # --- Round 2: re-build + re-test (fixer changes applied) ---
+  verify-r2:
+    needs: fix-r1
+    if: always() && !failure()
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - runner: [self-hosted, Linux, x64]
+            platform: linux/amd64
+          - runner: [self-hosted, Linux, ARM64]
+            platform: linux/arm64
+    runs-on: ${{ matrix.arch.runner }}
+    steps:
+      - uses: actions/checkout@v4
 
-      - name: Rebuild and retest
-        uses: ./.github/workflows/verify.yml
+      - name: Build
+        run: |
+          set -o pipefail
+          docker buildx build --platform ${{ matrix.arch.platform }} \
+            --tag "openeuler/${APP}:test" --load . 2>&1 | tee /tmp/build-r2-${{ matrix.arch.platform }}.log
+        env: { APP: ${{ needs.triage.outputs.package }} }
+
+      - name: Test
+        run: python scripts/harness/run.py test --app "$APP" --platform ${{ matrix.arch.platform }}
+        env: { APP: ${{ needs.triage.outputs.package }} }
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          retry: true
+          name: test-results-r2-${{ matrix.arch.platform }}
+          path: |
+            /tmp/build-r2-${{ matrix.arch.platform }}.log
+            **/results/**/*.junit.xml
+
+  # --- Fix round 2 ---
+  fix-r2:
+    needs: verify-r2
+    if: failure()
+    runs-on: [self-hosted, Linux, x64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { pattern: test-results-r2-*, merge-multiple: true }
+      - run: python scripts/harness/run.py fix
+        env: { ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }} }
+
+  # --- Round 3: re-build + re-test ---
+  verify-r3:
+    needs: fix-r2
+    if: always() && !failure()
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - runner: [self-hosted, Linux, x64]
+            platform: linux/amd64
+          - runner: [self-hosted, Linux, ARM64]
+            platform: linux/arm64
+    runs-on: ${{ matrix.arch.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: |
+          set -o pipefail
+          docker buildx build --platform ${{ matrix.arch.platform }} \
+            --tag "openeuler/${APP}:test" --load . 2>&1 | tee /tmp/build-r3-${{ matrix.arch.platform }}.log
+        env: { APP: ${{ needs.triage.outputs.package }} }
+
+      - name: Test
+        run: python scripts/harness/run.py test --app "$APP" --platform ${{ matrix.arch.platform }}
+        env: { APP: ${{ needs.triage.outputs.package }} }
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-r3-${{ matrix.arch.platform }}
+          path: |
+            /tmp/build-r3-${{ matrix.arch.platform }}.log
+            **/results/**/*.junit.xml
+
+  # --- Fix round 3 (last attempt, no re-verify after this) ---
+  fix-r3:
+    needs: verify-r3
+    if: failure()
+    runs-on: [self-hosted, Linux, x64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { pattern: test-results-r3-*, merge-multiple: true }
+      - run: python scripts/harness/run.py fix
+        env: { ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }} }
+
+  needs-human:
+    needs: [verify-r1, verify-r2, verify-r3, fix-r3]
+    if: always() && failure()
+    runs-on: [self-hosted, Linux, x64]
+    steps:
+      - run: |
+          echo "3 fix rounds exhausted, still failing"
+          echo "See test-results-r1/r2/r3 artifacts for full diagnostic trail"
 
   compose-pr:
-    needs: [build-and-test, fix-loop]
+    needs: [verify-r1, verify-r2, verify-r3]
     if: always() && !failure()
     runs-on: [self-hosted, Linux, x64]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
-        with:
-          pattern: test-results-*
-          merge-multiple: true
-
-      - name: Gate diff
-        run: python scripts/harness/gate_diff.py
-
-      - name: Compose PR
-        env:
-          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
-        run: python scripts/harness/compose_pr.py --scenario new-image
-
-      - name: Create PR on GitCode
-        env:
-          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
-        run: |
+        with: { pattern: test-results-r*, merge-multiple: true }
+      - run: python scripts/harness/gate_diff.py
+      - run: python scripts/harness/compose_pr.py --scenario new-image
+        env: { GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }} }
+      - run: |
           python scripts/utils/gitcode.py pr create \
             --title "$(cat /tmp/pr-title)" \
             --body-file /tmp/pr-body.md \
             --head "$(git branch --show-current)"
+        env: { GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }} }

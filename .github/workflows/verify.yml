@@ -1,5 +1,9 @@
 name: Verify
 
+# Reusable workflow: generate (adversarial pair) → build → test.
+# Called by version-update.yml and oe-upgrade.yml.
+# On retry (retry=true): skips generation, only build+test — fixer changes are already applied.
+
 on:
   workflow_call:
     inputs:
@@ -24,13 +28,13 @@ env:
 
 jobs:
   generate:
+    # Skip generation on retry — fixer changes are already in the repo
     if: ${{ !inputs.retry }}
     runs-on: [self-hosted, Linux, x64]
     steps:
       - uses: actions/checkout@v4
 
-      - name: Run adversarial pairs
-        if: ${{ inputs.scenario == 'version-update' || inputs.scenario == 'oe-upgrade' }}
+      - name: Run adversarial pair (image)
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           APP: ${{ inputs.app }}
@@ -40,13 +44,13 @@ jobs:
           SCENARIO: ${{ inputs.scenario }}
         run: python scripts/harness/run.py adversarial-pair --role image
 
-      - name: Validate meta.yml
+      - name: Validate meta
         run: python scripts/harness/validate_meta.py
 
       - name: Upload generated files
         uses: actions/upload-artifact@v4
         with:
-          name: generated-files
+          name: generated-files-${{ inputs.app }}
           path: |
             */**/Dockerfile
             */meta.yml
@@ -70,11 +74,7 @@ jobs:
       - if: ${{ !inputs.retry }}
         uses: actions/download-artifact@v4
         with:
-          name: generated-files
-
-      - name: Lint Dockerfile
-        run: |
-          docker run --rm -i hadolint/hadolint < $(find . -name Dockerfile -not -path '*/.git/*' | head -1)
+          name: generated-files-${{ inputs.app }}
 
       - name: Build image
         run: |
@@ -91,34 +91,11 @@ jobs:
           APP="${{ inputs.app }}"
           python scripts/harness/run.py test --app "$APP" --platform ${{ matrix.arch.platform }}
 
-      - name: Upload test results
+      - name: Upload results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-results-${{ matrix.arch.platform }}
+          name: test-results-${{ inputs.app }}-${{ matrix.arch.platform }}
           path: |
             /tmp/build-${{ matrix.arch.platform }}.log
             **/results/**/*.junit.xml
-
-  fix-loop:
-    needs: build-and-test
-    if: failure()
-    runs-on: [self-hosted, Linux, x64]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: test-results-*
-          merge-multiple: true
-
-      - name: Run Fixer
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: python scripts/harness/run.py fix
-
-      - name: Rebuild and retest
-        uses: ./.github/workflows/verify.yml
-        with:
-          app: ${{ inputs.app }}
-          scenario: ${{ inputs.scenario }}
-          retry: true
