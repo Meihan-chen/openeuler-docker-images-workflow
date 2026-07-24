@@ -1,0 +1,66 @@
+name: Version Update
+
+on:
+  repository_dispatch:
+    types: [anitya-version-update]
+  workflow_dispatch:
+    inputs:
+      app:
+        description: 'Specific app to update (blank = all with new versions)'
+        required: false
+
+env:
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  query-versions:
+    runs-on: [self-hosted, Linux, x64]
+    outputs:
+      updates: ${{ steps.query.outputs.updates }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: query
+        run: |
+          UPDATES=$(python scripts/harness/query_version.py \
+            ${%-%github.event.inputs.app%} --format json)
+          echo "updates=$UPDATES" >> "$GITHUB_OUTPUT"
+
+  update:
+    needs: query-versions
+    if: needs.query-versions.outputs.updates != '[]'
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ vars.MAX_PARALLEL_IMAGES || 4 }}
+      matrix:
+        app: ${{ fromJSON(needs.query-versions.outputs.updates) }}
+    uses: ./.github/workflows/verify.yml
+    with:
+      app: ${{ matrix.app.name }}
+      app_version: ${{ matrix.app.version }}
+      os_version: ${{ matrix.app.os_version }}
+      scenario: version-update
+
+  compose-pr:
+    needs: update
+    if: always() && !failure()
+    runs-on: [self-hosted, Linux, x64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: test-results-*
+          merge-multiple: true
+
+      - name: Compose PR
+        env:
+          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+        run: python scripts/harness/compose_pr.py --scenario version-update
+
+      - name: Create PR on GitCode
+        env:
+          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+        run: |
+          python scripts/utils/gitcode.py pr create \
+            --title "$(cat /tmp/pr-title)" \
+            --body-file /tmp/pr-body.md \
+            --head "$(git branch --show-current)"

@@ -1,0 +1,124 @@
+name: Verify
+
+on:
+  workflow_call:
+    inputs:
+      app:
+        required: true
+        type: string
+      app_version:
+        type: string
+      os_version:
+        type: string
+      oe_version:
+        type: string
+      scenario:
+        required: true
+        type: string
+      retry:
+        type: boolean
+        default: false
+
+env:
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  generate:
+    if: ${{ !inputs.retry }}
+    runs-on: [self-hosted, Linux, x64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run adversarial pairs
+        if: ${{ inputs.scenario == 'version-update' || inputs.scenario == 'oe-upgrade' }}
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          APP: ${{ inputs.app }}
+          APP_VERSION: ${{ inputs.app_version }}
+          OS_VERSION: ${{ inputs.os_version }}
+          OE_VERSION: ${{ inputs.oe_version }}
+          SCENARIO: ${{ inputs.scenario }}
+        run: python scripts/harness/run.py adversarial-pair --role image
+
+      - name: Validate meta.yml
+        run: python scripts/harness/validate_meta.py
+
+      - name: Upload generated files
+        uses: actions/upload-artifact@v4
+        with:
+          name: generated-files
+          path: |
+            */**/Dockerfile
+            */meta.yml
+            */README.md
+            */doc/
+
+  build-and-test:
+    needs: ${{ inputs.retry && '' || 'generate' }}
+    if: ${{ !inputs.retry || always() }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - runner: [self-hosted, Linux, x64]
+            platform: linux/amd64
+          - runner: [self-hosted, Linux, ARM64]
+            platform: linux/arm64
+    runs-on: ${{ matrix.arch.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - if: ${{ !inputs.retry }}
+        uses: actions/download-artifact@v4
+        with:
+          name: generated-files
+
+      - name: Lint Dockerfile
+        run: |
+          docker run --rm -i hadolint/hadolint < $(find . -name Dockerfile -not -path '*/.git/*' | head -1)
+
+      - name: Build image
+        run: |
+          set -o pipefail
+          APP="${{ inputs.app }}"
+          docker buildx build \
+            --platform ${{ matrix.arch.platform }} \
+            --tag "openeuler/${APP}:test" \
+            --load \
+            . 2>&1 | tee /tmp/build-${{ matrix.arch.platform }}.log
+
+      - name: Run tests
+        run: |
+          APP="${{ inputs.app }}"
+          python scripts/harness/run.py test --app "$APP" --platform ${{ matrix.arch.platform }}
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.arch.platform }}
+          path: |
+            /tmp/build-${{ matrix.arch.platform }}.log
+            **/results/**/*.junit.xml
+
+  fix-loop:
+    needs: build-and-test
+    if: failure()
+    runs-on: [self-hosted, Linux, x64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: test-results-*
+          merge-multiple: true
+
+      - name: Run Fixer
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python scripts/harness/run.py fix
+
+      - name: Rebuild and retest
+        uses: ./.github/workflows/verify.yml
+        with:
+          app: ${{ inputs.app }}
+          scenario: ${{ inputs.scenario }}
+          retry: true

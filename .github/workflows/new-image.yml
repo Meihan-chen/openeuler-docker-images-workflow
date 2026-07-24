@@ -1,0 +1,148 @@
+name: New Image
+
+on:
+  issues:
+    types: [opened, labeled]
+
+env:
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  triage:
+    runs-on: [self-hosted, Linux, x64]
+    if: contains(github.event.issue.labels.*.name, 'new-image')
+    outputs:
+      package: ${{ steps.parse.outputs.package }}
+      source: ${{ steps.parse.outputs.source }}
+      domain: ${{ steps.parse.outputs.domain }}
+      os_version: ${{ steps.parse.outputs.os_version }}
+      app_version: ${{ steps.parse.outputs.app_version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: parse
+        run: python scripts/harness/parse_issue.py "${{ github.event.issue.body }}" >> "$GITHUB_OUTPUT"
+
+  adversarial-pairs:
+    needs: triage
+    runs-on: [self-hosted, Linux, x64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Image Creator + QA
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          PACKAGE: ${{ needs.triage.outputs.package }}
+          SOURCE: ${{ needs.triage.outputs.source }}
+          DOMAIN: ${{ needs.triage.outputs.domain }}
+          OS_VERSION: ${{ needs.triage.outputs.os_version }}
+          APP_VERSION: ${{ needs.triage.outputs.app_version }}
+        run: python scripts/harness/run.py adversarial-pair --role image
+
+      - name: Run Testcase Creator + QA
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python scripts/harness/run.py adversarial-pair --role testcase
+
+      - name: Validate meta.yml
+        run: python scripts/harness/validate_meta.py
+
+      - name: Upload generated files
+        uses: actions/upload-artifact@v4
+        with:
+          name: generated-files
+          path: |
+            */**/Dockerfile
+            */meta.yml
+            */README.md
+            */doc/
+            */tests/
+
+  build-and-test:
+    needs: adversarial-pairs
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - runner: [self-hosted, Linux, x64]
+            platform: linux/amd64
+          - runner: [self-hosted, Linux, ARM64]
+            platform: linux/arm64
+    runs-on: ${{ matrix.arch.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: generated-files
+
+      - name: Build image
+        run: |
+          set -o pipefail
+          APP=$(python scripts/harness/run.py get-app-name)
+          docker buildx build \
+            --platform ${{ matrix.arch.platform }} \
+            --tag "openeuler/${APP}:test" \
+            --load \
+            . 2>&1 | tee /tmp/build-${{ matrix.arch.platform }}.log
+
+      - name: Run tests
+        run: |
+          APP=$(python scripts/harness/run.py get-app-name)
+          python scripts/harness/run.py test --app "$APP" --platform ${{ matrix.arch.platform }}
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.arch.platform }}
+          path: |
+            /tmp/build-${{ matrix.arch.platform }}.log
+            **/results/**/*.junit.xml
+
+  fix-loop:
+    needs: build-and-test
+    if: failure()
+    runs-on: [self-hosted, Linux, x64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: test-results-*
+          merge-multiple: true
+
+      - name: Run Fixer
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python scripts/harness/run.py fix
+
+      - name: Rebuild and retest
+        uses: ./.github/workflows/verify.yml
+        with:
+          retry: true
+
+  compose-pr:
+    needs: [build-and-test, fix-loop]
+    if: always() && !failure()
+    runs-on: [self-hosted, Linux, x64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: test-results-*
+          merge-multiple: true
+
+      - name: Gate diff
+        run: python scripts/harness/gate_diff.py
+
+      - name: Compose PR
+        env:
+          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+        run: python scripts/harness/compose_pr.py --scenario new-image
+
+      - name: Create PR on GitCode
+        env:
+          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+        run: |
+          python scripts/utils/gitcode.py pr create \
+            --title "$(cat /tmp/pr-title)" \
+            --body-file /tmp/pr-body.md \
+            --head "$(git branch --show-current)"

@@ -1,0 +1,87 @@
+name: openEuler Upgrade
+
+on:
+  repository_dispatch:
+    types: [oe-new-version]
+  workflow_dispatch:
+
+env:
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  check-oe-version:
+    runs-on: [self-hosted, Linux, x64]
+    outputs:
+      new_oe_version: ${{ steps.check.outputs.version }}
+      apps: ${{ steps.check.outputs.apps }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        run: |
+          RESULT=$(python scripts/harness/query_version.py --check-oe --format json)
+          echo "version=$(echo "$RESULT" | python3 -c 'import sys,json; print(json.load(sys.stdin)["version"])')" >> "$GITHUB_OUTPUT"
+          echo "apps=$(echo "$RESULT" | python3 -c 'import sys,json; print(json.dumps(json.load(sys.stdin)["apps"]))')" >> "$GITHUB_OUTPUT"
+
+  upgrade:
+    needs: check-oe-version
+    if: needs.check-oe-version.outputs.new_oe_version != ''
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ vars.MAX_PARALLEL_IMAGES || 4 }}
+      matrix:
+        app: ${{ fromJSON(needs.check-oe-version.outputs.apps) }}
+    uses: ./.github/workflows/verify.yml
+    with:
+      app: ${{ matrix.app }}
+      oe_version: ${{ needs.check-oe-version.outputs.new_oe_version }}
+      scenario: oe-upgrade
+
+  compose-batch-pr:
+    needs: upgrade
+    if: always()
+    runs-on: [self-hosted, Linux, x64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: test-results-*
+          merge-multiple: true
+
+      - name: Compose batch PR
+        env:
+          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+          OE_VERSION: ${{ needs.check-oe-version.outputs.new_oe_version }}
+        run: python scripts/harness/compose_pr.py --scenario oe-upgrade --oe-version "$OE_VERSION"
+
+      - name: Create PR on GitCode
+        env:
+          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+        run: |
+          python scripts/utils/gitcode.py pr create \
+            --title "$(cat /tmp/pr-title)" \
+            --body-file /tmp/pr-body.md \
+            --head "$(git branch --show-current)"
+
+  failure-report:
+    needs: upgrade
+    if: failure()
+    runs-on: [self-hosted, Linux, x64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: test-results-*
+          merge-multiple: true
+
+      - name: Generate failure report
+        run: python scripts/harness/run.py report-failures --oe-version "$OE_VERSION"
+
+      - name: Create failure issue on GitCode
+        env:
+          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+          OE_VERSION: ${{ needs.check-oe-version.outputs.new_oe_version }}
+        run: |
+          python scripts/utils/gitcode.py issue create \
+            --title "[oe-upgrade] Failure report for openEuler $OE_VERSION" \
+            --body-file /tmp/failure-report.md \
+            --labels "oe-upgrade,needs-human-review"

@@ -50,3 +50,7 @@ openEuler社区有如下两种分类：
 - 测试用例生成器：https://github.com/Tian-Fantasea/OPENEULER-DOCKER-AUTOPILOT/blob/main/.github/agents/image-tester.md
 
 4. Gitcode API 文档：https://docs.gitcode.com/docs/apis/
+
+5. openEuler 应用容器镜像升级：https://github.com/opensourceways/easysoftware-autoupgrade/tree/release/bugfix-appupdate
+
+6. openEuler 应用的上游版本监控：https://easysoftware-monitoring.test.osinfra.cn/ ， 以及源码实现：https://github.com/opensourceways/anitya ， 其中 easysoftware-autoupgrade 的版本监控调的就是这个服务
