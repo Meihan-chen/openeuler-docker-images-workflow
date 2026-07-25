@@ -39,7 +39,8 @@ jobs:
 
       - name: Run adversarial pair (image)
         env:
-          ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
+          ANTHROPIC_BASE_URL: https://api.deepseek.com/anthropic
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.DEEPSEEK_API_KEY }}
           APP: ${{ inputs.app }}
           APP_VERSION: ${{ inputs.app_version }}
           OS_VERSION: ${{ inputs.os_version }}

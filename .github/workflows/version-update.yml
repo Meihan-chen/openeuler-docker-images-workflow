@@ -65,7 +65,8 @@ jobs:
           pattern: test-results-${{ matrix.app.name }}-*
           merge-multiple: true
       - env:
-          ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
+          ANTHROPIC_BASE_URL: https://api.deepseek.com/anthropic
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.DEEPSEEK_API_KEY }}
         run: python scripts/harness/run.py fix
 
   verify-r2:
@@ -94,7 +95,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - env:
-          ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
+          ANTHROPIC_BASE_URL: https://api.deepseek.com/anthropic
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.DEEPSEEK_API_KEY }}
         run: python scripts/harness/run.py fix
 
   verify-r3:

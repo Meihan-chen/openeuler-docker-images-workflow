@@ -47,10 +47,10 @@ jobs:
           echo "::endgroup::"
 
           echo "::group::Secrets check"
-          if [ -z "$ANTHROPIC_AUTH_TOKEN" ]; then
-            echo "::warning::ANTHROPIC_AUTH_TOKEN not set — Agent calls will fail"
+          if [ -z "$DEEPSEEK_API_KEY" ]; then
+            echo "::warning::DEEPSEEK_API_KEY not set — Agent calls will fail"
           else
-            echo "ANTHROPIC_AUTH_TOKEN: set (${#ANTHROPIC_AUTH_TOKEN} chars)"
+            echo "DEEPSEEK_API_KEY: set (${#DEEPSEEK_API_KEY} chars)"
           fi
           if [ -z "$GITCODE_TOKEN" ]; then
             echo "::warning::GITCODE_TOKEN not set — PR creation will fail"
@@ -59,7 +59,8 @@ jobs:
           fi
           echo "::endgroup::"
         env:
-          ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
+          ANTHROPIC_BASE_URL: https://api.deepseek.com/anthropic
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.DEEPSEEK_API_KEY }}
           GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
 
       - name: Install deps
@@ -114,7 +115,8 @@ jobs:
     needs: test-deterministic
     runs-on: ubuntu-latest
     env:
-      ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
+      ANTHROPIC_BASE_URL: https://api.deepseek.com/anthropic
+      ANTHROPIC_AUTH_TOKEN: ${{ secrets.DEEPSEEK_API_KEY }}
     steps:
       - uses: actions/checkout@v4
 

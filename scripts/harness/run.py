@@ -24,7 +24,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 AGENTS_DIR = PROJECT_ROOT / ".github" / "agents"
 
 # opencode configuration
-OPENCODE_MODEL = os.environ.get("OPENCODE_MODEL", "claude-sonnet-4-6")
+OPENCODE_MODEL = os.environ.get("OPENCODE_MODEL", "deepseek-chat")
 OPENCODE_TIMEOUT = int(os.environ.get("OPENCODE_TIMEOUT", "900"))  # 15 min default
 OPENCODE_STALE_SECONDS = 120
 
