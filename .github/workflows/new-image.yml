@@ -104,9 +104,9 @@ jobs:
       fail-fast: false
       matrix:
         arch:
-          - runner: [self-hosted, Linux, x64]
+          - runner: ${{ vars.RUNNER_X64 || 'ubuntu-latest' }}
             platform: linux/amd64
-          - runner: [self-hosted, Linux, ARM64]
+          - runner: ${{ vars.RUNNER_ARM64 || 'ubuntu-latest' }}
             platform: linux/arm64
     runs-on: ${{ matrix.arch.runner }}
     steps:
@@ -159,9 +159,9 @@ jobs:
       fail-fast: false
       matrix:
         arch:
-          - runner: [self-hosted, Linux, x64]
+          - runner: ${{ vars.RUNNER_X64 || 'ubuntu-latest' }}
             platform: linux/amd64
-          - runner: [self-hosted, Linux, ARM64]
+          - runner: ${{ vars.RUNNER_ARM64 || 'ubuntu-latest' }}
             platform: linux/arm64
     runs-on: ${{ matrix.arch.runner }}
     steps:
@@ -211,9 +211,9 @@ jobs:
       fail-fast: false
       matrix:
         arch:
-          - runner: [self-hosted, Linux, x64]
+          - runner: ${{ vars.RUNNER_X64 || 'ubuntu-latest' }}
             platform: linux/amd64
-          - runner: [self-hosted, Linux, ARM64]
+          - runner: ${{ vars.RUNNER_ARM64 || 'ubuntu-latest' }}
             platform: linux/arm64
     runs-on: ${{ matrix.arch.runner }}
     steps:
