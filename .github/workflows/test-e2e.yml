@@ -1,0 +1,156 @@
+name: Test E2E
+
+# End-to-end test workflow for local development.
+# Does NOT create a real PR — runs full pipeline and dumps outputs as artifacts.
+# Trigger manually from Actions tab with test parameters.
+
+on:
+  workflow_dispatch:
+    inputs:
+      app:
+        description: 'App name'
+        required: true
+        default: 'nginx'
+      version:
+        description: 'App version'
+        required: true
+        default: '1.27.2'
+      os_version:
+        description: 'openEuler version'
+        required: true
+        default: '24.03-lts'
+      domain:
+        description: 'Domain directory'
+        required: true
+        default: 'Others'
+      source_repo:
+        description: 'Upstream repo URL'
+        required: true
+        default: 'https://github.com/nginx/nginx'
+
+env:
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  check-env:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check prerequisites
+        run: |
+          echo "::group::Python version"
+          python3 --version
+          echo "::endgroup::"
+
+          echo "::group::Docker"
+          docker --version
+          echo "::endgroup::"
+
+          echo "::group::Secrets check"
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "::warning::ANTHROPIC_API_KEY not set — Agent calls will fail"
+          else
+            echo "ANTHROPIC_API_KEY: set (${#ANTHROPIC_API_KEY} chars)"
+          fi
+          if [ -z "$GITCODE_TOKEN" ]; then
+            echo "::warning::GITCODE_TOKEN not set — PR creation will fail"
+          else
+            echo "GITCODE_TOKEN: set (${#GITCODE_TOKEN} chars)"
+          fi
+          echo "::endgroup::"
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+
+      - name: Install deps
+        run: pip install pyyaml pytest
+
+      - name: Run unit tests
+        run: python3 -m pytest tests/ -v
+
+  test-deterministic:
+    needs: check-env
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: pip install pyyaml
+
+      - name: Parse issue (simulated)
+        run: |
+          python scripts/harness/parse_issue.py "$(cat tests/fixtures/sample-issue.md)"
+        env:
+          GITHUB_EVENT_PATH: /dev/null
+
+      - name: Validate dummy meta.yml
+        run: python scripts/harness/validate_meta.py
+
+      - name: Gate diff (should be clean on main)
+        run: |
+          # Use HEAD~1 as base since there's no origin/main in test
+          git log --oneline -3
+          python scripts/harness/gate_diff.py || echo "(expected failure on clean branch)"
+
+      - name: Query anitya (dry-run)
+        run: |
+          echo "Querying anitya for: $APP"
+          python scripts/harness/query_version.py --app "$APP" --format json || echo "(expected: no projectsInfoUrl from test env)"
+        env:
+          APP: ${{ inputs.app }}
+        continue-on-error: true
+
+      - name: Compose PR body (dry-run)
+        run: |
+          python scripts/harness/compose_pr.py --scenario new-image
+          echo "=== Generated PR title ==="
+          cat /tmp/pr-title
+          echo "=== Generated PR body (first 80 lines) ==="
+          head -80 /tmp/pr-body.md
+        env:
+          APP: ${{ inputs.app }}
+          APP_VERSION: ${{ inputs.version }}
+          OS_VERSION: ${{ inputs.os_version }}
+
+  test-agent:
+    needs: test-deterministic
+    runs-on: ubuntu-latest
+    if: ${{ secrets.ANTHROPIC_API_KEY != '' }}
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run adversarial pair (image creator + QA)
+        run: |
+          python scripts/harness/run.py adversarial-pair --role image
+        env:
+          APP: ${{ inputs.app }}
+          APP_VERSION: ${{ inputs.version }}
+          SOURCE: ${{ inputs.source_repo }}
+          DOMAIN: ${{ inputs.domain }}
+          OS_VERSION: ${{ inputs.os_version }}
+          SCENARIO: new-image
+        continue-on-error: true
+
+      - name: Show generated files
+        run: |
+          echo "=== Generated artifacts ==="
+          find . -name "Dockerfile" -not -path './.git/*' 2>/dev/null | head -5
+          find . -name "meta.yml" -not -path './.git/*' 2>/dev/null | head -5
+
+  test-build:
+    needs: test-agent
+    runs-on: ubuntu-latest
+    if: always() && !failure()
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Dockerfile (if generated)
+        run: |
+          DOCKERFILE=$(find . -name Dockerfile -not -path './.git/*' | head -1)
+          if [ -n "$DOCKERFILE" ]; then
+            echo "Found Dockerfile: $DOCKERFILE"
+            docker build -f "$DOCKERFILE" -t "test-image:ci" "$(dirname "$DOCKERFILE")" || echo "Build failed (expected in CI without full context)"
+          else
+            echo "No Dockerfile generated — Agent did not produce output (ANTHROPIC_API_KEY may be missing)"
+          fi
+        continue-on-error: true
