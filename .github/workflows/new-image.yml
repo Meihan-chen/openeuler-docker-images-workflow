@@ -1,7 +1,7 @@
 name: New Image
 
-# Triggered by GitCode Issue with [new-image] label.
-# Standalone: runs adversarial pairs, then build+test+fix loop (3 rounds), then PR.
+# Triggered by GitCode Issue with [new-image] label or manually via workflow_dispatch.
+# Standalone: adversarial pairs, then build+test+fix loop (3 rounds), then PR.
 
 on:
   issues:
@@ -93,7 +93,6 @@ jobs:
             */doc/
             */tests/
 
-  # --- Round 1: build + test ---
   verify-r1:
     needs: generate
     strategy:
@@ -108,18 +107,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
-        with: { name: generated-files }
+        with:
+          name: generated-files
 
       - name: Build
+        env:
+          APP: ${{ needs.triage.outputs.package }}
         run: |
           set -o pipefail
           docker buildx build --platform ${{ matrix.arch.platform }} \
             --tag "openeuler/${APP}:test" --load . 2>&1 | tee /tmp/build-r1-${{ matrix.arch.platform }}.log
-        env: { APP: ${{ needs.triage.outputs.package }} }
 
       - name: Test
+        env:
+          APP: ${{ needs.triage.outputs.package }}
         run: python scripts/harness/run.py test --app "$APP" --platform ${{ matrix.arch.platform }}
-        env: { APP: ${{ needs.triage.outputs.package }} }
 
       - name: Upload results
         if: always()
@@ -130,7 +132,6 @@ jobs:
             /tmp/build-r1-${{ matrix.arch.platform }}.log
             **/results/**/*.junit.xml
 
-  # --- Fix round 1 ---
   fix-r1:
     needs: verify-r1
     if: failure()
@@ -138,11 +139,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
-        with: { pattern: test-results-r1-*, merge-multiple: true }
-      - run: python scripts/harness/run.py fix
-        env: { ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }} }
+        with:
+          pattern: test-results-r1-*
+          merge-multiple: true
+      - env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python scripts/harness/run.py fix
 
-  # --- Round 2: re-build + re-test (fixer changes applied) ---
   verify-r2:
     needs: fix-r1
     if: always() && !failure()
@@ -159,15 +162,17 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build
+        env:
+          APP: ${{ needs.triage.outputs.package }}
         run: |
           set -o pipefail
           docker buildx build --platform ${{ matrix.arch.platform }} \
             --tag "openeuler/${APP}:test" --load . 2>&1 | tee /tmp/build-r2-${{ matrix.arch.platform }}.log
-        env: { APP: ${{ needs.triage.outputs.package }} }
 
       - name: Test
+        env:
+          APP: ${{ needs.triage.outputs.package }}
         run: python scripts/harness/run.py test --app "$APP" --platform ${{ matrix.arch.platform }}
-        env: { APP: ${{ needs.triage.outputs.package }} }
 
       - name: Upload results
         if: always()
@@ -178,7 +183,6 @@ jobs:
             /tmp/build-r2-${{ matrix.arch.platform }}.log
             **/results/**/*.junit.xml
 
-  # --- Fix round 2 ---
   fix-r2:
     needs: verify-r2
     if: failure()
@@ -186,11 +190,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
-        with: { pattern: test-results-r2-*, merge-multiple: true }
-      - run: python scripts/harness/run.py fix
-        env: { ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }} }
+        with:
+          pattern: test-results-r2-*
+          merge-multiple: true
+      - env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python scripts/harness/run.py fix
 
-  # --- Round 3: re-build + re-test ---
   verify-r3:
     needs: fix-r2
     if: always() && !failure()
@@ -207,15 +213,17 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build
+        env:
+          APP: ${{ needs.triage.outputs.package }}
         run: |
           set -o pipefail
           docker buildx build --platform ${{ matrix.arch.platform }} \
             --tag "openeuler/${APP}:test" --load . 2>&1 | tee /tmp/build-r3-${{ matrix.arch.platform }}.log
-        env: { APP: ${{ needs.triage.outputs.package }} }
 
       - name: Test
+        env:
+          APP: ${{ needs.triage.outputs.package }}
         run: python scripts/harness/run.py test --app "$APP" --platform ${{ matrix.arch.platform }}
-        env: { APP: ${{ needs.triage.outputs.package }} }
 
       - name: Upload results
         if: always()
@@ -226,7 +234,6 @@ jobs:
             /tmp/build-r3-${{ matrix.arch.platform }}.log
             **/results/**/*.junit.xml
 
-  # --- Fix round 3 (last attempt, no re-verify after this) ---
   fix-r3:
     needs: verify-r3
     if: failure()
@@ -234,9 +241,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
-        with: { pattern: test-results-r3-*, merge-multiple: true }
-      - run: python scripts/harness/run.py fix
-        env: { ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }} }
+        with:
+          pattern: test-results-r3-*
+          merge-multiple: true
+      - env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python scripts/harness/run.py fix
 
   needs-human:
     needs: [verify-r1, verify-r2, verify-r3, fix-r3]
@@ -254,13 +264,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
-        with: { pattern: test-results-r*, merge-multiple: true }
+        with:
+          pattern: test-results-r*
+          merge-multiple: true
       - run: python scripts/harness/gate_diff.py
-      - run: python scripts/harness/compose_pr.py --scenario new-image
-        env: { GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }} }
-      - run: |
+      - env:
+          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+        run: python scripts/harness/compose_pr.py --scenario new-image
+      - env:
+          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+        run: |
           python scripts/utils/gitcode.py pr create \
             --title "$(cat /tmp/pr-title)" \
             --body-file /tmp/pr-body.md \
             --head "$(git branch --show-current)"
-        env: { GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }} }

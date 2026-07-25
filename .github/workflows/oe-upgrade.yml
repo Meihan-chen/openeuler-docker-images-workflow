@@ -55,9 +55,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
-        with: { pattern: test-results-${{ matrix.app }}-*, merge-multiple: true }
-      - run: python scripts/harness/run.py fix
-        env: { ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }} }
+        with:
+          pattern: test-results-${{ matrix.app }}-*
+          merge-multiple: true
+      - env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python scripts/harness/run.py fix
 
   verify-r2:
     needs: fix-r1
@@ -81,8 +84,9 @@ jobs:
     runs-on: [self-hosted, Linux, x64]
     steps:
       - uses: actions/checkout@v4
-      - run: python scripts/harness/run.py fix
-        env: { ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }} }
+      - env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python scripts/harness/run.py fix
 
   verify-r3:
     needs: fix-r2
@@ -107,18 +111,19 @@ jobs:
       - uses: actions/download-artifact@v4
         with: { pattern: test-results-*, merge-multiple: true }
       - run: python scripts/harness/gate_diff.py
-      - run: |
-          python scripts/harness/compose_pr.py --scenario oe-upgrade \
-            --oe-version "$OE_VERSION"
-        env:
+      - env:
           GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
           OE_VERSION: ${{ needs.check.outputs.new_oe_version }}
-      - run: |
+        run: |
+          python scripts/harness/compose_pr.py --scenario oe-upgrade \
+            --oe-version "$OE_VERSION"
+      - env:
+          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+        run: |
           python scripts/utils/gitcode.py pr create \
             --title "$(cat /tmp/pr-title)" \
             --body-file /tmp/pr-body.md \
             --head "$(git branch --show-current)"
-        env: { GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }} }
 
   failure-report:
     needs: [verify, verify-r2, verify-r3, check]
@@ -128,13 +133,14 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with: { pattern: test-results-*, merge-multiple: true }
-      - run: python scripts/harness/run.py report-failures --oe-version "$OE_VERSION"
-        env: { OE_VERSION: ${{ needs.check.outputs.new_oe_version }} }
-      - run: |
+      - env:
+          OE_VERSION: ${{ needs.check.outputs.new_oe_version }}
+        run: python scripts/harness/run.py report-failures --oe-version "$OE_VERSION"
+      - env:
+          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+          OE_VERSION: ${{ needs.check.outputs.new_oe_version }}
+        run: |
           python scripts/utils/gitcode.py issue create \
             --title "[oe-upgrade] Failure report for openEuler $OE_VERSION" \
             --body-file /tmp/failure-report.md \
             --labels "oe-upgrade,needs-human-review"
-        env:
-          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
-          OE_VERSION: ${{ needs.check.outputs.new_oe_version }}

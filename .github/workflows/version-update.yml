@@ -59,9 +59,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
-        with: { pattern: test-results-${{ matrix.app.name }}-*, merge-multiple: true }
-      - run: python scripts/harness/run.py fix
-        env: { ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }} }
+        with:
+          pattern: test-results-${{ matrix.app.name }}-*
+          merge-multiple: true
+      - env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python scripts/harness/run.py fix
 
   verify-r2:
     needs: fix-r1
@@ -88,8 +91,9 @@ jobs:
     runs-on: [self-hosted, Linux, x64]
     steps:
       - uses: actions/checkout@v4
-      - run: python scripts/harness/run.py fix
-        env: { ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }} }
+      - env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python scripts/harness/run.py fix
 
   verify-r3:
     needs: fix-r2
@@ -115,11 +119,13 @@ jobs:
       - uses: actions/download-artifact@v4
         with: { pattern: test-results-*, merge-multiple: true }
       - run: python scripts/harness/gate_diff.py
-      - run: python scripts/harness/compose_pr.py --scenario version-update
-        env: { GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }} }
-      - run: |
+      - env:
+          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+        run: python scripts/harness/compose_pr.py --scenario version-update
+      - env:
+          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+        run: |
           python scripts/utils/gitcode.py pr create \
             --title "$(cat /tmp/pr-title)" \
             --body-file /tmp/pr-body.md \
             --head "$(git branch --show-current)"
-        env: { GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }} }
