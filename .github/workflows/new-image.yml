@@ -6,28 +6,61 @@ name: New Image
 on:
   issues:
     types: [opened, labeled]
+  workflow_dispatch:
+    inputs:
+      package:
+        description: 'App name'
+        required: true
+        default: 'nginx'
+      source:
+        description: 'Upstream repo URL'
+        required: true
+        default: 'https://github.com/nginx/nginx'
+      domain:
+        description: 'Domain dir'
+        required: true
+        default: 'Cloud'
+      os_version:
+        description: 'openEuler version'
+        required: true
+        default: '24.03-lts'
+      app_version:
+        description: 'App version'
+        required: true
+        default: '1.27.2'
 
 env:
   PYTHONUNBUFFERED: "1"
 
 jobs:
   triage:
-    runs-on: [self-hosted, Linux, x64]
-    if: contains(github.event.issue.labels.*.name, 'new-image')
+    runs-on: ubuntu-latest
+    if: |
+      contains(github.event.issue.labels.*.name, 'new-image') ||
+      github.event_name == 'workflow_dispatch'
     outputs:
-      package: ${{ steps.parse.outputs.package }}
-      source: ${{ steps.parse.outputs.source }}
-      domain: ${{ steps.parse.outputs.domain }}
-      os_version: ${{ steps.parse.outputs.os_version }}
-      app_version: ${{ steps.parse.outputs.app_version }}
+      package: ${{ steps.set.outputs.package }}
+      source: ${{ steps.set.outputs.source }}
+      domain: ${{ steps.set.outputs.domain }}
+      os_version: ${{ steps.set.outputs.os_version }}
+      app_version: ${{ steps.set.outputs.app_version }}
     steps:
       - uses: actions/checkout@v4
-      - id: parse
-        run: python scripts/harness/parse_issue.py "${{ github.event.issue.body }}" >> "$GITHUB_OUTPUT"
+      - id: set
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "package=${{ inputs.package }}" >> "$GITHUB_OUTPUT"
+            echo "source=${{ inputs.source }}" >> "$GITHUB_OUTPUT"
+            echo "domain=${{ inputs.domain }}" >> "$GITHUB_OUTPUT"
+            echo "os_version=${{ inputs.os_version }}" >> "$GITHUB_OUTPUT"
+            echo "app_version=${{ inputs.app_version }}" >> "$GITHUB_OUTPUT"
+          else
+            python scripts/harness/parse_issue.py "${{ github.event.issue.body }}" >> "$GITHUB_OUTPUT"
+          fi
 
   generate:
     needs: triage
-    runs-on: [self-hosted, Linux, x64]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -101,7 +134,7 @@ jobs:
   fix-r1:
     needs: verify-r1
     if: failure()
-    runs-on: [self-hosted, Linux, x64]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -149,7 +182,7 @@ jobs:
   fix-r2:
     needs: verify-r2
     if: failure()
-    runs-on: [self-hosted, Linux, x64]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -197,7 +230,7 @@ jobs:
   fix-r3:
     needs: verify-r3
     if: failure()
-    runs-on: [self-hosted, Linux, x64]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -208,7 +241,7 @@ jobs:
   needs-human:
     needs: [verify-r1, verify-r2, verify-r3, fix-r3]
     if: always() && failure()
-    runs-on: [self-hosted, Linux, x64]
+    runs-on: ubuntu-latest
     steps:
       - run: |
           echo "3 fix rounds exhausted, still failing"
@@ -217,7 +250,7 @@ jobs:
   compose-pr:
     needs: [verify-r1, verify-r2, verify-r3]
     if: always() && !failure()
-    runs-on: [self-hosted, Linux, x64]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
