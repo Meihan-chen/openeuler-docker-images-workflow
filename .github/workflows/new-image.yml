@@ -295,20 +295,53 @@ jobs:
     needs: [verify-r1, verify-r2, verify-r3]
     if: always()
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           pattern: test-results-r*
           merge-multiple: true
-      - run: python scripts/harness/gate_diff.py
-      - env:
-          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
-        run: python scripts/harness/compose_pr.py --scenario new-image
-      - env:
-          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+
+      - name: Diff check
+        run: python scripts/harness/gate_diff.py
+
+      - name: Compose PR body
+        env:
+          PACKAGE: ${{ needs.triage.outputs.package }}
+          APP_VERSION: ${{ needs.triage.outputs.app_version }}
+          OS_VERSION: ${{ needs.triage.outputs.os_version }}
         run: |
-          python scripts/utils/gitcode.py pr create \
+          python scripts/harness/compose_pr.py --scenario new-image
+          echo "=== PR Title ===" && cat /tmp/pr-title
+          echo "=== PR Body (first 20 lines) ===" && head -20 /tmp/pr-body.md
+
+      - name: Create branch and commit
+        id: branch
+        env:
+          PACKAGE: ${{ needs.triage.outputs.package }}
+          APP_VERSION: ${{ needs.triage.outputs.app_version }}
+        run: |
+          BRANCH="auto/${PACKAGE}-${APP_VERSION}-$(date +%Y%m%d%H%M%S)"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          git config user.name "openeuler-bot"
+          git config user.email "bot@openeuler.org"
+          git checkout -b "$BRANCH"
+          git add -A
+          git diff --cached --stat
+          git commit -m "[new-image] Add ${PACKAGE} ${APP_VERSION} container image" || echo "nothing to commit"
+
+      - name: Push and create PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.branch.outputs.branch }}
+        run: |
+          git push origin "$BRANCH" 2>&1 || echo "push failed (may already exist)"
+          gh pr create \
             --title "$(cat /tmp/pr-title)" \
             --body-file /tmp/pr-body.md \
-            --head "$(git branch --show-current)"
+            --head "$BRANCH" \
+            --base main \
+            --label "auto-generated" 2>&1 || echo "PR creation failed — check if PR already exists"
