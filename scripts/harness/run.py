@@ -25,8 +25,8 @@ AGENTS_DIR = PROJECT_ROOT / ".github" / "agents"
 
 # opencode configuration
 OPENCODE_MODEL = os.environ.get("OPENCODE_MODEL", "deepseek/deepseek-v4-flash")
-OPENCODE_TIMEOUT = int(os.environ.get("OPENCODE_TIMEOUT", "900"))  # 15 min default
-OPENCODE_STALE_SECONDS = 120
+OPENCODE_TIMEOUT = int(os.environ.get("OPENCODE_TIMEOUT", "1800"))  # 30 min default
+OPENCODE_STALE_SECONDS = 300
 
 
 def _check_opencode() -> None:
@@ -152,7 +152,7 @@ def _run_adversarial_pair(role: str) -> None:
     domain = os.environ.get("DOMAIN", "")
     os_ver = os.environ.get("OS_VERSION", os.environ.get("OE_VERSION", ""))
     app_ver = os.environ.get("APP_VERSION", "")
-    os_tag = os_ver.lower().replace(".", "").replace("-", "")
+    os_tag = "oe" + os_ver.lower().replace(".", "").replace("-", "")
 
     for round_num in range(1, 3):
         print(f"\n[{role}] Round {round_num}: Creator running...")
