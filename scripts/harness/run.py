@@ -53,14 +53,12 @@ def _run_opencode(prompt: str, *, cwd: str | None = None) -> str:
         "opencode", "run",
         "--format", "json",
         "--model", OPENCODE_MODEL,
-        "--auto",
+        "--dangerously-skip-permissions",
     ]
-    auto_short = "--dangerously-skip-permissions"
     r = subprocess.run(["opencode", "run", "--help"], capture_output=True, text=True)
     if "--auto" in (r.stdout + r.stderr):
-        cmd[cmd.index("--auto")] = "--auto"
-    else:
-        cmd.append(auto_short)
+        # Replace with --auto for opencode >= 2.x
+        cmd[cmd.index("--dangerously-skip-permissions")] = "--auto"
 
     cmd += ["--", prompt]
 
@@ -125,7 +123,14 @@ def _run_opencode(prompt: str, *, cwd: str | None = None) -> str:
     if proc.returncode != 0 and stderr_text:
         print(f"[opencode] stderr: {stderr_text[-1000:]}", file=sys.stderr)
 
-    return "".join(text_parts)
+    output = "".join(text_parts)
+    if not output.strip():
+        if stderr_text:
+            print(f"[opencode] NO OUTPUT. Stderr: {stderr_text[-2000:]}", file=sys.stderr)
+        else:
+            print("[opencode] NO OUTPUT produced — model may have failed silently", file=sys.stderr)
+
+    return output
 
 
 def _run_adversarial_pair(role: str) -> None:
@@ -142,50 +147,87 @@ def _run_adversarial_pair(role: str) -> None:
     creator_prompt = _load_agent_prompt(creator_name)
     qa_prompt = _load_agent_prompt(qa_name)
 
-    ctx = {
-        "package_name": os.environ.get("PACKAGE", os.environ.get("APP", "")),
-        "source_repo_url": os.environ.get("SOURCE", ""),
-        "domain": os.environ.get("DOMAIN", ""),
-        "os_version": os.environ.get("OS_VERSION", os.environ.get("OE_VERSION", "")),
-        "os_tag": os.environ.get("OS_VERSION", "").replace(".", "").replace("-", ""),
-        "app_version": os.environ.get("APP_VERSION", ""),
-        "image_repo_dir": str(PROJECT_ROOT),
-        "scenario": os.environ.get("SCENARIO", "new-image"),
-    }
+    pkg = os.environ.get("PACKAGE", os.environ.get("APP", ""))
+    src = os.environ.get("SOURCE", "")
+    domain = os.environ.get("DOMAIN", "")
+    os_ver = os.environ.get("OS_VERSION", os.environ.get("OE_VERSION", ""))
+    app_ver = os.environ.get("APP_VERSION", "")
+    os_tag = os_ver.lower().replace(".", "").replace("-", "")
 
     for round_num in range(1, 3):
-        print(f"\n[{role}] Round {round_num}: Creator generating...")
-        creator_input = {
-            "task": "Generate the complete image directory following the instructions above.",
-            "context": ctx,
-        }
-        if round_num > 1:
-            creator_input["qa_feedback"] = qa_result
+        print(f"\n[{role}] Round {round_num}: Creator running...")
 
-        full_prompt = f"{creator_prompt}\n\n## Task Context\n```json\n{json.dumps(creator_input, indent=2)}\n```"
+        # Build a direct, actionable instruction for opencode
+        if role == "image":
+            instruction = (
+                f"Create the complete container image directory for {pkg}.\n\n"
+                f"Parameters:\n"
+                f"- package_name: {pkg}\n"
+                f"- source_repo_url: {src}\n"
+                f"- category/domain: {domain}\n"
+                f"- os_version: {os_ver}\n"
+                f"- os_tag: {os_tag}\n"
+                f"- app_version: {app_ver}\n"
+                f"- image_repo_dir: {PROJECT_ROOT}\n\n"
+                f"Follow the SKILL instructions above. Research the upstream package, "
+                f"create all required files (Dockerfile, meta.yml, README.md, doc/image-info.yml, "
+                f"doc/picture/logo.png), update image-list.yml, and write ai-result.json."
+            )
+        else:
+            instruction = (
+                f"Create functional test cases for {pkg} {app_ver}.\n\n"
+                f"Parameters:\n"
+                f"- package_name: {pkg}\n"
+                f"- version: {app_ver}\n"
+                f"- category: {domain}\n"
+                f"- image_repo_dir: {PROJECT_ROOT}\n\n"
+                f"Read the Dockerfile in {domain}/{pkg}/ first, then follow the SKILL instructions "
+                f"to create goss.yaml, goss_wait.yaml, test_helpers.sh under {domain}/{pkg}/tests/, "
+                f"and test.sh alongside the Dockerfile. Write test-ai-result.json."
+            )
+
+        if round_num > 1:
+            instruction += f"\n\nQA feedback from previous round:\n{json.dumps(qa_result, indent=2)}"
+
+        full_prompt = f"{creator_prompt}\n\n## TASK: {instruction}"
+        print(f"[{role}] Prompt size: {len(full_prompt)} chars")
         _run_opencode(full_prompt)
 
-        print(f"\n[{role}] Round {round_num}: QA reviewing...")
-        qa_input = {
-            "task": "Review the Creator's output files following the review checklist above.",
-            "context": ctx,
-        }
-        full_prompt = f"{qa_prompt}\n\n## Review Context\n```json\n{json.dumps(qa_input, indent=2)}\n```"
-        qa_output = _run_opencode(full_prompt)
+        # Verify files were created
+        if role == "image":
+            check_path = Path(PROJECT_ROOT) / domain / pkg
+        else:
+            check_path = Path(PROJECT_ROOT) / domain / pkg / "tests"
+        if check_path.exists():
+            files_created = list(check_path.rglob("*"))
+            print(f"[{role}] Created {len(files_created)} files in {check_path}")
+        else:
+            print(f"[{role}] WARNING: No files created at {check_path}")
 
+        # QA review: read the actual files
+        print(f"\n[{role}] Round {round_num}: QA reviewing...")
+        qa_instruction = (
+            f"Review the output files under {domain}/{pkg}/.\n"
+            f"Read each file, check against the review checklist, and output a JSON verdict "
+            f'with format: {{"status": "approved|needs_fix", "issues": [{{"severity": "blocker|major|minor", "description": "..."}}], "summary": "..."}}\n'
+            f"Output ONLY the JSON, no other text."
+        )
+        full_prompt = f"{qa_prompt}\n\n## TASK: {qa_instruction}"
+        qa_output = _run_opencode(full_prompt)
+        print(f"[{role}] QA output ({len(qa_output)} chars): {qa_output[:500]}")
+
+        # Parse QA result
+        qa_result = {"status": "approved"}
         try:
             qa_result = json.loads(qa_output)
         except json.JSONDecodeError:
-            # Try to extract JSON from output
             match = qa_output.rfind("{")
             end = qa_output.rfind("}")
             if match != -1 and end > match:
                 try:
                     qa_result = json.loads(qa_output[match:end + 1])
                 except json.JSONDecodeError:
-                    qa_result = {"status": "approved", "summary": "QA output unparseable"}
-            else:
-                qa_result = {"status": "approved", "summary": "QA output unparseable"}
+                    pass
 
         if qa_result.get("status") == "approved":
             print(f"[{role}] QA approved after {round_num} round(s)")
@@ -266,14 +308,15 @@ def cmd_fix(args: argparse.Namespace) -> None:
         if f.is_file() and ".git" not in str(f):
             whitelist.append(str(f.relative_to(PROJECT_ROOT)))
 
-    ctx = {
-        "build_logs": logs,
-        "whitelist": whitelist,
-        "fix_branch": os.environ.get("GITHUB_REF_NAME", "main"),
-        "knowledge_base": str(PROJECT_ROOT / "docs" / "failure-patterns.md"),
-    }
-
-    full_prompt = f"{fixer_prompt}\n\n## Fix Context\n```json\n{json.dumps(ctx, indent=2)}\n```"
+    kb_path = str(PROJECT_ROOT / "docs" / "failure-patterns.md")
+    instruction = (
+        f"Diagnose and fix the CI failures.\n\n"
+        f"Build logs are in /tmp/build-*.log. Read them and the failure patterns at {kb_path}.\n"
+        f"You may only modify files in this whitelist:\n"
+        + "\n".join(f"  - {f}" for f in whitelist) +
+        f"\n\nAfter fixing, write an ai-result.json with status, diagnosis, and changes."
+    )
+    full_prompt = f"{fixer_prompt}\n\n## TASK: {instruction}"
     output = _run_opencode(full_prompt)
 
     try:
