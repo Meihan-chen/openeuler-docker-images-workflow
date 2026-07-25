@@ -1,4 +1,4 @@
-"""End-to-end integration test — simulates full flow with mock agents."""
+"""End-to-end integration test — simulates full flow with mock opencode."""
 
 import json
 import os
@@ -7,9 +7,11 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-# Add harness scripts to path
 sys.path.insert(0, "scripts/harness")
 sys.path.insert(0, "scripts/utils")
+
+# opencode is called via subprocess, mock out _run_opencode
+os.environ["SKIP_OPENCODE_CHECK"] = "1"
 
 
 class TestNewImageFlow:

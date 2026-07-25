@@ -47,10 +47,10 @@ jobs:
           echo "::endgroup::"
 
           echo "::group::Secrets check"
-          if [ -z "$ANTHROPIC_API_KEY" ]; then
-            echo "::warning::ANTHROPIC_API_KEY not set — Agent calls will fail"
+          if [ -z "$ANTHROPIC_AUTH_TOKEN" ]; then
+            echo "::warning::ANTHROPIC_AUTH_TOKEN not set — Agent calls will fail"
           else
-            echo "ANTHROPIC_API_KEY: set (${#ANTHROPIC_API_KEY} chars)"
+            echo "ANTHROPIC_AUTH_TOKEN: set (${#ANTHROPIC_AUTH_TOKEN} chars)"
           fi
           if [ -z "$GITCODE_TOKEN" ]; then
             echo "::warning::GITCODE_TOKEN not set — PR creation will fail"
@@ -59,7 +59,7 @@ jobs:
           fi
           echo "::endgroup::"
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
           GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
 
       - name: Install deps
@@ -114,9 +114,12 @@ jobs:
     needs: test-deterministic
     runs-on: ubuntu-latest
     env:
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install opencode
+        run: curl -fsSL https://opencode.ai/install | bash
 
       - name: Run adversarial pair (image creator + QA)
         run: |
@@ -150,6 +153,6 @@ jobs:
             echo "Found Dockerfile: $DOCKERFILE"
             docker build -f "$DOCKERFILE" -t "test-image:ci" "$(dirname "$DOCKERFILE")" || echo "Build failed (expected in CI without full context)"
           else
-            echo "No Dockerfile generated — Agent did not produce output (ANTHROPIC_API_KEY may be missing)"
+            echo "No Dockerfile generated — Agent did not produce output (ANTHROPIC_AUTH_TOKEN may be missing)"
           fi
         continue-on-error: true

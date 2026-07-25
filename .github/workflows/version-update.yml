@@ -58,12 +58,14 @@ jobs:
     runs-on: [self-hosted, Linux, x64]
     steps:
       - uses: actions/checkout@v4
+      - name: Install opencode
+        run: curl -fsSL https://opencode.ai/install | bash
       - uses: actions/download-artifact@v4
         with:
           pattern: test-results-${{ matrix.app.name }}-*
           merge-multiple: true
       - env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
         run: python scripts/harness/run.py fix
 
   verify-r2:
@@ -92,7 +94,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
         run: python scripts/harness/run.py fix
 
   verify-r3:

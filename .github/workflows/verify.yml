@@ -34,9 +34,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install opencode
+        run: curl -fsSL https://opencode.ai/install | bash
+
       - name: Run adversarial pair (image)
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
           APP: ${{ inputs.app }}
           APP_VERSION: ${{ inputs.app_version }}
           OS_VERSION: ${{ inputs.os_version }}

@@ -64,9 +64,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install opencode
+        run: curl -fsSL https://opencode.ai/install | bash
+
       - name: Image Creator + QA (adversarial pair 1)
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
           PACKAGE: ${{ needs.triage.outputs.package }}
           SOURCE: ${{ needs.triage.outputs.source }}
           DOMAIN: ${{ needs.triage.outputs.domain }}
@@ -76,7 +79,7 @@ jobs:
 
       - name: Testcase Creator + QA (adversarial pair 2)
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
         run: python scripts/harness/run.py adversarial-pair --role testcase
 
       - name: Validate meta
@@ -143,7 +146,7 @@ jobs:
           pattern: test-results-r1-*
           merge-multiple: true
       - env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
         run: python scripts/harness/run.py fix
 
   verify-r2:
@@ -194,7 +197,7 @@ jobs:
           pattern: test-results-r2-*
           merge-multiple: true
       - env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
         run: python scripts/harness/run.py fix
 
   verify-r3:
@@ -245,7 +248,7 @@ jobs:
           pattern: test-results-r3-*
           merge-multiple: true
       - env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
         run: python scripts/harness/run.py fix
 
   needs-human:
