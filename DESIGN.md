@@ -101,14 +101,17 @@ easysoftware 的 SMTP 邮件通知改为 GitHub Actions workflow 通知 + PR/Iss
 ```
 openeuler-docker-images/
 ├── AI/                  # AI 软件栈
+├── Base/                # 基础镜像（openeuler 基础镜像的 Dockerfile）
 ├── Bigdata/             # 大数据组件
 ├── Storage/             # 存储组件
 ├── Database/            # 数据库
 ├── Cloud/               # 云原生
 ├── Distroless/          # 无发行版
 ├── HPC/                 # 高性能计算
+├── Security/            # 安全相关
 ├── Others/              # 其他
-└── tests/               # 测试套件
+├── config/              # 仓库配置
+└── tests/               # 历史测试套件（不再新增，新应用用 <app>/tests/）
 ```
 
 每个场景目录含 `image-list.yml`，维护应用名到路径的映射。
@@ -732,7 +735,7 @@ QA 审查角度：攻击面覆盖 ✓、误报风险 ✓、关键功能验证 �
 | 容器构建 | Docker BuildKit + buildx | 多架构原生构建 |
 | 测试框架 | Goss/dgoss + shUnit2 | 声明式运行时验证 |
 | Lint | Hadolint + Dockle | Dockerfile + 镜像检查 |
-| Git 平台 | GitCode（主） | 兼容 GitHub API v3 |
+| Git 平台 | GitCode（主） | 基于 Gitea `/api/v5`，认证用 `PRIVATE-TOKEN` 头（非 GitHub API v3） |
 | 版本监控 | anitya（通过 `projectsInfoUrl` 查询） | 上游版本跟踪全部委托给 anitya，系统响应 webhook |
 
 ### 9.2 关键约束

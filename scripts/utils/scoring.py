@@ -13,8 +13,8 @@ def calculate_confidence(
     """Calculate confidence score based on weighted factors.
 
     Args:
-        build_success: {"x86_64": bool, "aarch64": bool}
-        test_pass_rate: {"x86_64": 0.0-1.0, "aarch64": 0.0-1.0}
+        build_success: {"amd64": bool, "arm64": bool}
+        test_pass_rate: {"amd64": 0.0-1.0, "arm64": 0.0-1.0}
         hadolint_violations: number of hadolint rule violations
         meta_consistent: whether meta.yml matches actual files
 
@@ -23,14 +23,14 @@ def calculate_confidence(
     """
     # Build success (weight 0.35): both arches must pass
     build_score = 0.35
-    if not build_success.get("x86_64", False):
+    if not build_success.get("amd64", False):
         build_score *= 0.5
-    if not build_success.get("aarch64", False):
+    if not build_success.get("arm64", False):
         build_score *= 0.5
 
     # Test pass rate (weight 0.30): average of both arches
     test_avg = (
-        test_pass_rate.get("x86_64", 0) + test_pass_rate.get("aarch64", 0)
+        test_pass_rate.get("amd64", 0) + test_pass_rate.get("arm64", 0)
     ) / 2
     test_score = 0.30 * test_avg
 
@@ -63,22 +63,24 @@ def calculate_confidence(
 
 def score_from_artifacts(artifacts_dir: str = ".") -> dict:
     """Calculate confidence from collected artifacts."""
-    build_success = {"x86_64": True, "aarch64": True}
-    test_pass_rate = {"x86_64": 1.0, "aarch64": 1.0}
+    build_success = {"amd64": True, "arm64": True}
+    test_pass_rate = {"amd64": 1.0, "arm64": 1.0}
     hadolint_violations = 0
     meta_consistent = True
 
     # Check build logs for failures
     for log in Path(artifacts_dir).glob("**/build-*.log"):
-        content = log.read_text()
-        arch = "x86_64" if "amd64" in log.name else "aarch64"
+        content = log.read_text(errors="replace")
+        arch = "amd64" if "amd64" in log.name else "arm64"
         if "ERROR" in content or "FAILED" in content:
             build_success[arch] = False
 
     # Check test results
     for junit in Path(artifacts_dir).glob("**/*.junit.xml"):
-        content = junit.read_text()
-        arch = junit.stem
+        content = junit.read_text(errors="replace")
+        arch = junit.stem  # amd64 | arm64
+        if arch not in test_pass_rate:
+            continue
         if 'failures="0"' not in content:
             test_pass_rate[arch] = 0.0
 

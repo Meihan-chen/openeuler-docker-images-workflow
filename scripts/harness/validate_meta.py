@@ -59,7 +59,7 @@ def find_all_meta_files(root: str) -> list[str]:
 
 
 def main() -> None:
-    repo_root = os.environ.get("GITHUB_WORKSPACE", os.getcwd())
+    repo_root = os.environ.get("TARGET_REPO_DIR") or os.environ.get("GITHUB_WORKSPACE", os.getcwd())
     meta_files = find_all_meta_files(repo_root)
 
     all_errors = []

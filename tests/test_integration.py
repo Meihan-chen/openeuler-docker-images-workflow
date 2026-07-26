@@ -63,8 +63,8 @@ class TestNewImageFlow:
         from scoring import calculate_confidence
 
         result = calculate_confidence(
-            build_success={"x86_64": True, "aarch64": True},
-            test_pass_rate={"x86_64": 1.0, "aarch64": 1.0},
+            build_success={"amd64": True, "arm64": True},
+            test_pass_rate={"amd64": 1.0, "arm64": 1.0},
             hadolint_violations=0,
             meta_consistent=True,
         )
@@ -75,8 +75,8 @@ class TestNewImageFlow:
         from scoring import calculate_confidence
 
         result = calculate_confidence(
-            build_success={"x86_64": False, "aarch64": True},
-            test_pass_rate={"x86_64": 0.0, "aarch64": 0.5},
+            build_success={"amd64": False, "arm64": True},
+            test_pass_rate={"amd64": 0.0, "arm64": 0.5},
             hadolint_violations=3,
             meta_consistent=False,
         )
@@ -134,9 +134,13 @@ class TestPRComposition:
         assert title.startswith("[new-image]")
 
     def test_pr_body_structure(self):
+        import tempfile
+        tmpdir = tempfile.mkdtemp()
         os.environ["PACKAGE"] = "nginx"
         os.environ["APP_VERSION"] = "1.28.0"
         os.environ["OS_VERSION"] = "24.03-lts"
+        os.environ["DOMAIN"] = "Cloud"
+        os.environ["TARGET_REPO_DIR"] = tmpdir
 
         from compose_pr import compose_pr_body
         body = compose_pr_body("new-image")

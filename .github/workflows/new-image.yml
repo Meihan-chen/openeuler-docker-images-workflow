@@ -1,7 +1,11 @@
 name: New Image
 
 # Triggered by GitCode Issue with [new-image] label or manually via workflow_dispatch.
-# Standalone: adversarial pairs, then build+test+fix loop (3 rounds), then PR.
+# Pipeline: triage -> generate (clone target repo + adversarial pairs) ->
+#   verify (amd64 + arm64 QEMU) -> fix loop (3 rounds) -> compose-pr -> PR to GitCode.
+#
+# Target repo (where PR is created): gitcode.com/openeuler/openeuler-docker-images
+# Workflow repo (this one): hosts workflows + scripts only.
 
 on:
   issues:
@@ -28,9 +32,16 @@ on:
         description: 'App version'
         required: true
         default: '1.27.2'
+      demo_mode:
+        description: 'Skip LLM agents, use create_demo.py (for testing pipeline without API key)'
+        required: false
+        type: boolean
+        default: false
 
 env:
   PYTHONUNBUFFERED: "1"
+  TARGET_REPO: openeuler/openeuler-docker-images
+  TARGET_REPO_HOST: gitcode.com
 
 jobs:
   triage:
@@ -44,8 +55,11 @@ jobs:
       domain: ${{ steps.set.outputs.domain }}
       os_version: ${{ steps.set.outputs.os_version }}
       app_version: ${{ steps.set.outputs.app_version }}
+      demo_mode: ${{ steps.set.outputs.demo_mode }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: workflow-repo
       - id: set
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
@@ -54,8 +68,10 @@ jobs:
             echo "domain=${{ inputs.domain }}" >> "$GITHUB_OUTPUT"
             echo "os_version=${{ inputs.os_version }}" >> "$GITHUB_OUTPUT"
             echo "app_version=${{ inputs.app_version }}" >> "$GITHUB_OUTPUT"
+            echo "demo_mode=${{ inputs.demo_mode }}" >> "$GITHUB_OUTPUT"
           else
-            python scripts/harness/parse_issue.py "${{ github.event.issue.body }}" >> "$GITHUB_OUTPUT"
+            python workflow-repo/scripts/harness/parse_issue.py "${{ github.event.issue.body }}" >> "$GITHUB_OUTPUT"
+            echo "demo_mode=false" >> "$GITHUB_OUTPUT"
           fi
 
   generate:
@@ -63,33 +79,80 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: workflow-repo
 
-      - name: Create files
+      - name: Clone target repo
         env:
+          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+        run: |
+          git clone "https://oauth2:${GITCODE_TOKEN}@${TARGET_REPO_HOST}/${TARGET_REPO}.git" target-repo
+          cd target-repo
+          git config user.name "openeuler-bot"
+          git config user.email "bot@openeuler.org"
+
+      - name: Install opencode (real agent mode only)
+        if: needs.triage.outputs.demo_mode != 'true'
+        run: curl -fsSL https://opencode.ai/install | bash
+
+      - name: Run adversarial pair (image)
+        env:
+          TARGET_REPO_DIR: ${{ github.workspace }}/target-repo
+          ANTHROPIC_BASE_URL: https://api.deepseek.com/anthropic
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.DEEPSEEK_API_KEY }}
           PACKAGE: ${{ needs.triage.outputs.package }}
-          APP_VERSION: ${{ needs.triage.outputs.app_version }}
+          SOURCE: ${{ needs.triage.outputs.source }}
           DOMAIN: ${{ needs.triage.outputs.domain }}
           OS_VERSION: ${{ needs.triage.outputs.os_version }}
-        run: python scripts/harness/create_demo.py
+          APP_VERSION: ${{ needs.triage.outputs.app_version }}
+        run: |
+          if [ "${{ needs.triage.outputs.demo_mode }}" = "true" ]; then
+            echo "Demo mode: skipping image adversarial pair"
+          else
+            python workflow-repo/scripts/harness/run.py adversarial-pair --role image
+          fi
+
+      - name: Run adversarial pair (testcase)
+        env:
+          TARGET_REPO_DIR: ${{ github.workspace }}/target-repo
+          ANTHROPIC_BASE_URL: https://api.deepseek.com/anthropic
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.DEEPSEEK_API_KEY }}
+          PACKAGE: ${{ needs.triage.outputs.package }}
+          SOURCE: ${{ needs.triage.outputs.source }}
+          DOMAIN: ${{ needs.triage.outputs.domain }}
+          OS_VERSION: ${{ needs.triage.outputs.os_version }}
+          APP_VERSION: ${{ needs.triage.outputs.app_version }}
+        run: |
+          if [ "${{ needs.triage.outputs.demo_mode }}" = "true" ]; then
+            echo "Demo mode: skipping testcase adversarial pair"
+          else
+            python workflow-repo/scripts/harness/run.py adversarial-pair --role testcase
+          fi
+
+      - name: Create demo files (demo mode only)
+        if: needs.triage.outputs.demo_mode == 'true'
+        env:
+          TARGET_REPO_DIR: ${{ github.workspace }}/target-repo
+          PACKAGE: ${{ needs.triage.outputs.package }}
+          DOMAIN: ${{ needs.triage.outputs.domain }}
+          OS_VERSION: ${{ needs.triage.outputs.os_version }}
+          APP_VERSION: ${{ needs.triage.outputs.app_version }}
+        run: |
+          cd target-repo
+          python ../workflow-repo/scripts/harness/create_demo.py
 
       - name: Validate meta
-        continue-on-error: true
-        run: python scripts/harness/validate_meta.py || echo "::warning::meta validation found issues - will be fixed by Fixer"
+        env:
+          TARGET_REPO_DIR: ${{ github.workspace }}/target-repo
+        run: |
+          cd target-repo
+          python ../workflow-repo/scripts/harness/validate_meta.py || echo "::warning::meta validation found issues"
 
       - name: Upload generated files
         uses: actions/upload-artifact@v4
         with:
           name: generated-files
-          path: |
-            **/Dockerfile
-            **/meta.yml
-            **/README.md
-            **/doc/**
-            **/tests/**
-            **/image-list.yml
-            **/ai-result.json
-            **/test-ai-result.json
-            **/logo.png
+          path: target-repo/
 
   verify-r1:
     needs: [triage, generate]
@@ -97,71 +160,95 @@ jobs:
       fail-fast: false
       matrix:
         arch:
-          - runner: ${{ vars.RUNNER_X64 || 'ubuntu-latest' }}
+          - label: amd64
             platform: linux/amd64
-            arch_label: amd64
-          - runner: ${{ vars.RUNNER_ARM64 || 'ubuntu-latest' }}
+          - label: arm64
             platform: linux/arm64
-            arch_label: arm64
-    runs-on: ${{ matrix.arch.runner }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: workflow-repo
       - uses: actions/download-artifact@v4
         with:
           name: generated-files
+          path: target-repo
+
+      - uses: docker/setup-qemu-action@v3
+        if: matrix.arch.label == 'arm64'
+      - uses: docker/setup-buildx-action@v3
 
       - name: Build
         id: build
         env:
           APP: ${{ needs.triage.outputs.package }}
-        continue-on-error: ${{ !vars.RUNNER_X64 }}
         run: |
           set -o pipefail
+          cd target-repo
           DOCKERFILE=$(find . -name Dockerfile -path "*/${APP}/*" -not -path './.git/*' | head -1)
           if [ -z "$DOCKERFILE" ]; then
-            echo "No Dockerfile found for ${APP}" | tee /tmp/build-r1-${{ matrix.arch.arch_label }}.log
+            echo "No Dockerfile found for ${APP}" | tee /tmp/build-r1-${{ matrix.arch.label }}.log
             exit 1
           fi
           echo "Building Dockerfile: $DOCKERFILE"
           docker buildx build --platform ${{ matrix.arch.platform }} \
             --file "$DOCKERFILE" \
-            --tag "openeuler/${APP}:test" --load "$(dirname "$DOCKERFILE")" 2>&1 | tee /tmp/build-r1-${{ matrix.arch.arch_label }}.log
+            --tag "openeuler/${APP}:test" --load "$(dirname "$DOCKERFILE")" 2>&1 | tee /tmp/build-r1-${{ matrix.arch.label }}.log
 
       - name: Test
         if: steps.build.outcome == 'success'
         env:
+          TARGET_REPO_DIR: ${{ github.workspace }}/target-repo
           APP: ${{ needs.triage.outputs.package }}
-        run: python scripts/harness/run.py test --app "$APP" --platform ${{ matrix.arch.arch_label }}
+        run: |
+          python workflow-repo/scripts/harness/run.py test --app "$APP" --platform ${{ matrix.arch.label }}
 
       - name: Record skipped test
         if: steps.build.outcome != 'success'
         run: |
-          mkdir -p results/latest/${{ matrix.arch.arch_label }}
-          echo '<?xml version="1.0"?><testsuite name="skipped" tests="0" failures="0"/>' > results/latest/${{ matrix.arch.arch_label }}/${{ matrix.arch.arch_label }}.junit.xml
-          echo "Build skipped (no openEuler runner) - test marked as N/A" | tee /tmp/build-r1-${{ matrix.arch.arch_label }}.log
+          mkdir -p target-repo/results/latest/${{ matrix.arch.label }}
+          echo '<?xml version="1.0"?><testsuite name="skipped" tests="0" failures="0"/>' > target-repo/results/latest/${{ matrix.arch.label }}/${{ matrix.arch.label }}.junit.xml
 
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-results-r1-${{ matrix.arch.arch_label }}
+          name: test-results-r1-${{ matrix.arch.label }}
           path: |
-            /tmp/build-r1-${{ matrix.arch.arch_label }}.log
-            **/results/**/*.junit.xml
+            /tmp/build-r1-${{ matrix.arch.label }}.log
+            target-repo/**/results/**/*.junit.xml
 
   fix-r1:
-    needs: verify-r1
-    if: failure() && vars.RUNNER_X64
+    needs: [triage, verify-r1]
+    if: failure()
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: workflow-repo
+      - uses: actions/download-artifact@v4
+        with:
+          name: generated-files
+          path: target-repo
       - uses: actions/download-artifact@v4
         with:
           pattern: test-results-r1-*
           merge-multiple: true
-      - env:
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-        run: python scripts/harness/run.py fix
+      - run: curl -fsSL https://opencode.ai/install | bash
+      - name: Run Fixer
+        env:
+          TARGET_REPO_DIR: ${{ github.workspace }}/target-repo
+          ANTHROPIC_BASE_URL: https://api.deepseek.com/anthropic
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.DEEPSEEK_API_KEY }}
+          PACKAGE: ${{ needs.triage.outputs.package }}
+          DOMAIN: ${{ needs.triage.outputs.domain }}
+          OS_VERSION: ${{ needs.triage.outputs.os_version }}
+          APP_VERSION: ${{ needs.triage.outputs.app_version }}
+        run: python workflow-repo/scripts/harness/run.py fix
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fixed-files-r1
+          path: target-repo/
 
   verify-r2:
     needs: [triage, fix-r1]
@@ -170,68 +257,91 @@ jobs:
       fail-fast: false
       matrix:
         arch:
-          - runner: ${{ vars.RUNNER_X64 || 'ubuntu-latest' }}
+          - label: amd64
             platform: linux/amd64
-            arch_label: amd64
-          - runner: ${{ vars.RUNNER_ARM64 || 'ubuntu-latest' }}
+          - label: arm64
             platform: linux/arm64
-            arch_label: arm64
-    runs-on: ${{ matrix.arch.runner }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: workflow-repo
+      - uses: actions/download-artifact@v4
+        with:
+          name: fixed-files-r1
+          path: target-repo
+      - uses: docker/setup-qemu-action@v3
+        if: matrix.arch.label == 'arm64'
+      - uses: docker/setup-buildx-action@v3
 
       - name: Build
         id: build-r2
         env:
           APP: ${{ needs.triage.outputs.package }}
-        continue-on-error: ${{ !vars.RUNNER_X64 }}
         run: |
           set -o pipefail
+          cd target-repo
           DOCKERFILE=$(find . -name Dockerfile -path "*/${APP}/*" -not -path './.git/*' | head -1)
           if [ -z "$DOCKERFILE" ]; then
-            echo "No Dockerfile found for ${APP}" | tee /tmp/build-r2-${{ matrix.arch.arch_label }}.log
+            echo "No Dockerfile found for ${APP}" | tee /tmp/build-r2-${{ matrix.arch.label }}.log
             exit 1
           fi
-          echo "Building Dockerfile: $DOCKERFILE"
           docker buildx build --platform ${{ matrix.arch.platform }} \
             --file "$DOCKERFILE" \
-            --tag "openeuler/${APP}:test" --load "$(dirname "$DOCKERFILE")" 2>&1 | tee /tmp/build-r2-${{ matrix.arch.arch_label }}.log
+            --tag "openeuler/${APP}:test" --load "$(dirname "$DOCKERFILE")" 2>&1 | tee /tmp/build-r2-${{ matrix.arch.label }}.log
 
       - name: Test
         if: steps.build-r2.outcome == 'success'
         env:
+          TARGET_REPO_DIR: ${{ github.workspace }}/target-repo
           APP: ${{ needs.triage.outputs.package }}
-        run: python scripts/harness/run.py test --app "$APP" --platform ${{ matrix.arch.arch_label }}
+        run: python workflow-repo/scripts/harness/run.py test --app "$APP" --platform ${{ matrix.arch.label }}
 
       - name: Record skipped test
         if: steps.build-r2.outcome != 'success'
         run: |
-          mkdir -p results/latest/${{ matrix.arch.arch_label }}
-          echo '<?xml version="1.0"?><testsuite name="skipped" tests="0" failures="0"/>' > results/latest/${{ matrix.arch.arch_label }}/${{ matrix.arch.arch_label }}.junit.xml
-          echo "Build skipped (no openEuler runner)" | tee /tmp/build-r2-${{ matrix.arch.arch_label }}.log
+          mkdir -p target-repo/results/latest/${{ matrix.arch.label }}
+          echo '<?xml version="1.0"?><testsuite name="skipped" tests="0" failures="0"/>' > target-repo/results/latest/${{ matrix.arch.label }}/${{ matrix.arch.label }}.junit.xml
 
-      - name: Upload results
+      - uses: actions/upload-artifact@v4
         if: always()
-        uses: actions/upload-artifact@v4
         with:
-          name: test-results-r2-${{ matrix.arch.arch_label }}
+          name: test-results-r2-${{ matrix.arch.label }}
           path: |
-            /tmp/build-r2-${{ matrix.arch.arch_label }}.log
-            **/results/**/*.junit.xml
+            /tmp/build-r2-${{ matrix.arch.label }}.log
+            target-repo/**/results/**/*.junit.xml
 
   fix-r2:
-    needs: verify-r2
-    if: failure() && vars.RUNNER_X64
+    needs: [triage, verify-r2]
+    if: failure()
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: workflow-repo
+      - uses: actions/download-artifact@v4
+        with:
+          name: fixed-files-r1
+          path: target-repo
       - uses: actions/download-artifact@v4
         with:
           pattern: test-results-r2-*
           merge-multiple: true
-      - env:
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-        run: python scripts/harness/run.py fix
+      - run: curl -fsSL https://opencode.ai/install | bash
+      - name: Run Fixer
+        env:
+          TARGET_REPO_DIR: ${{ github.workspace }}/target-repo
+          ANTHROPIC_BASE_URL: https://api.deepseek.com/anthropic
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.DEEPSEEK_API_KEY }}
+          PACKAGE: ${{ needs.triage.outputs.package }}
+          DOMAIN: ${{ needs.triage.outputs.domain }}
+          OS_VERSION: ${{ needs.triage.outputs.os_version }}
+          APP_VERSION: ${{ needs.triage.outputs.app_version }}
+        run: python workflow-repo/scripts/harness/run.py fix
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fixed-files-r2
+          path: target-repo/
 
   verify-r3:
     needs: [triage, fix-r2]
@@ -240,133 +350,160 @@ jobs:
       fail-fast: false
       matrix:
         arch:
-          - runner: ${{ vars.RUNNER_X64 || 'ubuntu-latest' }}
+          - label: amd64
             platform: linux/amd64
-            arch_label: amd64
-          - runner: ${{ vars.RUNNER_ARM64 || 'ubuntu-latest' }}
+          - label: arm64
             platform: linux/arm64
-            arch_label: arm64
-    runs-on: ${{ matrix.arch.runner }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: workflow-repo
+      - uses: actions/download-artifact@v4
+        with:
+          name: fixed-files-r2
+          path: target-repo
+      - uses: docker/setup-qemu-action@v3
+        if: matrix.arch.label == 'arm64'
+      - uses: docker/setup-buildx-action@v3
 
       - name: Build
         id: build-r3
         env:
           APP: ${{ needs.triage.outputs.package }}
-        continue-on-error: ${{ !vars.RUNNER_X64 }}
         run: |
           set -o pipefail
+          cd target-repo
           DOCKERFILE=$(find . -name Dockerfile -path "*/${APP}/*" -not -path './.git/*' | head -1)
           if [ -z "$DOCKERFILE" ]; then
-            echo "No Dockerfile found for ${APP}" | tee /tmp/build-r3-${{ matrix.arch.arch_label }}.log
+            echo "No Dockerfile found for ${APP}" | tee /tmp/build-r3-${{ matrix.arch.label }}.log
             exit 1
           fi
-          echo "Building Dockerfile: $DOCKERFILE"
           docker buildx build --platform ${{ matrix.arch.platform }} \
             --file "$DOCKERFILE" \
-            --tag "openeuler/${APP}:test" --load "$(dirname "$DOCKERFILE")" 2>&1 | tee /tmp/build-r3-${{ matrix.arch.arch_label }}.log
+            --tag "openeuler/${APP}:test" --load "$(dirname "$DOCKERFILE")" 2>&1 | tee /tmp/build-r3-${{ matrix.arch.label }}.log
 
       - name: Test
         if: steps.build-r3.outcome == 'success'
         env:
+          TARGET_REPO_DIR: ${{ github.workspace }}/target-repo
           APP: ${{ needs.triage.outputs.package }}
-        run: python scripts/harness/run.py test --app "$APP" --platform ${{ matrix.arch.arch_label }}
+        run: python workflow-repo/scripts/harness/run.py test --app "$APP" --platform ${{ matrix.arch.label }}
 
       - name: Record skipped test
         if: steps.build-r3.outcome != 'success'
         run: |
-          mkdir -p results/latest/${{ matrix.arch.arch_label }}
-          echo '<?xml version="1.0"?><testsuite name="skipped" tests="0" failures="0"/>' > results/latest/${{ matrix.arch.arch_label }}/${{ matrix.arch.arch_label }}.junit.xml
-          echo "Build skipped (no openEuler runner)" | tee /tmp/build-r3-${{ matrix.arch.arch_label }}.log
+          mkdir -p target-repo/results/latest/${{ matrix.arch.label }}
+          echo '<?xml version="1.0"?><testsuite name="skipped" tests="0" failures="0"/>' > target-repo/results/latest/${{ matrix.arch.label }}/${{ matrix.arch.label }}.junit.xml
 
-      - name: Upload results
+      - uses: actions/upload-artifact@v4
         if: always()
-        uses: actions/upload-artifact@v4
         with:
-          name: test-results-r3-${{ matrix.arch.arch_label }}
+          name: test-results-r3-${{ matrix.arch.label }}
           path: |
-            /tmp/build-r3-${{ matrix.arch.arch_label }}.log
-            **/results/**/*.junit.xml
-
-  fix-r3:
-    needs: verify-r3
-    if: failure() && vars.RUNNER_X64
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: test-results-r3-*
-          merge-multiple: true
-      - env:
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-        run: python scripts/harness/run.py fix
+            /tmp/build-r3-${{ matrix.arch.label }}.log
+            target-repo/**/results/**/*.junit.xml
 
   needs-human:
-    needs: [verify-r1, verify-r2, verify-r3, fix-r3]
-    if: always() && failure()
+    needs: [triage, verify-r1, verify-r2, verify-r3]
+    if: always() && failure() && needs.verify-r3.result == 'failure'
     runs-on: ubuntu-latest
-    steps:
-      - run: |
-          echo "3 fix rounds exhausted, still failing"
-          echo "See test-results-r1/r2/r3 artifacts for full diagnostic trail"
-
-  compose-pr:
-    needs: [triage, generate, verify-r1, verify-r2, verify-r3]
-    if: always() && (needs.verify-r1.result == 'success' || needs.verify-r2.result == 'success' || needs.verify-r3.result == 'success' || !vars.RUNNER_X64)
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: write
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
         with:
-          name: generated-files
-          path: .
+          path: workflow-repo
       - uses: actions/download-artifact@v4
         with:
           pattern: test-results-r*
           merge-multiple: true
-
-      - name: Diff check
-        run: python scripts/harness/gate_diff.py
-
-      - name: Compose PR body
+      - name: Compose failure report
         env:
+          TARGET_REPO_DIR: ${{ github.workspace }}
           PACKAGE: ${{ needs.triage.outputs.package }}
           APP_VERSION: ${{ needs.triage.outputs.app_version }}
           OS_VERSION: ${{ needs.triage.outputs.os_version }}
         run: |
-          python scripts/harness/compose_pr.py --scenario new-image
-          echo "=== PR Title ===" && cat /tmp/pr-title
-          echo "=== PR Body (first 20 lines) ===" && head -20 /tmp/pr-body.md
-
-      - name: Create branch and commit
-        id: branch
+          python workflow-repo/scripts/harness/run.py report-failures
+      - name: Create issue on GitCode target repo
         env:
+          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+        run: |
+          python workflow-repo/scripts/utils/gitcode.py issue create \
+            --title "[new-image] Needs human review: ${{ needs.triage.outputs.package }} ${{ needs.triage.outputs.app_version }}" \
+            --body-file /tmp/failure-report.md \
+            --labels "new-image,needs-human-review"
+
+  compose-pr:
+    needs: [triage, generate, verify-r1, verify-r2, verify-r3]
+    if: always() && !failure() && (needs.verify-r1.result == 'success' || needs.verify-r2.result == 'success' || needs.verify-r3.result == 'success')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: workflow-repo
+      - uses: actions/download-artifact@v4
+        with:
+          name: generated-files
+          path: target-repo
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: test-results-r*
+          merge-multiple: true
+      - run: |
+          mkdir -p /tmp
+          # Place build logs at /tmp/build-r{1,2,3}-{amd64,arm64}.log for compose_pr.py
+          find . -name 'build-r*.log' -exec cp {} /tmp/ \; 2>/dev/null || true
+          ls -la /tmp/build-*.log 2>/dev/null || echo "no build logs"
+
+      - name: Diff gate
+        env:
+          TARGET_REPO_DIR: ${{ github.workspace }}/target-repo
+        run: python workflow-repo/scripts/harness/gate_diff.py
+
+      - name: Compose PR title and body
+        env:
+          TARGET_REPO_DIR: ${{ github.workspace }}/target-repo
+          PACKAGE: ${{ needs.triage.outputs.package }}
+          APP_VERSION: ${{ needs.triage.outputs.app_version }}
+          OS_VERSION: ${{ needs.triage.outputs.os_version }}
+          DOMAIN: ${{ needs.triage.outputs.domain }}
+        run: |
+          python workflow-repo/scripts/harness/compose_pr.py --scenario new-image
+          echo "=== PR Title ===" && cat /tmp/pr-title
+          echo "=== PR Body (first 30 lines) ===" && head -30 /tmp/pr-body.md
+
+      - name: Check PR dedup
+        id: dedup
+        env:
+          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+        run: |
+          if python workflow-repo/scripts/utils/gitcode.py pr check-exists --title "$(cat /tmp/pr-title)"; then
+            echo "skip_pr=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip_pr=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create branch, commit, push, PR
+        if: steps.dedup.outputs.skip_pr != 'true'
+        env:
+          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
           PACKAGE: ${{ needs.triage.outputs.package }}
           APP_VERSION: ${{ needs.triage.outputs.app_version }}
         run: |
+          cd target-repo
           BRANCH="auto/${PACKAGE}-${APP_VERSION}-$(date +%Y%m%d%H%M%S)"
-          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
-          git config user.name "openeuler-bot"
-          git config user.email "bot@openeuler.org"
           git checkout -b "$BRANCH"
           git add -A
           git diff --cached --stat
           git commit -m "[new-image] Add ${PACKAGE} ${APP_VERSION} container image" || echo "nothing to commit"
-
-      - name: Push and create PR
-        env:
-          GH_TOKEN: ${{ github.token }}
-          BRANCH: ${{ steps.branch.outputs.branch }}
-        run: |
-          git push origin "$BRANCH" 2>&1 || echo "push failed (may already exist)"
-          gh pr create \
+          PUSH_URL="https://oauth2:${GITCODE_TOKEN}@${TARGET_REPO_HOST}/${TARGET_REPO}.git"
+          git push "$PUSH_URL" HEAD:refs/heads/"$BRANCH"
+          cd ..
+          python workflow-repo/scripts/utils/gitcode.py pr create \
             --title "$(cat /tmp/pr-title)" \
             --body-file /tmp/pr-body.md \
-            --head "$BRANCH" \
-            --base main \
-            --label "auto-generated" 2>&1 || echo "PR creation failed - check if PR already exists"
+            --head "$BRANCH"
+
+      - name: Skipped (PR already exists)
+        if: steps.dedup.outputs.skip_pr == 'true'
+        run: echo "PR already exists on GitCode, skipping creation"
