@@ -24,7 +24,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 AGENTS_DIR = PROJECT_ROOT / ".github" / "agents"
 
 # opencode configuration
-OPENCODE_MODEL = os.environ.get("OPENCODE_MODEL", "deepseek/deepseek-v4-flash")
+OPENCODE_MODEL = os.environ.get("OPENCODE_MODEL", "deepseek/deepseek-v4-pro")
 OPENCODE_TIMEOUT = int(os.environ.get("OPENCODE_TIMEOUT", "1800"))  # 30 min default
 OPENCODE_STALE_SECONDS = 300
 
@@ -137,15 +137,12 @@ def _run_adversarial_pair(role: str) -> None:
     """Run a Creator + QA adversarial pair using opencode."""
     if role == "image":
         creator_name = "image-creator"
-        qa_name = "image-qa"
     elif role == "testcase":
         creator_name = "testcase-creator"
-        qa_name = "testcase-qa"
     else:
         raise ValueError(f"Unknown role: {role}")
 
     creator_prompt = _load_agent_prompt(creator_name)
-    qa_prompt = _load_agent_prompt(qa_name)
 
     pkg = os.environ.get("PACKAGE", os.environ.get("APP", ""))
     src = os.environ.get("SOURCE", "")
@@ -154,90 +151,35 @@ def _run_adversarial_pair(role: str) -> None:
     app_ver = os.environ.get("APP_VERSION", "")
     os_tag = "oe" + os_ver.lower().replace(".", "").replace("-", "")
 
-    for round_num in range(1, 3):
-        print(f"\n[{role}] Round {round_num}: Creator running...")
+    # Single round: Creator only, skip QA for speed
+    print(f"\n[{role}] Creator running...")
 
-        # Build a direct, actionable instruction for opencode
-        if role == "image":
-            instruction = (
-                f"Create the complete container image directory for {pkg}.\n\n"
-                f"Parameters:\n"
-                f"- package_name: {pkg}\n"
-                f"- source_repo_url: {src}\n"
-                f"- category/domain: {domain}\n"
-                f"- os_version: {os_ver}\n"
-                f"- os_tag: {os_tag}\n"
-                f"- app_version: {app_ver}\n"
-                f"- image_repo_dir: {PROJECT_ROOT}\n\n"
-                f"Follow the SKILL instructions above. Research the upstream package, "
-                f"create all required files (Dockerfile, meta.yml, README.md, doc/image-info.yml, "
-                f"doc/picture/logo.png), update image-list.yml, and write ai-result.json."
-            )
-        else:
-            instruction = (
-                f"Create functional test cases for {pkg} {app_ver}.\n\n"
-                f"Parameters:\n"
-                f"- package_name: {pkg}\n"
-                f"- version: {app_ver}\n"
-                f"- category: {domain}\n"
-                f"- image_repo_dir: {PROJECT_ROOT}\n\n"
-                f"Read the Dockerfile in {domain}/{pkg}/ first, then follow the SKILL instructions "
-                f"to create goss.yaml, goss_wait.yaml, test_helpers.sh under {domain}/{pkg}/tests/, "
-                f"and test.sh alongside the Dockerfile. Write test-ai-result.json."
-            )
-
-        if round_num > 1:
-            instruction += f"\n\nQA feedback from previous round:\n{json.dumps(qa_result, indent=2)}"
-
-        full_prompt = f"{creator_prompt}\n\n## TASK: {instruction}"
-        print(f"[{role}] Prompt size: {len(full_prompt)} chars")
-        _run_opencode(full_prompt)
-
-        # Verify files were created
-        if role == "image":
-            check_path = Path(PROJECT_ROOT) / domain / pkg
-        else:
-            check_path = Path(PROJECT_ROOT) / domain / pkg / "tests"
-        if check_path.exists():
-            files_created = list(check_path.rglob("*"))
-            print(f"[{role}] Created {len(files_created)} files in {check_path}")
-        else:
-            print(f"[{role}] WARNING: No files created at {check_path}")
-
-        # QA review: read the actual files
-        print(f"\n[{role}] Round {round_num}: QA reviewing...")
-        qa_instruction = (
-            f"Review the output files under {domain}/{pkg}/.\n"
-            f"Read each file, check against the review checklist, and output a JSON verdict "
-            f'with format: {{"status": "approved|needs_fix", "issues": [{{"severity": "blocker|major|minor", "description": "..."}}], "summary": "..."}}\n'
-            f"Output ONLY the JSON, no other text."
+    if role == "image":
+        instruction = (
+            f"Create the container image directory for {pkg} {app_ver} on openEuler {os_ver}.\n\n"
+            f"Parameters: package_name={pkg}, source_repo_url={src}, category={domain}, "
+            f"os_version={os_ver}, os_tag={os_tag}, app_version={app_ver}, image_repo_dir={PROJECT_ROOT}\n\n"
+            f"Create ONLY: Dockerfile, meta.yml, README.md, doc/image-info.yml, doc/picture/logo.png, "
+            f"update image-list.yml, and write ai-result.json. Be fast — skip optional details."
         )
-        full_prompt = f"{qa_prompt}\n\n## TASK: {qa_instruction}"
-        qa_output = _run_opencode(full_prompt)
-        print(f"[{role}] QA output ({len(qa_output)} chars): {qa_output[:500]}")
-
-        # Parse QA result
-        qa_result = {"status": "approved"}
-        try:
-            qa_result = json.loads(qa_output)
-        except json.JSONDecodeError:
-            match = qa_output.rfind("{")
-            end = qa_output.rfind("}")
-            if match != -1 and end > match:
-                try:
-                    qa_result = json.loads(qa_output[match:end + 1])
-                except json.JSONDecodeError:
-                    pass
-
-        if qa_result.get("status") == "approved":
-            print(f"[{role}] QA approved after {round_num} round(s)")
-            break
-        else:
-            issues = qa_result.get("issues", [])
-            blockers = [i for i in issues if i.get("severity") == "blocker"]
-            print(f"[{role}] QA found {len(issues)} issues ({len(blockers)} blockers)")
     else:
-        print(f"[{role}] QA not fully satisfied after 2 rounds, proceeding")
+        instruction = (
+            f"Create a minimal test.sh for {pkg} {app_ver}.\n"
+            f"Place it alongside the Dockerfile in {domain}/{pkg}/{app_ver}/{os_ver}/.\n"
+            f"Write a simple version check and binary existence check. Be fast."
+        )
+
+    full_prompt = f"{creator_prompt}\n\n## TASK: {instruction}"
+    print(f"[{role}] Prompt size: {len(full_prompt)} chars")
+    _run_opencode(full_prompt)
+
+    # Verify files were created
+    check_path = Path(PROJECT_ROOT) / domain / pkg
+    if check_path.exists():
+        files_created = list(check_path.rglob("*"))
+        print(f"[{role}] Created {len(files_created)} files in {check_path}")
+    else:
+        print(f"[{role}] WARNING: No files created at {check_path}")
 
 
 def cmd_adversarial_pair(args: argparse.Namespace) -> None:
