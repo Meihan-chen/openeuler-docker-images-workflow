@@ -91,11 +91,15 @@ jobs:
         with:
           name: generated-files
           path: |
-            */**/Dockerfile
-            */meta.yml
-            */README.md
-            */doc/
-            */tests/
+            **/Dockerfile
+            **/meta.yml
+            **/README.md
+            **/doc/**
+            **/tests/**
+            **/image-list.yml
+            **/ai-result.json
+            **/test-ai-result.json
+            **/logo.png
 
   verify-r1:
     needs: generate
