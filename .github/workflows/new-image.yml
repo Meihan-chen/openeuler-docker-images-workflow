@@ -182,10 +182,12 @@ jobs:
         id: build
         env:
           APP: ${{ needs.triage.outputs.package }}
+          APP_VERSION: ${{ needs.triage.outputs.app_version }}
+          OS_VERSION: ${{ needs.triage.outputs.os_version }}
         run: |
           set -o pipefail
           cd target-repo
-          DOCKERFILE=$(find . -name Dockerfile -path "*/${APP}/*" -not -path './.git/*' | head -1)
+          DOCKERFILE=$(find . -path "*/${APP}/${APP_VERSION}/${OS_VERSION}/Dockerfile" -not -path './.git/*' | head -1)
           if [ -z "$DOCKERFILE" ]; then
             echo "No Dockerfile found for ${APP}" | tee /tmp/build-r1-${{ matrix.arch.label }}.log
             exit 1
@@ -200,6 +202,8 @@ jobs:
         env:
           TARGET_REPO_DIR: ${{ github.workspace }}/target-repo
           APP: ${{ needs.triage.outputs.package }}
+          APP_VERSION: ${{ needs.triage.outputs.app_version }}
+          OS_VERSION: ${{ needs.triage.outputs.os_version }}
         run: |
           python workflow-repo/scripts/harness/run.py test --app "$APP" --platform ${{ matrix.arch.label }}
 
@@ -220,7 +224,7 @@ jobs:
 
   fix-r1:
     needs: [triage, verify-r1]
-    if: failure()
+    if: always() && needs.verify-r1.result == 'failure'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -252,7 +256,7 @@ jobs:
 
   verify-r2:
     needs: [triage, fix-r1]
-    if: always() && !failure()
+    if: always() && needs.fix-r1.result == 'success'
     strategy:
       fail-fast: false
       matrix:
@@ -278,10 +282,12 @@ jobs:
         id: build-r2
         env:
           APP: ${{ needs.triage.outputs.package }}
+          APP_VERSION: ${{ needs.triage.outputs.app_version }}
+          OS_VERSION: ${{ needs.triage.outputs.os_version }}
         run: |
           set -o pipefail
           cd target-repo
-          DOCKERFILE=$(find . -name Dockerfile -path "*/${APP}/*" -not -path './.git/*' | head -1)
+          DOCKERFILE=$(find . -path "*/${APP}/${APP_VERSION}/${OS_VERSION}/Dockerfile" -not -path './.git/*' | head -1)
           if [ -z "$DOCKERFILE" ]; then
             echo "No Dockerfile found for ${APP}" | tee /tmp/build-r2-${{ matrix.arch.label }}.log
             exit 1
@@ -295,6 +301,8 @@ jobs:
         env:
           TARGET_REPO_DIR: ${{ github.workspace }}/target-repo
           APP: ${{ needs.triage.outputs.package }}
+          APP_VERSION: ${{ needs.triage.outputs.app_version }}
+          OS_VERSION: ${{ needs.triage.outputs.os_version }}
         run: python workflow-repo/scripts/harness/run.py test --app "$APP" --platform ${{ matrix.arch.label }}
 
       - name: Record skipped test
@@ -313,7 +321,7 @@ jobs:
 
   fix-r2:
     needs: [triage, verify-r2]
-    if: failure()
+    if: always() && needs.verify-r2.result == 'failure'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -345,7 +353,7 @@ jobs:
 
   verify-r3:
     needs: [triage, fix-r2]
-    if: always() && !failure()
+    if: always() && needs.fix-r2.result == 'success'
     strategy:
       fail-fast: false
       matrix:
@@ -371,10 +379,12 @@ jobs:
         id: build-r3
         env:
           APP: ${{ needs.triage.outputs.package }}
+          APP_VERSION: ${{ needs.triage.outputs.app_version }}
+          OS_VERSION: ${{ needs.triage.outputs.os_version }}
         run: |
           set -o pipefail
           cd target-repo
-          DOCKERFILE=$(find . -name Dockerfile -path "*/${APP}/*" -not -path './.git/*' | head -1)
+          DOCKERFILE=$(find . -path "*/${APP}/${APP_VERSION}/${OS_VERSION}/Dockerfile" -not -path './.git/*' | head -1)
           if [ -z "$DOCKERFILE" ]; then
             echo "No Dockerfile found for ${APP}" | tee /tmp/build-r3-${{ matrix.arch.label }}.log
             exit 1
@@ -388,6 +398,8 @@ jobs:
         env:
           TARGET_REPO_DIR: ${{ github.workspace }}/target-repo
           APP: ${{ needs.triage.outputs.package }}
+          APP_VERSION: ${{ needs.triage.outputs.app_version }}
+          OS_VERSION: ${{ needs.triage.outputs.os_version }}
         run: python workflow-repo/scripts/harness/run.py test --app "$APP" --platform ${{ matrix.arch.label }}
 
       - name: Record skipped test
@@ -406,7 +418,7 @@ jobs:
 
   needs-human:
     needs: [triage, verify-r1, verify-r2, verify-r3]
-    if: always() && failure() && needs.verify-r3.result == 'failure'
+    if: always() && !(needs.verify-r1.result == 'success' || needs.verify-r2.result == 'success' || needs.verify-r3.result == 'success')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -435,7 +447,7 @@ jobs:
 
   compose-pr:
     needs: [triage, generate, verify-r1, verify-r2, verify-r3]
-    if: always() && !failure() && (needs.verify-r1.result == 'success' || needs.verify-r2.result == 'success' || needs.verify-r3.result == 'success')
+    if: always() && (needs.verify-r1.result == 'success' || needs.verify-r2.result == 'success' || needs.verify-r3.result == 'success')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
