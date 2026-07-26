@@ -304,7 +304,7 @@ jobs:
           echo "See test-results-r1/r2/r3 artifacts for full diagnostic trail"
 
   compose-pr:
-    needs: [verify-r1, verify-r2, verify-r3]
+    needs: [triage, generate, verify-r1, verify-r2, verify-r3]
     if: always()
     runs-on: ubuntu-latest
     permissions:
