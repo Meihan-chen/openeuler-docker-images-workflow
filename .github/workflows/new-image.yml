@@ -117,8 +117,15 @@ jobs:
         continue-on-error: ${{ !vars.RUNNER_X64 }}
         run: |
           set -o pipefail
+          DOCKERFILE=$(find . -name Dockerfile -path "*/${APP}/*" -not -path './.git/*' | head -1)
+          if [ -z "$DOCKERFILE" ]; then
+            echo "No Dockerfile found for ${APP}" | tee /tmp/build-r1-${{ matrix.arch.arch_label }}.log
+            exit 1
+          fi
+          echo "Building Dockerfile: $DOCKERFILE"
           docker buildx build --platform ${{ matrix.arch.platform }} \
-            --tag "openeuler/${APP}:test" --load . 2>&1 | tee /tmp/build-r1-${{ matrix.arch.arch_label }}.log
+            --file "$DOCKERFILE" \
+            --tag "openeuler/${APP}:test" --load "$(dirname "$DOCKERFILE")" 2>&1 | tee /tmp/build-r1-${{ matrix.arch.arch_label }}.log
 
       - name: Test
         if: steps.build.outcome == 'success'
@@ -180,8 +187,15 @@ jobs:
         continue-on-error: ${{ !vars.RUNNER_X64 }}
         run: |
           set -o pipefail
+          DOCKERFILE=$(find . -name Dockerfile -path "*/${APP}/*" -not -path './.git/*' | head -1)
+          if [ -z "$DOCKERFILE" ]; then
+            echo "No Dockerfile found for ${APP}" | tee /tmp/build-r2-${{ matrix.arch.arch_label }}.log
+            exit 1
+          fi
+          echo "Building Dockerfile: $DOCKERFILE"
           docker buildx build --platform ${{ matrix.arch.platform }} \
-            --tag "openeuler/${APP}:test" --load . 2>&1 | tee /tmp/build-r2-${{ matrix.arch.arch_label }}.log
+            --file "$DOCKERFILE" \
+            --tag "openeuler/${APP}:test" --load "$(dirname "$DOCKERFILE")" 2>&1 | tee /tmp/build-r2-${{ matrix.arch.arch_label }}.log
 
       - name: Test
         if: steps.build-r2.outcome == 'success'
@@ -243,8 +257,15 @@ jobs:
         continue-on-error: ${{ !vars.RUNNER_X64 }}
         run: |
           set -o pipefail
+          DOCKERFILE=$(find . -name Dockerfile -path "*/${APP}/*" -not -path './.git/*' | head -1)
+          if [ -z "$DOCKERFILE" ]; then
+            echo "No Dockerfile found for ${APP}" | tee /tmp/build-r3-${{ matrix.arch.arch_label }}.log
+            exit 1
+          fi
+          echo "Building Dockerfile: $DOCKERFILE"
           docker buildx build --platform ${{ matrix.arch.platform }} \
-            --tag "openeuler/${APP}:test" --load . 2>&1 | tee /tmp/build-r3-${{ matrix.arch.arch_label }}.log
+            --file "$DOCKERFILE" \
+            --tag "openeuler/${APP}:test" --load "$(dirname "$DOCKERFILE")" 2>&1 | tee /tmp/build-r3-${{ matrix.arch.arch_label }}.log
 
       - name: Test
         if: steps.build-r3.outcome == 'success'
