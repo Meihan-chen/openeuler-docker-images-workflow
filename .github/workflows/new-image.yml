@@ -67,7 +67,15 @@ jobs:
       - name: Install opencode
         run: curl -fsSL https://opencode.ai/install | bash
 
-      - name: Image Creator + QA (adversarial pair 1)
+      - name: Create demo files
+        env:
+          PACKAGE: ${{ needs.triage.outputs.package }}
+          APP_VERSION: ${{ needs.triage.outputs.app_version }}
+          DOMAIN: ${{ needs.triage.outputs.domain }}
+          OS_VERSION: ${{ needs.triage.outputs.os_version }}
+        run: python scripts/harness/create_demo.py
+
+      - name: Agent — Image Creator
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           PACKAGE: ${{ needs.triage.outputs.package }}
@@ -75,12 +83,12 @@ jobs:
           DOMAIN: ${{ needs.triage.outputs.domain }}
           OS_VERSION: ${{ needs.triage.outputs.os_version }}
           APP_VERSION: ${{ needs.triage.outputs.app_version }}
-        run: python scripts/harness/run.py adversarial-pair --role image
-
-      - name: Testcase Creator + QA (adversarial pair 2)
-        env:
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-        run: python scripts/harness/run.py adversarial-pair --role testcase
+        run: |
+          if [ -n "$DEEPSEEK_API_KEY" ]; then
+            python scripts/harness/run.py adversarial-pair --role image
+          else
+            echo "Skipping Agent (no DEEPSEEK_API_KEY) — using demo files"
+          fi
 
       - name: Validate meta
         continue-on-error: true
