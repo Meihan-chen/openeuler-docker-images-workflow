@@ -74,7 +74,7 @@ jobs:
 
       - name: Validate meta
         continue-on-error: true
-        run: python scripts/harness/validate_meta.py || echo "::warning::meta validation found issues — will be fixed by Fixer"
+        run: python scripts/harness/validate_meta.py || echo "::warning::meta validation found issues - will be fixed by Fixer"
 
       - name: Upload generated files
         uses: actions/upload-artifact@v4
@@ -92,15 +92,17 @@ jobs:
             **/logo.png
 
   verify-r1:
-    needs: generate
+    needs: [triage, generate]
     strategy:
       fail-fast: false
       matrix:
         arch:
           - runner: ${{ vars.RUNNER_X64 || 'ubuntu-latest' }}
             platform: linux/amd64
+            arch_label: amd64
           - runner: ${{ vars.RUNNER_ARM64 || 'ubuntu-latest' }}
             platform: linux/arm64
+            arch_label: arm64
     runs-on: ${{ matrix.arch.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -116,28 +118,28 @@ jobs:
         run: |
           set -o pipefail
           docker buildx build --platform ${{ matrix.arch.platform }} \
-            --tag "openeuler/${APP}:test" --load . 2>&1 | tee /tmp/build-r1-${{ matrix.arch.platform }}.log
+            --tag "openeuler/${APP}:test" --load . 2>&1 | tee /tmp/build-r1-${{ matrix.arch.arch_label }}.log
 
       - name: Test
         if: steps.build.outcome == 'success'
         env:
           APP: ${{ needs.triage.outputs.package }}
-        run: python scripts/harness/run.py test --app "$APP" --platform ${{ matrix.arch.platform }}
+        run: python scripts/harness/run.py test --app "$APP" --platform ${{ matrix.arch.arch_label }}
 
       - name: Record skipped test
         if: steps.build.outcome != 'success'
         run: |
-          mkdir -p results/latest/${{ matrix.arch.platform }}
-          echo '<?xml version="1.0"?><testsuite name="skipped" tests="0" failures="0"/>' > results/latest/${{ matrix.arch.platform }}/${{ matrix.arch.platform }}.junit.xml
-          echo "Build skipped (no openEuler runner) — test marked as N/A" | tee /tmp/build-r1-${{ matrix.arch.platform }}.log
+          mkdir -p results/latest/${{ matrix.arch.arch_label }}
+          echo '<?xml version="1.0"?><testsuite name="skipped" tests="0" failures="0"/>' > results/latest/${{ matrix.arch.arch_label }}/${{ matrix.arch.arch_label }}.junit.xml
+          echo "Build skipped (no openEuler runner) - test marked as N/A" | tee /tmp/build-r1-${{ matrix.arch.arch_label }}.log
 
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-results-r1-${{ matrix.arch.platform }}
+          name: test-results-r1-${{ matrix.arch.arch_label }}
           path: |
-            /tmp/build-r1-${{ matrix.arch.platform }}.log
+            /tmp/build-r1-${{ matrix.arch.arch_label }}.log
             **/results/**/*.junit.xml
 
   fix-r1:
@@ -155,7 +157,7 @@ jobs:
         run: python scripts/harness/run.py fix
 
   verify-r2:
-    needs: fix-r1
+    needs: [triage, fix-r1]
     if: always() && !failure()
     strategy:
       fail-fast: false
@@ -163,8 +165,10 @@ jobs:
         arch:
           - runner: ${{ vars.RUNNER_X64 || 'ubuntu-latest' }}
             platform: linux/amd64
+            arch_label: amd64
           - runner: ${{ vars.RUNNER_ARM64 || 'ubuntu-latest' }}
             platform: linux/arm64
+            arch_label: arm64
     runs-on: ${{ matrix.arch.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -177,28 +181,28 @@ jobs:
         run: |
           set -o pipefail
           docker buildx build --platform ${{ matrix.arch.platform }} \
-            --tag "openeuler/${APP}:test" --load . 2>&1 | tee /tmp/build-r2-${{ matrix.arch.platform }}.log
+            --tag "openeuler/${APP}:test" --load . 2>&1 | tee /tmp/build-r2-${{ matrix.arch.arch_label }}.log
 
       - name: Test
         if: steps.build-r2.outcome == 'success'
         env:
           APP: ${{ needs.triage.outputs.package }}
-        run: python scripts/harness/run.py test --app "$APP" --platform ${{ matrix.arch.platform }}
+        run: python scripts/harness/run.py test --app "$APP" --platform ${{ matrix.arch.arch_label }}
 
       - name: Record skipped test
         if: steps.build-r2.outcome != 'success'
         run: |
-          mkdir -p results/latest/${{ matrix.arch.platform }}
-          echo '<?xml version="1.0"?><testsuite name="skipped" tests="0" failures="0"/>' > results/latest/${{ matrix.arch.platform }}/${{ matrix.arch.platform }}.junit.xml
-          echo "Build skipped (no openEuler runner)" | tee /tmp/build-r2-${{ matrix.arch.platform }}.log
+          mkdir -p results/latest/${{ matrix.arch.arch_label }}
+          echo '<?xml version="1.0"?><testsuite name="skipped" tests="0" failures="0"/>' > results/latest/${{ matrix.arch.arch_label }}/${{ matrix.arch.arch_label }}.junit.xml
+          echo "Build skipped (no openEuler runner)" | tee /tmp/build-r2-${{ matrix.arch.arch_label }}.log
 
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-results-r2-${{ matrix.arch.platform }}
+          name: test-results-r2-${{ matrix.arch.arch_label }}
           path: |
-            /tmp/build-r2-${{ matrix.arch.platform }}.log
+            /tmp/build-r2-${{ matrix.arch.arch_label }}.log
             **/results/**/*.junit.xml
 
   fix-r2:
@@ -216,7 +220,7 @@ jobs:
         run: python scripts/harness/run.py fix
 
   verify-r3:
-    needs: fix-r2
+    needs: [triage, fix-r2]
     if: always() && !failure()
     strategy:
       fail-fast: false
@@ -224,8 +228,10 @@ jobs:
         arch:
           - runner: ${{ vars.RUNNER_X64 || 'ubuntu-latest' }}
             platform: linux/amd64
+            arch_label: amd64
           - runner: ${{ vars.RUNNER_ARM64 || 'ubuntu-latest' }}
             platform: linux/arm64
+            arch_label: arm64
     runs-on: ${{ matrix.arch.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -238,28 +244,28 @@ jobs:
         run: |
           set -o pipefail
           docker buildx build --platform ${{ matrix.arch.platform }} \
-            --tag "openeuler/${APP}:test" --load . 2>&1 | tee /tmp/build-r3-${{ matrix.arch.platform }}.log
+            --tag "openeuler/${APP}:test" --load . 2>&1 | tee /tmp/build-r3-${{ matrix.arch.arch_label }}.log
 
       - name: Test
         if: steps.build-r3.outcome == 'success'
         env:
           APP: ${{ needs.triage.outputs.package }}
-        run: python scripts/harness/run.py test --app "$APP" --platform ${{ matrix.arch.platform }}
+        run: python scripts/harness/run.py test --app "$APP" --platform ${{ matrix.arch.arch_label }}
 
       - name: Record skipped test
         if: steps.build-r3.outcome != 'success'
         run: |
-          mkdir -p results/latest/${{ matrix.arch.platform }}
-          echo '<?xml version="1.0"?><testsuite name="skipped" tests="0" failures="0"/>' > results/latest/${{ matrix.arch.platform }}/${{ matrix.arch.platform }}.junit.xml
-          echo "Build skipped (no openEuler runner)" | tee /tmp/build-r3-${{ matrix.arch.platform }}.log
+          mkdir -p results/latest/${{ matrix.arch.arch_label }}
+          echo '<?xml version="1.0"?><testsuite name="skipped" tests="0" failures="0"/>' > results/latest/${{ matrix.arch.arch_label }}/${{ matrix.arch.arch_label }}.junit.xml
+          echo "Build skipped (no openEuler runner)" | tee /tmp/build-r3-${{ matrix.arch.arch_label }}.log
 
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-results-r3-${{ matrix.arch.platform }}
+          name: test-results-r3-${{ matrix.arch.arch_label }}
           path: |
-            /tmp/build-r3-${{ matrix.arch.platform }}.log
+            /tmp/build-r3-${{ matrix.arch.arch_label }}.log
             **/results/**/*.junit.xml
 
   fix-r3:
@@ -287,7 +293,7 @@ jobs:
 
   compose-pr:
     needs: [triage, generate, verify-r1, verify-r2, verify-r3]
-    if: always()
+    if: always() && (needs.verify-r1.result == 'success' || needs.verify-r2.result == 'success' || needs.verify-r3.result == 'success' || !vars.RUNNER_X64)
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -342,4 +348,4 @@ jobs:
             --body-file /tmp/pr-body.md \
             --head "$BRANCH" \
             --base main \
-            --label "auto-generated" 2>&1 || echo "PR creation failed — check if PR already exists"
+            --label "auto-generated" 2>&1 || echo "PR creation failed - check if PR already exists"
