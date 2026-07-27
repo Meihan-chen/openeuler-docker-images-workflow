@@ -343,6 +343,10 @@ def cmd_test(args: argparse.Namespace) -> None:
         env["GOSS_WAIT"] = str(goss_wait)
 
     print(f"Running dgoss for {app} on {arch} (results -> {results_dir})")
+    if not shutil.which("dgoss"):
+        print(f"dgoss not found; falling back to test.sh for {app}")
+        _run_test_sh_fallback(target, app, arch)
+        return
     result = subprocess.run(
         ["dgoss", "run", "--name", container_name, f"openeuler/{app}:test"],
         env=env,
@@ -421,7 +425,8 @@ def cmd_fix(args: argparse.Namespace) -> None:
     if not logs:
         print("::warning::No build-*.log files in /tmp; Fixer will have no failure context")
 
-    ai_result_path = target / "ai-result.json"
+    ai_result_paths = list(target.rglob("ai-result.json"))
+    ai_result_path = ai_result_paths[0] if ai_result_paths else target / "ai-result.json"
     whitelist: list[str] = []
     if ai_result_path.exists():
         try:

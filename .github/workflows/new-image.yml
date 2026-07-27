@@ -178,6 +178,13 @@ jobs:
         if: matrix.arch.label == 'arm64'
       - uses: docker/setup-buildx-action@v3
 
+      - name: Install dgoss
+        run: |
+          GOSS_VERSION=v0.4.9
+          sudo wget -q "https://github.com/aelsabbahy/goss/releases/download/${GOSS_VERSION}/goss-linux-amd64" -O /usr/local/bin/goss
+          sudo wget -q "https://github.com/aelsabbahy/goss/releases/download/${GOSS_VERSION}/dgoss" -O /usr/local/bin/dgoss
+          sudo chmod +x /usr/local/bin/goss /usr/local/bin/dgoss
+
       - name: Build
         id: build
         env:
@@ -278,6 +285,13 @@ jobs:
         if: matrix.arch.label == 'arm64'
       - uses: docker/setup-buildx-action@v3
 
+      - name: Install dgoss
+        run: |
+          GOSS_VERSION=v0.4.9
+          sudo wget -q "https://github.com/aelsabbahy/goss/releases/download/${GOSS_VERSION}/goss-linux-amd64" -O /usr/local/bin/goss
+          sudo wget -q "https://github.com/aelsabbahy/goss/releases/download/${GOSS_VERSION}/dgoss" -O /usr/local/bin/dgoss
+          sudo chmod +x /usr/local/bin/goss /usr/local/bin/dgoss
+
       - name: Build
         id: build-r2
         env:
@@ -374,6 +388,13 @@ jobs:
       - uses: docker/setup-qemu-action@v3
         if: matrix.arch.label == 'arm64'
       - uses: docker/setup-buildx-action@v3
+
+      - name: Install dgoss
+        run: |
+          GOSS_VERSION=v0.4.9
+          sudo wget -q "https://github.com/aelsabbahy/goss/releases/download/${GOSS_VERSION}/goss-linux-amd64" -O /usr/local/bin/goss
+          sudo wget -q "https://github.com/aelsabbahy/goss/releases/download/${GOSS_VERSION}/dgoss" -O /usr/local/bin/dgoss
+          sudo chmod +x /usr/local/bin/goss /usr/local/bin/dgoss
 
       - name: Build
         id: build-r3

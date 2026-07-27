@@ -115,8 +115,9 @@ def cmd_issue_create(args: argparse.Namespace) -> None:
     payload = {
         "title": args.title,
         "body": body,
-        "labels": args.labels.split(",") if args.labels else [],
     }
+    if args.labels:
+        payload["labels"] = [{"name": l.strip()} for l in args.labels.split(",")]
 
     result = _api_request("POST", f"/repos/{owner_repo}/issues", payload)
     issue_url = result.get("html_url") or result.get("url") or ""
