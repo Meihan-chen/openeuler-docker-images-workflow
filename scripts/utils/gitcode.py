@@ -16,6 +16,7 @@ import argparse
 import json
 import os
 import sys
+import urllib.parse
 import urllib.request
 import urllib.error
 
@@ -116,10 +117,14 @@ def cmd_issue_create(args: argparse.Namespace) -> None:
         "title": args.title,
         "body": body,
     }
+    # GitCode/Gitea v5 API rejects labels in JSON body for issue creation;
+    # pass them as query parameter instead
+    path = f"/repos/{owner_repo}/issues"
     if args.labels:
-        payload["labels"] = [{"name": l.strip()} for l in args.labels.split(",")]
+        labels_qs = ",".join(l.strip() for l in args.labels.split(",") if l.strip())
+        path += f"?labels={urllib.parse.quote(labels_qs)}"
 
-    result = _api_request("POST", f"/repos/{owner_repo}/issues", payload)
+    result = _api_request("POST", path, payload)
     issue_url = result.get("html_url") or result.get("url") or ""
     print(f"Issue created: {issue_url}")
 

@@ -338,7 +338,7 @@ def cmd_test(args: argparse.Namespace) -> None:
     container_name = f"oe-test-{app}-{arch}"
 
     env = os.environ.copy()
-    env["GOSS_FILE"] = str(goss_file)
+    env["GOSS_FILE"] = "goss.yaml"
     if goss_wait.exists():
         env["GOSS_WAIT"] = str(goss_wait)
 
@@ -352,6 +352,7 @@ def cmd_test(args: argparse.Namespace) -> None:
         env=env,
         capture_output=True,
         text=True,
+        cwd=str(test_dir),
     )
 
     junit_file = results_dir / f"{arch}.junit.xml"
@@ -385,7 +386,7 @@ def _run_test_sh_fallback(target: Path, app: str, arch: str) -> None:
         print(f"No test.sh found for {app} either; marking as skipped")
         return
 
-    container_name = f"oe-test-{app}-{arch}"
+    container_name = f"{app}-test"
     subprocess.run(["docker", "rm", "-f", container_name], capture_output=True)
     run = subprocess.run(
         ["docker", "run", "-d", "--name", container_name, f"openeuler/{app}:test"],

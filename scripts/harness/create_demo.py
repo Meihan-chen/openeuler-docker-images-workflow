@@ -127,7 +127,7 @@ package:
     installed: true
 port:
   tcp:80:
-    listening: false
+    listening: true
 """)
 
     # tests/goss_wait.yaml - readiness wait conditions
@@ -152,7 +152,7 @@ port:
     (ver_dir / "test.sh").write_text(f"""#!/bin/bash
 set -e; set -o pipefail
 
-CONTAINER_NAME="${{PACKAGE_NAME:-{app}}}-test"
+CONTAINER_NAME="${{CONTAINER_NAME:-${{PACKAGE_NAME:-{app}}}-test}}"
 BINARY="{app}"
 EXPECTED_VERSION="{version}"
 

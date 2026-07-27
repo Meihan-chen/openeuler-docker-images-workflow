@@ -245,7 +245,7 @@ jobs:
         with:
           pattern: test-results-r1-*
           merge-multiple: true
-      - run: curl -fsSL https://opencode.ai/install | bash
+      - run: npm install -g opencode-ai
       - name: Run Fixer
         env:
           TARGET_REPO_DIR: ${{ github.workspace }}/target-repo
@@ -349,7 +349,7 @@ jobs:
         with:
           pattern: test-results-r2-*
           merge-multiple: true
-      - run: curl -fsSL https://opencode.ai/install | bash
+      - run: npm install -g opencode-ai
       - name: Run Fixer
         env:
           TARGET_REPO_DIR: ${{ github.workspace }}/target-repo
