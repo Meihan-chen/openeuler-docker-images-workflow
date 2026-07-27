@@ -492,7 +492,9 @@ def _gitcode_api(method: str, path: str, body: dict | None = None) -> dict:
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             payload = resp.read()
-            return json.loads(payload) if payload else {}
+            result = json.loads(payload) if payload else {}
+            log(f"GitCode API {method} {path} -> HTTP {resp.status}, keys: {list(result.keys()) if isinstance(result, dict) else type(result).__name__}")
+            return result if isinstance(result, dict) else {}
     except urllib.error.HTTPError as e:
         error_body = e.read().decode()
         log(f"GitCode API error ({e.code}): {error_body}")
