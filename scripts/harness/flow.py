@@ -429,14 +429,20 @@ def compose_pr(app: str, version: str, os_ver: str, domain: str) -> None:
 
     body = [f"## Automated PR: {app} {version} on {os_ver}\n"]
     body.append("### Changes\n")
-
-    # Git diff
-    r = subprocess.run(
-        ["git", "-C", str(TARGET_DIR), "diff", "--name-status", "origin/master...HEAD"],
-        capture_output=True, text=True, timeout=30
-    )
-    changes = r.stdout.strip() or "(all new files)"
-    body.append(f"```\n{changes}\n```\n")
+    # List files created (from ai-result.json, since nothing committed yet)
+    files_created: list[str] = []
+    for p in TARGET_DIR.rglob("ai-result.json"):
+        try:
+            data = json.loads(p.read_text())
+            files_created = data.get("files_created", [])
+            if files_created:
+                break
+        except json.JSONDecodeError:
+            continue
+    if files_created:
+        body.append("```\n" + "\n".join(files_created) + "\n```\n")
+    else:
+        body.append("(files created by agent)\n")
 
     body.append("### Build Proof\n")
     for arch in ["amd64", "arm64"]:
