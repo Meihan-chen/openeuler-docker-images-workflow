@@ -32,7 +32,7 @@ TARGET_REPO = os.environ.get("TARGET_REPO", "openeuler/openeuler-docker-images")
 TARGET_REPO_HOST = os.environ.get("TARGET_REPO_HOST", "gitcode.com")
 GITCODE_API = "https://api.gitcode.com/api/v5"
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 AGENTS_DIR = PROJECT_ROOT / ".github" / "agents"
 WORKSPACE = Path(os.environ.get("RUNNER_TEMP", "/tmp"))
 TARGET_DIR = WORKSPACE / "target-repo"
