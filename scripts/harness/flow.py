@@ -216,32 +216,39 @@ def _adversarial_pair(role: str, app: str, version: str, os_ver: str, domain: st
 
 
 def _create_demo(app: str, version: str, os_ver: str, domain: str) -> None:
+    """Generate files matching the reference image structure EXACTLY.
+
+    Reference: https://gitcode.com/openeuler/openeuler-docker-images/tree/master/Bigdata/kylin
+
+    Structure:
+        {domain}/{app}/
+        ├── {version}/{os_ver}/Dockerfile
+        ├── doc/image-info.yml
+        ├── doc/picture/logo.png
+        ├── README.md
+        └── meta.yml
+
+    Additional CI-only files (NOT committed):
+        - {version}/{os_ver}/test.sh  — container verification
+        - ai-result.json              — generation metadata
+    """
     os_tag = "oe" + os_ver.lower().replace(".", "").replace("-", "")
     base = TARGET_DIR / domain / app
     ver_dir = base / version / os_ver
 
-    files_created: list[str] = []
-
+    files_committed: list[str] = []
     app_exists = base.is_dir()
     version_exists = ver_dir.is_dir()
 
     if app_exists and version_exists:
-        log(f"{domain}/{app}/{version}/{os_ver} already exists in target repo; skipping generation")
-        # Still write ai-result.json so downstream steps can proceed
-        (base / "ai-result.json").write_text(json.dumps({
-            "success": True, "package_name": app, "version": version,
-            "files_created": [f"{domain}/{app}/{version}/{os_ver}/Dockerfile (already exists)"],
-            "skipped": True,
-        }, ensure_ascii=False, indent=2))
+        log(f"{domain}/{app}/{version}/{os_ver} already exists; skipping")
         return
 
-    # Create version directory
+    # ── version directory + Dockerfile ──
     ver_dir.mkdir(parents=True, exist_ok=True)
-
-    # Dockerfile
-    dockerfile_path = ver_dir / "Dockerfile"
-    if not dockerfile_path.exists() or not app_exists:
-        dockerfile_path.write_text(f"""ARG BASE=openeuler/openeuler:{os_ver}
+    df_path = ver_dir / "Dockerfile"
+    if not df_path.exists():
+        df_path.write_text(f"""ARG BASE=openeuler/openeuler:{os_ver}
 FROM ${{BASE}}
 ARG TARGETARCH
 ARG VERSION={version}
@@ -250,23 +257,69 @@ EXPOSE 80
 STOPSIGNAL SIGQUIT
 CMD ["tail", "-f", "/dev/null"]
 """)
-    files_created.append(f"{domain}/{app}/{version}/{os_ver}/Dockerfile")
+    files_committed.append(f"{domain}/{app}/{version}/{os_ver}/Dockerfile")
+
+    # ── CI-only: test.sh alongside Dockerfile (NOT committed to repo) ──
+    (ver_dir / "test.sh").write_text(f"""#!/bin/bash
+set -e; set -o pipefail
+CONTAINER_NAME="${{CONTAINER_NAME:-${{PACKAGE_NAME:-{app}}}-test}}"
+BINARY="{app}"
+test_binary_exists() {{ docker exec "$CONTAINER_NAME" which "$BINARY" >/dev/null 2>&1 && echo "PASS: binary exists" || {{ echo "FAIL: binary not found"; return 1; }} }}
+test_version_command() {{ docker exec "$CONTAINER_NAME" "$BINARY" -v >/dev/null 2>&1 && echo "PASS: version command works: $(docker exec "$CONTAINER_NAME" "$BINARY" -v 2>&1 || true)" || {{ echo "FAIL: version command failed"; return 1; }} }}
+main() {{ local f=0; test_binary_exists || f=$((f+1)); test_version_command || f=$((f+1)); [ "$f" -eq 0 ] && echo "ALL_TESTS_PASSED" && exit 0 || {{ echo "TESTS_FAILED: $f failures"; exit 1; }} }}
+main "$@"
+""")
 
     if not app_exists:
-        # New app — create all scaffold files (never overwrite if app exists)
+        # ── New app: scaffold per reference structure ──
         doc_dir = base / "doc" / "picture"
         doc_dir.mkdir(parents=True, exist_ok=True)
-        tests_dir = base / "tests"
-        tests_dir.mkdir(parents=True, exist_ok=True)
 
+        # meta.yml
         (base / "meta.yml").write_text(f"""{version}-{os_tag}:
   path: {version}/{os_ver}/Dockerfile
 """)
-        (base / "README.md").write_text(f"# {app}\n{app} {version} on openEuler {os_ver}\n")
+        files_committed.append(f"{domain}/{app}/meta.yml")
+
+        # README.md (matches kylin reference format)
+        url_prefix = f"https://gitee.com/openeuler/openeuler-docker-images/blob/master/{domain}/{app}"
+        (base / "README.md").write_text(f"""# Quick reference
+
+- The official {app} docker image.
+
+- Maintained by: [openEuler CloudNative SIG](https://gitee.com/openeuler/cloudnative).
+
+- Where to get help: [openEuler CloudNative SIG](https://gitee.com/openeuler/cloudnative), [openEuler](https://gitee.com/openeuler/community).
+# {app} | openEuler
+Current {app} docker images are built on the [openEuler](https://repo.openeuler.org/). This repository is free to use and exempted from per-user rate limits.
+
+Learn more on [{app} website](https://{app}.org/).
+
+# Supported tags and respective Dockerfile links
+The tag of each `{app}` docker image is consist of the version of `{app}` and the version of basic image. The details are as follows
+|    Tag   |  Currently  |   Architectures  |
+|----------|-------------|------------------|
+|[{version}-{os_tag}]({url_prefix}/{version}/{os_ver}/Dockerfile) | {app} {version} on openEuler {os_ver} | amd64, arm64 |
+
+# Usage
+```
+docker run -d --name my-{app} -p 80:80 openeuler/{app}:{{{{Tag}}}}
+```
+To stop and remove the container, use these commands.
+```
+docker stop my-{app}
+docker rm my-{app}
+```
+
+# Question and answering
+If you have any questions or want to use some special features, please submit an issue or a pull request on [openeuler-docker-images](https://gitee.com/openeuler/openeuler-docker-images).
+""")
+        files_committed.append(f"{domain}/{app}/README.md")
+
+        # doc/image-info.yml (matches kylin reference format)
         (doc_dir.parent / "image-info.yml").write_text(f"""name: {app}
 category: {domain.lower()}
 description: {app} container image based on openEuler.
-license: BSD-2-Clause
 environment: |
   本应用在Docker环境中运行，安装Docker执行如下命令
   ```
@@ -275,7 +328,7 @@ environment: |
 tags: |
   | Tag | Currently | Architectures |
   |-----|-----------|---------------|
-  | [{version}-{os_tag}](https://atomgit.com/openeuler/openeuler-docker-images/blob/master/{domain}/{app}/{version}/{os_ver}/Dockerfile) | {app} {version} on openEuler {os_ver} | amd64, arm64 |
+  | [{version}-{os_tag}]({url_prefix}/{version}/{os_ver}/Dockerfile) | {app} {version} on openEuler {os_ver} | amd64, arm64 |
 download: |
   ```
   docker pull openeuler/{app}:{{{{Tag}}}}
@@ -285,51 +338,37 @@ usage: |
   ```
   docker run -d --name my-{app} -p 80:80 openeuler/{app}:{{{{Tag}}}}
   ```
+  - 查看运行日志
+  ```
+  docker logs -f my-{app}
+  ```
+  - 停止容器
+  ```
+  docker stop my-{app}
+  docker rm my-{app}
+  ```
+license: BSD-2-Clause
 similar_packages:
   - {app}: {app} package on openEuler
 dependency:
   - glibc
-homepage: https://github.com/{app}/{app}
+homepage: https://{app}.org/
 upstream:
   backend: GitHub
   version_url: {app}/{app}
   version_filter: alpha;rc;candidate;beta;pre
   version_scheme: RPM
 """)
+        files_committed.append(f"{domain}/{app}/doc/image-info.yml")
+
+        # logo.png (1x1 placeholder)
         (doc_dir / "logo.png").write_bytes(
             b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde'
             b'\x00\x00\x00\x0cIDATx\x9cc\xf8\x0f\x00\x00\x01\x01\x00\x05\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82'
         )
-        (tests_dir / "goss.yaml").write_text(f"""file:
-  /usr/sbin/{app}:
-    exists: true
-    mode: "0755"
-package:
-  {app}:
-    installed: true
-port:
-  tcp:80:
-    listening: true
-    timeout: 15000
-""")
-        (tests_dir / "test_helpers.sh").write_text("""wait_for_port() {
-    local port=$1 timeout=${2:-30}
-    for _ in $(seq 1 "$timeout"); do
-        if ss -tlnp 2>/dev/null | grep -q ":$port "; then return 0; fi
-        sleep 1
-    done; return 1
-}
-""")
-        files_created.extend([
-            f"{domain}/{app}/meta.yml",
-            f"{domain}/{app}/README.md",
-            f"{domain}/{app}/doc/image-info.yml",
-            f"{domain}/{app}/doc/picture/logo.png",
-            f"{domain}/{app}/tests/goss.yaml",
-            f"{domain}/{app}/tests/test_helpers.sh",
-        ])
+        files_committed.append(f"{domain}/{app}/doc/picture/logo.png")
 
-        # Update image-list.yml
+        # image-list.yml (append)
         il = TARGET_DIR / domain / "image-list.yml"
         if not il.exists():
             il.write_text(f"images:\n  {app}: {app}\n")
@@ -337,33 +376,20 @@ port:
             with il.open("a") as f:
                 f.write(f"  {app}: {app}\n")
     else:
-        # App exists, only append new version to meta.yml
+        # App exists — only append version to meta.yml
         new_entry = f"\n{version}-{os_tag}:\n  path: {version}/{os_ver}/Dockerfile\n"
         meta_path = base / "meta.yml"
         curr = meta_path.read_text()
         if f"{version}-{os_tag}" not in curr:
             meta_path.write_text(curr.rstrip() + new_entry)
 
-    # test.sh for this version
-    test_sh_path = ver_dir / "test.sh"
-    if not test_sh_path.exists() or not app_exists:
-        test_sh_path.write_text(f"""#!/bin/bash
-set -e; set -o pipefail
-CONTAINER_NAME="${{CONTAINER_NAME:-${{PACKAGE_NAME:-{app}}}-test}}"
-BINARY="{app}"
-test_binary_exists() {{ docker exec "$CONTAINER_NAME" which "$BINARY" >/dev/null 2>&1 && echo "PASS: binary exists" || {{ echo "FAIL: binary not found"; return 1; }} }}
-test_version_command() {{ docker exec "$CONTAINER_NAME" "$BINARY" -v >/dev/null 2>&1 && echo "PASS: version command works: $(docker exec "$CONTAINER_NAME" "$BINARY" -v 2>&1 || true)" || {{ echo "FAIL: version command failed"; return 1; }} }}
-main() {{ local f=0; test_binary_exists || f=$((f+1)); test_version_command || f=$((f+1)); [ "$f" -eq 0 ] && echo "ALL_TESTS_PASSED" && exit 0 || {{ echo "TESTS_FAILED: $f failures"; exit 1; }} }}
-main "$@"
-""")
-    files_created.append(f"{domain}/{app}/{version}/{os_ver}/test.sh")
-
+    # ── ai-result.json (internal tracking, NOT committed) ──
     (base / "ai-result.json").write_text(json.dumps({
         "success": True, "package_name": app, "version": version,
-        "files_created": files_created,
+        "files_created": files_committed,
     }, ensure_ascii=False, indent=2))
 
-    log(f"Demo files created for {domain}/{app} (app_exists={app_exists}, version_exists=False)")
+    log(f"Demo: {len(files_committed)} files generated for {domain}/{app} (app_exists={app_exists})")
 
 
 # ── step 3: build + test ───────────────────────────────────────────────────
@@ -596,7 +622,26 @@ def push_and_create_pr(app: str, version: str) -> None:
 
     branch = f"auto/{app}-{version}-{int(time.time())}"
     sh(["git", "-C", str(TARGET_DIR), "checkout", "-b", branch], capture_output=True)
-    sh(["git", "-C", str(TARGET_DIR), "add", "-A"], capture_output=True)
+
+    # Only add standard files matching reference structure (no test.sh, no ai-result.json)
+    # Read committed file list from ai-result.json
+    committed: list[str] = []
+    for p in TARGET_DIR.rglob("ai-result.json"):
+        try:
+            data = json.loads(p.read_text())
+            committed = data.get("files_created", [])
+            if committed:
+                break
+        except json.JSONDecodeError:
+            continue
+    if committed:
+        for f in committed:
+            sh(["git", "-C", str(TARGET_DIR), "add", f], capture_output=True)
+    else:
+        # Fallback: add standard paths, exclude test/ai artifacts
+        sh(["git", "-C", str(TARGET_DIR), "add", "."], capture_output=True)
+        sh(["git", "-C", str(TARGET_DIR), "reset", "--", "*/test.sh", "*/ai-result.json", "*/tests/", "*/goss*"], capture_output=True)
+
     r = sh(["git", "-C", str(TARGET_DIR), "diff", "--cached", "--stat"], capture_output=True, text=True)
     log(f"Files to commit:\n{r.stdout}")
     sh(["git", "-C", str(TARGET_DIR), "commit", "-m", f"[new-image] Add {app} {version} container image"],
