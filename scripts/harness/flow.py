@@ -248,7 +248,7 @@ ARG VERSION={version}
 RUN dnf install -y {app} && dnf clean all
 EXPOSE 80
 STOPSIGNAL SIGQUIT
-CMD ["{app}", "-g", "daemon off;"]
+CMD ["tail", "-f", "/dev/null"]
 """)
     files_created.append(f"{domain}/{app}/{version}/{os_ver}/Dockerfile")
 
