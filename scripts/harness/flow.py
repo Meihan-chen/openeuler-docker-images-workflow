@@ -267,6 +267,34 @@ CMD ["tail", "-f", "/dev/null"]
 category: {domain.lower()}
 description: {app} container image based on openEuler.
 license: BSD-2-Clause
+environment: |
+  本应用在Docker环境中运行，安装Docker执行如下命令
+  ```
+  yum install -y docker
+  ```
+tags: |
+  | Tag | Currently | Architectures |
+  |-----|-----------|---------------|
+  | [{version}-{os_tag}](https://atomgit.com/openeuler/openeuler-docker-images/blob/master/{domain}/{app}/{version}/{os_ver}/Dockerfile) | {app} {version} on openEuler {os_ver} | amd64, arm64 |
+download: |
+  ```
+  docker pull openeuler/{app}:{{{{Tag}}}}
+  ```
+usage: |
+  启动容器：
+  ```
+  docker run -d --name my-{app} -p 80:80 openeuler/{app}:{{{{Tag}}}}
+  ```
+similar_packages:
+  - {app}: {app} package on openEuler
+dependency:
+  - glibc
+homepage: https://github.com/{app}/{app}
+upstream:
+  backend: GitHub
+  version_url: {app}/{app}
+  version_filter: alpha;rc;candidate;beta;pre
+  version_scheme: RPM
 """)
         (doc_dir / "logo.png").write_bytes(
             b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde'
