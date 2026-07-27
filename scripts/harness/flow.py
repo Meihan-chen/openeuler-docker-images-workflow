@@ -542,7 +542,8 @@ def push_and_create_pr(app: str, version: str) -> None:
     result = _gitcode_api("POST", f"/repos/{TARGET_REPO}/pulls", {
         "title": title, "head": branch, "base": "master", "body": body,
     })
-    pr_url = result.get("html_url") or result.get("url") or ""
+    # GitCode (Gitea) API uses "web_url", not "html_url" like GitHub
+    pr_url = result.get("web_url") or result.get("html_url") or result.get("url") or ""
     if pr_url:
         Path("/tmp/pr-url").write_text(pr_url)
     log(f"PR created: {pr_url or '(unknown URL)'}")
