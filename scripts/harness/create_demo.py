@@ -128,13 +128,7 @@ package:
 port:
   tcp:80:
     listening: true
-""")
-
-    # tests/goss_wait.yaml - readiness wait conditions
-    (tests_dir / "goss_wait.yaml").write_text("""port:
-  tcp:80:
-    listening: true
-    timeout: 30000
+    timeout: 15000
 """)
 
     # tests/test_helpers.sh
@@ -197,7 +191,6 @@ main "$@"
                 f"{domain}/{app}/doc/image-info.yml",
                 f"{domain}/{app}/doc/picture/logo.png",
                 f"{domain}/{app}/tests/goss.yaml",
-                f"{domain}/{app}/tests/goss_wait.yaml",
                 f"{domain}/{app}/tests/test_helpers.sh",
                 f"{domain}/{app}/{version}/{os_ver}/test.sh",
             ],

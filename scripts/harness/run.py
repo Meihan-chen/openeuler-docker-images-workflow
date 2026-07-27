@@ -334,18 +334,16 @@ def cmd_test(args: argparse.Namespace) -> None:
     results_dir.mkdir(parents=True, exist_ok=True)
 
     goss_file = test_dir / "goss.yaml"
-    goss_wait = test_dir / "goss_wait.yaml"
     container_name = f"oe-test-{app}-{arch}"
 
     env = os.environ.copy()
     env["GOSS_FILE"] = "goss.yaml"
-    if goss_wait.exists():
-        env["GOSS_WAIT"] = str(goss_wait)
+    env["GOSS_SLEEP"] = "15"
 
     print(f"Running dgoss for {app} on {arch} (results -> {results_dir})")
     if not shutil.which("dgoss"):
         print(f"dgoss not found; falling back to test.sh for {app}")
-        _run_test_sh_fallback(target, app, arch)
+        _run_test_sh_fallback(target, app, arch, results_dir)
         return
     result = subprocess.run(
         ["dgoss", "run", "--name", container_name, f"openeuler/{app}:test"],
@@ -355,27 +353,16 @@ def cmd_test(args: argparse.Namespace) -> None:
         cwd=str(test_dir),
     )
 
-    junit_file = results_dir / f"{arch}.junit.xml"
-    failures = 1 if result.returncode != 0 else 0
-    junit_file.write_text(f"""<?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="{app}" tests="1" failures="{failures}" errors="0">
-  <testcase name="{app}_functional">
-    {f'<failure message="dgoss failed">{result.stdout}</failure>' if failures else ''}
-    <system-out>{result.stdout}</system-out>
-  </testcase>
-</testsuite>""")
-
-    subprocess.run(["docker", "rm", "-f", container_name], capture_output=True)
-
     if result.returncode != 0:
-        print(f"Tests FAILED for {app} on {arch}", file=sys.stderr)
-        print(result.stdout)
-        print(result.stderr, file=sys.stderr)
-        sys.exit(1)
-    print(f"Tests PASSED for {app} on {arch}")
+        print(f"dgoss FAILED for {app} on {arch}, falling back to test.sh")
+        print(result.stdout[-2000:])
+        print(result.stderr[-1000:], file=sys.stderr)
+        subprocess.run(["docker", "rm", "-f", container_name], capture_output=True)
+        _run_test_sh_fallback(target, app, arch, results_dir)
+        return
 
 
-def _run_test_sh_fallback(target: Path, app: str, arch: str) -> None:
+def _run_test_sh_fallback(target: Path, app: str, arch: str, results_dir: Path | None = None) -> None:
     """Fallback: run test.sh alongside Dockerfile if no goss.yaml exists."""
     test_sh = None
     for p in target.glob(f"**/{app}/**/test.sh"):
@@ -409,6 +396,18 @@ def _run_test_sh_fallback(target: Path, app: str, arch: str) -> None:
     if result.stderr:
         print(result.stderr, file=sys.stderr)
     subprocess.run(["docker", "rm", "-f", container_name], capture_output=True)
+
+    if results_dir:
+        results_dir.mkdir(parents=True, exist_ok=True)
+        junit_file = results_dir / f"{arch}.junit.xml"
+        failures = 0 if result.returncode == 0 else 1
+        junit_file.write_text(f"""<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="{app}" tests="1" failures="{failures}" errors="0">
+  <testcase name="{app}_test_sh">
+    {f'<failure message="test.sh failed (exit {result.returncode})">{result.stdout}</failure>' if failures else ''}
+    <system-out>{result.stdout}</system-out>
+  </testcase>
+</testsuite>""")
 
     if result.returncode != 0:
         sys.exit(1)

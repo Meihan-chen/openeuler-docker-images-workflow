@@ -35,7 +35,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install opencode
-        run: curl -fsSL https://opencode.ai/install | bash
+        run: npm install -g opencode-ai
 
       - name: Run adversarial pair (image)
         env:

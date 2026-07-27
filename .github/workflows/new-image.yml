@@ -93,7 +93,7 @@ jobs:
 
       - name: Install opencode (real agent mode only)
         if: needs.triage.outputs.demo_mode != 'true'
-        run: curl -fsSL https://opencode.ai/install | bash
+        run: npm install -g opencode-ai
 
       - name: Run adversarial pair (image)
         env:
