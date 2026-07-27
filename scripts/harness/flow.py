@@ -219,43 +219,72 @@ def _create_demo(app: str, version: str, os_ver: str, domain: str) -> None:
     os_tag = "oe" + os_ver.lower().replace(".", "").replace("-", "")
     base = TARGET_DIR / domain / app
     ver_dir = base / version / os_ver
-    doc_dir = base / "doc" / "picture"
-    tests_dir = base / "tests"
-    for d in [ver_dir, doc_dir, tests_dir, base / "results" / version / os_ver]:
-        d.mkdir(parents=True, exist_ok=True)
 
-    (ver_dir / "Dockerfile").write_text(f"""ARG BASE=openeuler/openeuler:{os_ver}
+    files_created: list[str] = []
+
+    app_exists = base.is_dir()
+    version_exists = ver_dir.is_dir()
+
+    if app_exists and version_exists:
+        log(f"{domain}/{app}/{version}/{os_ver} already exists in target repo; skipping generation")
+        # Still write ai-result.json so downstream steps can proceed
+        (base / "ai-result.json").write_text(json.dumps({
+            "success": True, "package_name": app, "version": version,
+            "files_created": [f"{domain}/{app}/{version}/{os_ver}/Dockerfile (already exists)"],
+            "skipped": True,
+        }, ensure_ascii=False, indent=2))
+        return
+
+    # Create version directory
+    ver_dir.mkdir(parents=True, exist_ok=True)
+
+    # Dockerfile
+    dockerfile_path = ver_dir / "Dockerfile"
+    if not dockerfile_path.exists() or not app_exists:
+        dockerfile_path.write_text(f"""ARG BASE=openeuler/openeuler:{os_ver}
 FROM ${{BASE}}
+ARG TARGETARCH
 ARG VERSION={version}
 RUN dnf install -y {app} && dnf clean all
 EXPOSE 80
 STOPSIGNAL SIGQUIT
 CMD ["{app}", "-g", "daemon off;"]
 """)
+    files_created.append(f"{domain}/{app}/{version}/{os_ver}/Dockerfile")
 
-    (base / "meta.yml").write_text(f"""{version}-{os_tag}:
+    if not app_exists:
+        # New app — create all scaffold files (never overwrite if app exists)
+        doc_dir = base / "doc" / "picture"
+        doc_dir.mkdir(parents=True, exist_ok=True)
+        tests_dir = base / "tests"
+        tests_dir.mkdir(parents=True, exist_ok=True)
+
+        (base / "meta.yml").write_text(f"""{version}-{os_tag}:
   path: {version}/{os_ver}/Dockerfile
 """)
-
-    (base / "README.md").write_text(f"# {app}\n{app} {version} on openEuler {os_ver}\n")
-
-    (doc_dir.parent / "image-info.yml").write_text(f"""name: {app}
+        (base / "README.md").write_text(f"# {app}\n{app} {version} on openEuler {os_ver}\n")
+        (doc_dir.parent / "image-info.yml").write_text(f"""name: {app}
 category: {domain.lower()}
 description: {app} container image based on openEuler.
 license: BSD-2-Clause
 """)
-
-    (doc_dir / "logo.png").write_bytes(b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc\xf8\x0f\x00\x00\x01\x01\x00\x05\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82')
-
-    (tests_dir / "goss.yaml").write_text(f"""file:
-  /usr/sbin/{app}: {{exists: true, mode: "0755"}}
+        (doc_dir / "logo.png").write_bytes(
+            b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde'
+            b'\x00\x00\x00\x0cIDATx\x9cc\xf8\x0f\x00\x00\x01\x01\x00\x05\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82'
+        )
+        (tests_dir / "goss.yaml").write_text(f"""file:
+  /usr/sbin/{app}:
+    exists: true
+    mode: "0755"
 package:
-  {app}: {{installed: true}}
+  {app}:
+    installed: true
 port:
-  tcp:80: {{listening: true, timeout: 15000}}
+  tcp:80:
+    listening: true
+    timeout: 15000
 """)
-
-    (tests_dir / "test_helpers.sh").write_text("""wait_for_port() {
+        (tests_dir / "test_helpers.sh").write_text("""wait_for_port() {
     local port=$1 timeout=${2:-30}
     for _ in $(seq 1 "$timeout"); do
         if ss -tlnp 2>/dev/null | grep -q ":$port "; then return 0; fi
@@ -263,8 +292,34 @@ port:
     done; return 1
 }
 """)
+        files_created.extend([
+            f"{domain}/{app}/meta.yml",
+            f"{domain}/{app}/README.md",
+            f"{domain}/{app}/doc/image-info.yml",
+            f"{domain}/{app}/doc/picture/logo.png",
+            f"{domain}/{app}/tests/goss.yaml",
+            f"{domain}/{app}/tests/test_helpers.sh",
+        ])
 
-    (ver_dir / "test.sh").write_text(f"""#!/bin/bash
+        # Update image-list.yml
+        il = TARGET_DIR / domain / "image-list.yml"
+        if not il.exists():
+            il.write_text(f"images:\n  {app}: {app}\n")
+        elif app not in il.read_text():
+            with il.open("a") as f:
+                f.write(f"  {app}: {app}\n")
+    else:
+        # App exists, only append new version to meta.yml
+        new_entry = f"\n{version}-{os_tag}:\n  path: {version}/{os_ver}/Dockerfile\n"
+        meta_path = base / "meta.yml"
+        curr = meta_path.read_text()
+        if f"{version}-{os_tag}" not in curr:
+            meta_path.write_text(curr.rstrip() + new_entry)
+
+    # test.sh for this version
+    test_sh_path = ver_dir / "test.sh"
+    if not test_sh_path.exists() or not app_exists:
+        test_sh_path.write_text(f"""#!/bin/bash
 set -e; set -o pipefail
 CONTAINER_NAME="${{CONTAINER_NAME:-${{PACKAGE_NAME:-{app}}}-test}}"
 BINARY="{app}"
@@ -273,30 +328,14 @@ test_version_command() {{ docker exec "$CONTAINER_NAME" "$BINARY" -v >/dev/null 
 main() {{ local f=0; test_binary_exists || f=$((f+1)); test_version_command || f=$((f+1)); [ "$f" -eq 0 ] && echo "ALL_TESTS_PASSED" && exit 0 || {{ echo "TESTS_FAILED: $f failures"; exit 1; }} }}
 main "$@"
 """)
+    files_created.append(f"{domain}/{app}/{version}/{os_ver}/test.sh")
 
     (base / "ai-result.json").write_text(json.dumps({
         "success": True, "package_name": app, "version": version,
-        "files_created": [
-            f"{domain}/{app}/{version}/{os_ver}/Dockerfile",
-            f"{domain}/{app}/meta.yml",
-            f"{domain}/{app}/README.md",
-            f"{domain}/{app}/doc/image-info.yml",
-            f"{domain}/{app}/doc/picture/logo.png",
-            f"{domain}/{app}/tests/goss.yaml",
-            f"{domain}/{app}/tests/test_helpers.sh",
-            f"{domain}/{app}/{version}/{os_ver}/test.sh",
-        ],
+        "files_created": files_created,
     }, ensure_ascii=False, indent=2))
 
-    # Update image-list.yml
-    il = TARGET_DIR / domain / "image-list.yml"
-    if not il.exists():
-        il.write_text(f"images:\n  {app}: {app}\n")
-    elif app not in il.read_text():
-        with il.open("a") as f:
-            f.write(f"  {app}: {app}\n")
-
-    log(f"Demo files created for {domain}/{app}")
+    log(f"Demo files created for {domain}/{app} (app_exists={app_exists}, version_exists=False)")
 
 
 # ── step 3: build + test ───────────────────────────────────────────────────
