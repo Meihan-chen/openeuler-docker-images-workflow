@@ -633,11 +633,14 @@ def main() -> None:
             break
 
         if attempt < MAX_RETRIES:
-            log(f"Some platforms failed; running fixer (attempt {attempt})")
-            logs = {}
-            for lf in WORKSPACE.glob("build-*.log"):
-                logs[lf.name] = lf.read_text()
-            run_fixer(args.app, args.version, args.os, args.domain, logs)
+            if args.demo:
+                log("Demo mode: skipping fixer, retrying build+test")
+            else:
+                log(f"Some platforms failed; running fixer (attempt {attempt})")
+                logs = {}
+                for lf in WORKSPACE.glob("build-*.log"):
+                    logs[lf.name] = lf.read_text()
+                run_fixer(args.app, args.version, args.os, args.domain, logs)
         else:
             log(f"All {MAX_RETRIES} attempts exhausted")
 
