@@ -175,7 +175,19 @@ jobs:
             --base-sha "${{ steps.base.outputs.sha }}" \
             --output "${RUNNER_TEMP}/phase1-prepare/changes.patch"
 
+      - name: Create failure diagnostic patch
+        if: ${{ failure() && steps.base.outputs.sha != '' }}
+        continue-on-error: true
+        run: |
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/phase1.py \
+            target-create-patch \
+            --workspace "${RUNNER_TEMP}/phase1-target" \
+            --branch master \
+            --base-sha "${{ steps.base.outputs.sha }}" \
+            --output "${RUNNER_TEMP}/phase1-prepare/changes.patch"
+
       - name: Upload generation artifact
+        if: ${{ always() && steps.base.outputs.sha != '' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: phase1-generation-${{ github.run_id }}

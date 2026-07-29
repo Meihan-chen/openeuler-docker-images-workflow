@@ -226,6 +226,23 @@ def test_pipeline_smoke_reuses_candidate_chain_without_ai_or_gitcode_steps():
     assert "not promotable" in package_text
 
 
+def test_prepare_uploads_reports_and_diagnostic_patch_after_generation_failure():
+    prepare = _workflow()["jobs"]["prepare"]
+    steps = {step["name"]: step for step in prepare["steps"]}
+
+    diagnostic_patch = steps["Create failure diagnostic patch"]
+    assert "failure()" in diagnostic_patch["if"]
+    assert "steps.base.outputs.sha != ''" in diagnostic_patch["if"]
+    assert diagnostic_patch["continue-on-error"] is True
+    assert "target-create-patch" in diagnostic_patch["run"]
+    assert "changes.patch" in diagnostic_patch["run"]
+
+    upload = steps["Upload generation artifact"]
+    assert "always()" in upload["if"]
+    assert "steps.base.outputs.sha != ''" in upload["if"]
+    assert upload["with"]["path"] == "${{ runner.temp }}/phase1-prepare/"
+
+
 def test_summary_markdown_does_not_trigger_single_quote_shellcheck_warning():
     text = WORKFLOW_PATH.read_text()
 

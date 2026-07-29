@@ -45,6 +45,33 @@ def _approved_tests():
     }
 
 
+def _fully_approved_agent(*, image_summary="approved"):
+    return StubAgent(
+        {
+            "image_creator": [
+                {
+                    "success": True,
+                    "files_created": ["Database/kvrocks/meta.yml"],
+                }
+            ],
+            "image_qa": [
+                {
+                    "status": "approved",
+                    "issues": [],
+                    "summary": image_summary,
+                }
+            ],
+            "testcase_creator": [
+                {
+                    "success": True,
+                    "files_created": ["Database/kvrocks/tests/goss.yaml"],
+                }
+            ],
+            "testcase_qa": [_approved_tests()],
+        }
+    )
+
+
 def test_generation_runs_adversarial_pairs_and_one_target_gate(
     tmp_path,
     capsys,
@@ -130,6 +157,14 @@ def test_generation_runs_adversarial_pairs_and_one_target_gate(
         [json.loads(path.read_text()) for path in reports.iterdir()]
     )
     output = capsys.readouterr().out
+    assert (
+        '[flow][review] RESULT image_qa round=1 status=needs_fix '
+        'issues=1 summary="one issue"'
+    ) in output
+    assert (
+        '[flow][review] RESULT image_qa round=2 status=approved '
+        'issues=0 summary="approved"'
+    ) in output
     markers = [
         "[flow][generate] START image_creator",
         "[flow][generate] PASS image_creator",
@@ -200,6 +235,65 @@ def test_generation_continues_when_second_qa_records_disagreement(
         "[flow][review] DISAGREEMENT image_qa round=2; "
         "continue=local_validation"
     ) in capsys.readouterr().out
+
+
+def test_generation_redacts_secret_from_one_line_qa_summary(tmp_path, capsys):
+    from scripts.harness.run import run_generation_pipeline
+
+    workspace = tmp_path / "target"
+    reports = tmp_path / "evidence"
+    workspace.mkdir()
+    agent = _fully_approved_agent(
+        image_summary="approved\nwithout deepseek-secret",
+    )
+
+    run_generation_pipeline(
+        workspace=workspace,
+        report_dir=reports,
+        task=_task(),
+        base_sha="1" * 40,
+        executable=tmp_path / "opencode",
+        api_key="deepseek-secret",
+        agent_runner=agent,
+        target_validator=lambda **_: {"status": "passed"},
+    )
+
+    output = capsys.readouterr().out
+    assert "deepseek-secret" not in output
+    assert 'summary="approved without REDACTED"' in output
+
+
+def test_generation_records_failed_target_gate_before_raising(tmp_path):
+    from scripts.harness.run import (
+        GenerationPipelineError,
+        run_generation_pipeline,
+    )
+
+    workspace = tmp_path / "target"
+    reports = tmp_path / "evidence"
+    workspace.mkdir()
+    agent = _fully_approved_agent()
+    failed_gate = {
+        "status": "failed",
+        "errors": ["unexpected target path"],
+    }
+
+    with pytest.raises(
+        GenerationPipelineError,
+        match="deterministic target contract",
+    ):
+        run_generation_pipeline(
+            workspace=workspace,
+            report_dir=reports,
+            task=_task(),
+            base_sha="1" * 40,
+            executable=tmp_path / "opencode",
+            api_key="deepseek-secret",
+            agent_runner=agent,
+            target_validator=lambda **_: failed_gate,
+        )
+
+    assert json.loads((reports / "gates.json").read_text()) == failed_gate
 
 
 def test_generation_reports_must_be_outside_target_workspace(tmp_path):

@@ -131,6 +131,27 @@ def _write_report(
     )
 
 
+def _log_review_result(
+    *,
+    qa_role: str,
+    round_number: int,
+    payload: Mapping[str, object],
+    api_key: str,
+) -> None:
+    issues = payload.get("issues", [])
+    issue_count = len(issues) if isinstance(issues, list) else 0
+    summary = " ".join(str(payload.get("summary", "")).split())
+    if api_key:
+        summary = summary.replace(api_key, "REDACTED")
+    summary = summary[:200]
+    log(
+        "review",
+        f"RESULT {qa_role} round={round_number} "
+        f"status={payload.get('status')} issues={issue_count} "
+        f"summary={json.dumps(summary, ensure_ascii=False)}",
+    )
+
+
 def _default_validator(
     *,
     workspace: Path,
@@ -181,6 +202,12 @@ def _review_pair(
         prompt=build_role_prompt(role=qa_role, task=task, base_sha=base_sha),
     )
     _write_report(report_dir, f"{qa_role.replace('_', '-')}-round1.json", review.payload, api_key)
+    _log_review_result(
+        qa_role=qa_role,
+        round_number=1,
+        payload=review.payload,
+        api_key=api_key,
+    )
     if review.payload.get("status") == "approved":
         log("review", f"PASS {qa_role} round=1")
         return 0
@@ -226,6 +253,12 @@ def _review_pair(
         f"{qa_role.replace('_', '-')}-round2.json",
         second.payload,
         api_key,
+    )
+    _log_review_result(
+        qa_role=qa_role,
+        round_number=2,
+        payload=second.payload,
+        api_key=api_key,
     )
     second_status = second.payload.get("status")
     if second_status == "approved":
@@ -327,10 +360,10 @@ def run_generation_pipeline(
         task=task,
         base_sha=base_sha,
     )
+    _write_report(report_dir, "gates.json", gate_report, api_key)
     if gate_report.get("status") != "passed":
         raise GenerationPipelineError("deterministic target contract did not pass")
     log("gate", "PASS target_contract")
-    _write_report(report_dir, "gates.json", gate_report, api_key)
     return GenerationResult(
         status="passed",
         qa_fix_rounds=fix_rounds,
