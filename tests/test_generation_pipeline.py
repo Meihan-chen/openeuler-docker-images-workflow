@@ -235,27 +235,165 @@ def test_hadolint_runner_reports_command_failure(tmp_path, monkeypatch):
     assert "missing-hadolint" in unavailable["output"]
 
 
+def test_generation_returns_failed_image_lint_to_creator_once(tmp_path):
+    from scripts.lib.generation_pipeline import run_generation_pipeline
+
+    workspace = tmp_path / "target"
+    reports = tmp_path / "evidence"
+    workspace.mkdir()
+    image_creator = {
+        "success": True,
+        "files_created": ["Database/kvrocks/meta.yml"],
+    }
+    agent = StubAgent(
+        {
+            "image_creator": [image_creator, image_creator],
+            "image_qa": [_approved_image()],
+            "testcase_creator": [
+                {
+                    "success": True,
+                    "files_created": ["Database/kvrocks/tests/goss.yaml"],
+                }
+            ],
+            "testcase_qa": [_approved_tests()],
+        }
+    )
+    lint_results = iter(
+        (
+            {
+                "status": "failed",
+                "returncode": 1,
+                "output": "Dockerfile:9 DL3033 pin yum packages",
+            },
+            {"status": "passed", "returncode": 0, "output": ""},
+        )
+    )
+
+    result = run_generation_pipeline(
+        workspace=workspace,
+        report_dir=reports,
+        task=_task(),
+        base_sha="1" * 40,
+        executable=tmp_path / "opencode",
+        api_key="deepseek-secret",
+        agent_runner=agent,
+        target_validator=lambda **_: {"status": "passed"},
+        image_linter=lambda _: next(lint_results),
+    )
+
+    assert result.status == "passed"
+    assert [call["role"] for call in agent.calls] == [
+        "image_creator",
+        "image_creator",
+        "image_qa",
+        "testcase_creator",
+        "testcase_qa",
+    ]
+    assert "DL3033 pin yum packages" in agent.calls[1]["prompt"]
+    assert json.loads((reports / "image-lint.json").read_text())[
+        "status"
+    ] == "failed"
+    assert json.loads((reports / "image-precheck-repair-lint.json").read_text())[
+        "status"
+    ] == "passed"
+
+
+def test_generation_returns_failed_testcase_gate_to_creator_once(tmp_path):
+    from scripts.lib.generation_pipeline import run_generation_pipeline
+
+    workspace = tmp_path / "target"
+    reports = tmp_path / "evidence"
+    workspace.mkdir()
+    testcase_creator = {
+        "success": True,
+        "files_created": ["Database/kvrocks/tests/goss.yaml"],
+    }
+    agent = StubAgent(
+        {
+            "image_creator": [
+                {
+                    "success": True,
+                    "files_created": ["Database/kvrocks/meta.yml"],
+                }
+            ],
+            "image_qa": [_approved_image()],
+            "testcase_creator": [testcase_creator, testcase_creator],
+            "testcase_qa": [_approved_tests()],
+        }
+    )
+    full_results = iter(
+        (
+            {
+                "status": "failed",
+                "errors": ["required generated file is missing: tests/test.sh"],
+            },
+            {"status": "passed"},
+            {"status": "passed"},
+        )
+    )
+
+    def validator(*, phase, **_):
+        if phase == "image":
+            return {"status": "passed"}
+        return next(full_results)
+
+    result = run_generation_pipeline(
+        workspace=workspace,
+        report_dir=reports,
+        task=_task(),
+        base_sha="1" * 40,
+        executable=tmp_path / "opencode",
+        api_key="deepseek-secret",
+        agent_runner=agent,
+        target_validator=validator,
+    )
+
+    assert result.status == "passed"
+    assert [call["role"] for call in agent.calls] == [
+        "image_creator",
+        "image_qa",
+        "testcase_creator",
+        "testcase_creator",
+        "testcase_qa",
+    ]
+    assert "required generated file is missing" in agent.calls[3]["prompt"]
+    assert json.loads((reports / "precheck-gates.json").read_text())[
+        "status"
+    ] == "failed"
+    assert json.loads((reports / "precheck-repair-gates.json").read_text())[
+        "status"
+    ] == "passed"
+
+
 @pytest.mark.parametrize(
-    ("failure", "error", "report_name"),
+    ("failure", "error", "report_name", "repair_report_name"),
     [
         (
             "gate",
-            "deterministic image precheck",
+            "deterministic image repair precheck",
             "image-precheck-gates.json",
+            "image-precheck-repair-gates.json",
         ),
         (
             "decode",
-            "deterministic image precheck",
+            "deterministic image repair precheck",
             "image-precheck-gates.json",
+            "image-precheck-repair-gates.json",
         ),
-        ("lint", "image_lint", "image-lint.json"),
+        (
+            "lint",
+            "image_lint_repair",
+            "image-lint.json",
+            "image-precheck-repair-lint.json",
+        ),
     ],
 )
-def test_generation_stops_before_image_qa_on_static_failure(
+def test_generation_stops_before_image_qa_after_one_static_repair(
     tmp_path,
     failure,
     error,
     report_name,
+    repair_report_name,
 ):
     from scripts.lib.generation_pipeline import (
         GenerationPipelineError,
@@ -266,6 +404,12 @@ def test_generation_stops_before_image_qa_on_static_failure(
     reports = tmp_path / "evidence"
     workspace.mkdir()
     agent = _fully_approved_agent()
+    agent.responses["image_creator"].append(
+        {
+            "success": True,
+            "files_created": ["Database/kvrocks/meta.yml"],
+        }
+    )
 
     def validator(**_):
         if failure == "decode":
@@ -294,8 +438,16 @@ def test_generation_stops_before_image_qa_on_static_failure(
             image_linter=image_linter,
         )
 
-    assert [call["role"] for call in agent.calls] == ["image_creator"]
+    assert [call["role"] for call in agent.calls] == [
+        "image_creator",
+        "image_creator",
+    ]
+    if failure in {"gate", "decode"}:
+        assert '"status": "skipped"' in agent.calls[1]["prompt"]
     assert json.loads((reports / report_name).read_text())["status"] == "failed"
+    assert json.loads((reports / repair_report_name).read_text())[
+        "status"
+    ] == "failed"
 
 
 @pytest.mark.parametrize(
@@ -465,9 +617,9 @@ def test_generation_runs_adversarial_pairs_and_records_evidence(
         1800,
         180,
     ]
-    assert "QA report to resolve" in agent.calls[2]["prompt"]
+    assert "Review report to resolve" in agent.calls[2]["prompt"]
     assert "fix health" in agent.calls[2]["prompt"]
-    assert "Only fix the reported QA issues" in agent.calls[2]["prompt"]
+    assert "Only fix the reported issues" in agent.calls[2]["prompt"]
     assert (
         "Your final response MUST be exactly one JSON object"
         in agent.calls[2]["prompt"]
@@ -661,6 +813,12 @@ def test_generation_precheck_fails_before_testcase_qa(tmp_path):
     reports = tmp_path / "evidence"
     workspace.mkdir()
     agent = _fully_approved_agent()
+    agent.responses["testcase_creator"].append(
+        {
+            "success": True,
+            "files_created": ["Database/kvrocks/tests/goss.yaml"],
+        }
+    )
     from scripts.lib.target_contract import TargetContractError
 
     def failed_validator(*, phase, **_):
@@ -672,7 +830,7 @@ def test_generation_precheck_fails_before_testcase_qa(tmp_path):
 
     with pytest.raises(
         GenerationPipelineError,
-        match="deterministic target precheck",
+        match="deterministic target repair precheck",
     ):
         run_generation_pipeline(
             workspace=workspace,
@@ -689,8 +847,13 @@ def test_generation_precheck_fails_before_testcase_qa(tmp_path):
         "image_creator",
         "image_qa",
         "testcase_creator",
+        "testcase_creator",
     ]
     assert json.loads((reports / "precheck-gates.json").read_text()) == {
+        "status": "failed",
+        "errors": ["required generated file is missing: tests/test.sh"],
+    }
+    assert json.loads((reports / "precheck-repair-gates.json").read_text()) == {
         "status": "failed",
         "errors": ["required generated file is missing: tests/test.sh"],
     }
@@ -934,6 +1097,8 @@ def test_phase1_prompts_pin_kvrocks_paths_and_forbid_scope_escape():
     assert "/dev/tcp" in prompt
     assert "restart persistence" in prompt
     assert "LICENSE and NOTICE" in prompt
+    assert "Do not install or upgrade host tools or packages" in prompt
+    assert "Do not run Docker builds or invoke linters" in prompt
     assert "Your final response MUST be exactly one JSON object" in prompt
     assert "documented `success` and `files_created` keys" in prompt
     assert "tool output is not the final response" in prompt

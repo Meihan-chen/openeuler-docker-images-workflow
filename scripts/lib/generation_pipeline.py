@@ -189,6 +189,14 @@ def build_role_prompt(
             "documentation and logo are read-only."
         )
     contract_lines.extend(_application_contract(task, role))
+    contract_lines.extend(
+        (
+            "- Do not install or upgrade host tools or packages with brew, "
+            "apt, dnf, yum, pip, or similar commands.",
+            "- Do not run Docker builds or invoke linters; the harness runs "
+            "those validations after your response.",
+        )
+    )
     contract_lines.append(
         "- Do not run git commit, git push, or any GitCode API write."
     )
@@ -197,9 +205,9 @@ def build_role_prompt(
     if review is not None:
         parts.extend(
             (
-                "## QA report to resolve",
+                "## Review report to resolve",
                 "",
-                "Only fix the reported QA issues; do not regenerate unrelated content.",
+                "Only fix the reported issues; do not regenerate unrelated content.",
                 "",
                 "```json",
                 json.dumps(review, ensure_ascii=False, indent=2, sort_keys=True),
@@ -607,6 +615,7 @@ def run_generation_pipeline(
         report_name: str,
         stage: str,
         failure_message: str,
+        fail_closed: bool = True,
     ) -> Mapping[str, object]:
         log("gate", f"START {stage}")
         report = _target_gate_report(
@@ -618,19 +627,31 @@ def run_generation_pipeline(
         )
         _write_report(report_dir, report_name, report, api_key)
         if report.get("status") != "passed":
-            raise GenerationPipelineError(failure_message)
+            if fail_closed:
+                raise GenerationPipelineError(failure_message)
+            log("gate", f"NEEDS_FIX {stage}")
+            return report
         log("gate", f"PASS {stage}")
         return report
 
-    def lint_image(*, report_name: str, stage: str) -> None:
+    def lint_image(
+        *,
+        report_name: str,
+        stage: str,
+        fail_closed: bool = True,
+    ) -> Mapping[str, object]:
         if image_linter is None:
-            return
+            return {"status": "passed"}
         log("lint", f"START {stage}")
         report = image_linter(dockerfile)
         _write_report(report_dir, report_name, report, api_key)
         if report.get("status") != "passed":
-            raise GenerationPipelineError(f"{stage} did not pass")
+            if fail_closed:
+                raise GenerationPipelineError(f"{stage} did not pass")
+            log("lint", f"NEEDS_FIX {stage}")
+            return report
         log("lint", f"PASS {stage}")
+        return report
 
     def image_owned_snapshot() -> dict[str, str]:
         image_list = workspace / task.domain / "image-list.yml"
@@ -645,6 +666,53 @@ def run_generation_pipeline(
             for path in candidates
             if path not in testcase_owned
         }
+
+    def repair_deterministic_failure(
+        *,
+        creator_role: str,
+        report_name: str,
+        findings: Mapping[str, object],
+    ) -> None:
+        validation_report = {
+            "status": "needs_fix",
+            "issues": [
+                {
+                    "severity": "blocker",
+                    "description": "Deterministic validation failed.",
+                    "findings": findings,
+                }
+            ],
+            "summary": (
+                "Fix only the deterministic validation findings, "
+                "then return the required Creator result."
+            ),
+        }
+        log("repair", f"START {creator_role} deterministic_validation")
+        repaired = _run(
+            agent_runner=agent_runner,
+            executable=executable,
+            workspace=workspace,
+            api_key=api_key,
+            role=creator_role,
+            report_dir=report_dir,
+            prompt=build_role_prompt(
+                role=creator_role,
+                task=task,
+                base_sha=base_sha,
+                review=validation_report,
+            ),
+        )
+        _write_report(
+            report_dir,
+            report_name,
+            repaired.payload,
+            api_key,
+        )
+        if repaired.payload.get("success") is not True:
+            raise GenerationPipelineError(
+                f"{creator_role} deterministic repair failed"
+            )
+        log("repair", f"PASS {creator_role} deterministic_validation")
 
     log("generate", "START image_creator")
     creator = _run(
@@ -665,16 +733,44 @@ def run_generation_pipeline(
         raise GenerationPipelineError("image_creator did not complete successfully")
     log("generate", "PASS image_creator")
 
-    enforce_gate(
+    image_gate = enforce_gate(
         phase="image",
         report_name="image-precheck-gates.json",
         stage="image_precheck",
         failure_message="deterministic image precheck did not pass",
+        fail_closed=False,
     )
-    lint_image(
-        report_name="image-lint.json",
-        stage="image_lint",
-    )
+    image_lint: Mapping[str, object] = {
+        "status": "skipped",
+        "reason": "image gate did not pass",
+    }
+    if image_gate.get("status") == "passed":
+        image_lint = lint_image(
+            report_name="image-lint.json",
+            stage="image_lint",
+            fail_closed=False,
+        )
+    if (
+        image_gate.get("status") != "passed"
+        or image_lint.get("status") != "passed"
+    ):
+        repair_deterministic_failure(
+            creator_role="image_creator",
+            report_name="image-creator-precheck-repair.json",
+            findings={"gate": image_gate, "lint": image_lint},
+        )
+        enforce_gate(
+            phase="image",
+            report_name="image-precheck-repair-gates.json",
+            stage="image_precheck_repair",
+            failure_message=(
+                "deterministic image repair precheck did not pass"
+            ),
+        )
+        lint_image(
+            report_name="image-precheck-repair-lint.json",
+            stage="image_lint_repair",
+        )
 
     def recheck_image_repair() -> None:
         enforce_gate(
@@ -748,12 +844,31 @@ def run_generation_pipeline(
         role="testcase_creator",
     )
 
-    enforce_gate(
+    testcase_gate = enforce_gate(
         phase="full",
         report_name="precheck-gates.json",
         stage="generated_precheck",
         failure_message="deterministic target precheck did not pass",
+        fail_closed=False,
     )
+    if testcase_gate.get("status") != "passed":
+        repair_deterministic_failure(
+            creator_role="testcase_creator",
+            report_name="testcase-creator-precheck-repair.json",
+            findings={"gate": testcase_gate},
+        )
+        enforce_testcase_ownership(
+            report_name="testcase-precheck-repair-ownership.json",
+            role="testcase_creator deterministic repair",
+        )
+        enforce_gate(
+            phase="full",
+            report_name="precheck-repair-gates.json",
+            stage="generated_precheck_repair",
+            failure_message=(
+                "deterministic target repair precheck did not pass"
+            ),
+        )
 
     def recheck_testcase_repair() -> None:
         enforce_testcase_ownership(
