@@ -9,10 +9,10 @@ from typing import Callable, Mapping
 
 import yaml
 
-from scripts.harness.gate_diff import validate_generated_target
 from scripts.lib.agent_runtime import AgentResult, run_agent
 from scripts.lib.progress import log
 from scripts.lib.task_spec import TaskSpec
+from scripts.lib.target_contract import validate_generated_target
 
 
 class GenerationPipelineError(RuntimeError):

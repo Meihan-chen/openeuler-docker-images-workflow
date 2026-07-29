@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping
 
-from scripts.harness.gate_diff import validate_generated_target
 from scripts.lib.agent_runtime import AgentResult, run_agent
 from scripts.lib.generation_pipeline import build_role_prompt
 from scripts.lib.native_validation import (
@@ -15,6 +14,7 @@ from scripts.lib.native_validation import (
     validate_native_image,
 )
 from scripts.lib.task_spec import TaskSpec
+from scripts.lib.target_contract import validate_generated_target
 
 
 class NativeRepairError(RuntimeError):

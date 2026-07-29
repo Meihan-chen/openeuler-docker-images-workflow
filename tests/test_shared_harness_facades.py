@@ -61,6 +61,15 @@ def test_runner_and_smoke_helpers_live_with_their_owning_pipeline():
     assert "def write_smoke_candidate(" in generation
 
 
+def test_lib_layer_never_imports_cli_facades():
+    lib = ROOT / "scripts" / "lib"
+
+    for path in lib.glob("*.py"):
+        source = path.read_text()
+        assert "from scripts.harness" not in source, path.name
+        assert "from scripts.utils" not in source, path.name
+
+
 def test_agent_execution_is_exposed_through_flow_orchestrator():
     workflow = (
         ROOT / ".github" / "workflows" / "new-image.yml"

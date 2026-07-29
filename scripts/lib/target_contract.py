@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import xml.etree.ElementTree as ET
@@ -10,7 +11,6 @@ from pathlib import Path
 
 import yaml
 
-from scripts.harness.validate_meta import validate_task_meta_file
 from scripts.lib.task_spec import TaskSpec
 
 
@@ -39,6 +39,91 @@ _VERSION_INFO_FIELDS = {
     "python_version",
     "numpy_version",
 }
+
+
+def validate_meta_file(meta_path: str | Path) -> list[str]:
+    """Validate the shared meta.yml schema against its local Dockerfiles."""
+    path = Path(meta_path)
+    errors = []
+    try:
+        data = yaml.safe_load(path.read_text())
+    except yaml.YAMLError as error:
+        return [f"Invalid YAML: {error}"]
+
+    if not data:
+        return ["meta.yml is empty"]
+
+    for tag, entry in data.items():
+        if not isinstance(entry, dict):
+            errors.append(
+                f"Tag '{tag}': entry must be a dict, "
+                f"got {type(entry).__name__}"
+            )
+            continue
+        if "-oe" not in tag:
+            errors.append(
+                f"Tag '{tag}': must follow format '{{app-ver}}-oe{{os-ver}}'"
+            )
+
+        relative = entry.get("path", "")
+        if not relative:
+            errors.append(f"Tag '{tag}': missing 'path' field")
+        elif not (path.parent / relative).exists():
+            errors.append(f"Tag '{tag}': path '{relative}' does not exist")
+
+        architecture = entry.get("arch")
+        if architecture and architecture not in ("x86_64", "aarch64"):
+            errors.append(
+                f"Tag '{tag}': arch must be 'x86_64' or 'aarch64', "
+                f"got '{architecture}'"
+            )
+    return errors
+
+
+def validate_task_meta_file(
+    meta_path: str | Path,
+    task: object,
+) -> list[str]:
+    """Apply the shared schema and exact TaskSpec meta.yml contracts."""
+    path = Path(meta_path)
+    errors = validate_meta_file(path)
+    try:
+        data = yaml.safe_load(path.read_text())
+    except (OSError, yaml.YAMLError):
+        return errors
+    if not isinstance(data, dict):
+        return errors
+
+    version = str(getattr(task, "version"))
+    os_version = str(getattr(task, "os_version"))
+    expected_tag = (
+        f"{version}-oe"
+        f"{os_version.replace('.', '').replace('-lts-sp', 'sp')}"
+    )
+    if set(data) != {expected_tag}:
+        errors.append(f"meta.yml must contain only tag {expected_tag}")
+        return errors
+    entry = data[expected_tag]
+    expected_path = f"{version}/{os_version}/Dockerfile"
+    if not isinstance(entry, dict) or entry.get("path") != expected_path:
+        errors.append(f"meta.yml path must be {expected_path}")
+        return errors
+    if "arch" in entry:
+        errors.append(
+            "meta.yml must omit arch for dual-architecture publication"
+        )
+    return errors
+
+
+def find_all_meta_files(root: str | Path) -> list[str]:
+    """Find all meta.yml files below a target repository root."""
+    meta_files = []
+    for directory, _, filenames in os.walk(root):
+        if ".git" in directory:
+            continue
+        if "meta.yml" in filenames:
+            meta_files.append(os.path.join(directory, "meta.yml"))
+    return meta_files
 
 
 def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
