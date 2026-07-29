@@ -6,9 +6,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CLI = ROOT / "scripts" / "harness" / "phase1.py"
-AGENT_CLI = ROOT / "scripts" / "harness" / "run.py"
-FLOW_CLI = ROOT / "scripts" / "harness" / "flow.py"
+CLI = ROOT / "scripts" / "harness" / "flow.py"
 GATE_CLI = ROOT / "scripts" / "harness" / "gate_diff.py"
 ARTIFACT_CLI = ROOT / "scripts" / "utils" / "artifacts.py"
 BASE_SHA = "1d49c0858d8d8152acb1bd3caf5cd862b091160f"
@@ -19,18 +17,6 @@ def _run(*args):
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     return subprocess.run(
         [sys.executable, str(CLI), *args],
-        cwd=ROOT,
-        env=env,
-        capture_output=True,
-        text=True,
-    )
-
-
-def _run_agent_harness(*args):
-    env = os.environ.copy()
-    env["PYTHONDONTWRITEBYTECODE"] = "1"
-    return subprocess.run(
-        [sys.executable, str(AGENT_CLI), *args],
         cwd=ROOT,
         env=env,
         capture_output=True,
@@ -310,16 +296,13 @@ def test_pipeline_stage_commands_are_exposed():
     for command in (
         "fork-deliver",
         "issue-contract-test",
-    ):
-        result = _run(command, "--help")
-        assert result.returncode == 0, f"{command}: {result.stderr}"
-
-    for command in (
         "phase1-generate",
+        "phase1-smoke-generate",
+        "phase1-native-smoke",
         "phase1-native-repair",
         "phase1-native-validate",
     ):
-        result = _run_agent_harness(command, "--help")
+        result = _run(command, "--help")
         assert result.returncode == 0, f"{command}: {result.stderr}"
 
     for script, command in (
@@ -330,19 +313,25 @@ def test_pipeline_stage_commands_are_exposed():
         assert result.returncode == 0, f"{command}: {result.stderr}"
 
 
-def test_flow_is_the_public_entry_for_agent_and_native_stages():
+def test_flow_is_the_only_phase_one_entry():
     for command in (
+        "task-spec",
+        "candidate-create",
+        "candidate-verify",
+        "target-clone",
+        "target-create-patch",
+        "target-apply-patch",
+        "fork-deliver",
+        "issue-contract-test",
         "phase1-generate",
         "phase1-smoke-generate",
         "phase1-native-smoke",
         "phase1-native-repair",
         "phase1-native-validate",
     ):
-        result = _run_script(FLOW_CLI, command, "--help")
+        result = _run(command, "--help")
         assert result.returncode == 0, f"{command}: {result.stderr}"
-        assert "--task-spec" in result.stdout
-        if command == "phase1-smoke-generate":
-            assert "--opencode" not in result.stdout
+    assert not (ROOT / "scripts" / "harness" / "phase1.py").exists()
 
 
 def test_fork_delivery_reads_token_only_from_environment():
@@ -370,7 +359,7 @@ def test_shared_agent_cli_reports_contract_errors_without_traceback(tmp_path):
     result = subprocess.run(
         [
             sys.executable,
-            str(AGENT_CLI),
+            str(CLI),
             "phase1-generate",
             "--workspace",
             str(tmp_path),

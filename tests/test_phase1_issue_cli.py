@@ -33,23 +33,23 @@ class Resource:
 def test_issue_contract_handler_is_fixed_to_explicit_test_operation(
     tmp_path, monkeypatch, capsys
 ):
-    from scripts.harness import phase1
+    from scripts.harness import flow
 
     calls = []
     client = object()
     monkeypatch.setenv("GITCODE_TOKEN", "secret")
     monkeypatch.setattr(
-        phase1,
+        flow,
         "GitCodeClient",
         lambda **kwargs: calls.append(("client", kwargs)) or client,
     )
     monkeypatch.setattr(
-        phase1,
+        flow,
         "run_controlled_issue_probe",
         lambda **kwargs: calls.append(("probe", kwargs)) or Resource(),
     )
 
-    phase1._issue_contract_test(
+    flow._issue_contract_test(
         argparse.Namespace(
             task_spec=_task_file(tmp_path),
             github_run_id="123456",
@@ -74,24 +74,24 @@ def test_issue_contract_handler_is_fixed_to_explicit_test_operation(
 def test_issue_contract_handler_requires_token_before_client_or_probe(
     tmp_path, monkeypatch
 ):
-    from scripts.harness import phase1
+    from scripts.harness import flow
     from scripts.lib.issue_lifecycle import IssueLifecycleError
 
     calls = []
     monkeypatch.delenv("GITCODE_TOKEN", raising=False)
     monkeypatch.setattr(
-        phase1,
+        flow,
         "GitCodeClient",
         lambda **kwargs: calls.append("client"),
     )
     monkeypatch.setattr(
-        phase1,
+        flow,
         "run_controlled_issue_probe",
         lambda **kwargs: calls.append("probe"),
     )
 
     with pytest.raises(IssueLifecycleError, match="GITCODE_TOKEN"):
-        phase1._issue_contract_test(
+        flow._issue_contract_test(
             argparse.Namespace(
                 task_spec=_task_file(tmp_path),
                 github_run_id="123456",

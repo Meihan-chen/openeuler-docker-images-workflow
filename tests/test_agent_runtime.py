@@ -38,7 +38,7 @@ def _executable(tmp_path):
 
 
 def test_default_agent_runner_streams_safe_progress(tmp_path, capsys):
-    from scripts.harness.run import run_agent
+    from scripts.lib.agent_runtime import run_agent
 
     executable = tmp_path / "opencode"
     payload = json.dumps({"success": True, "files_created": ["meta.yml"]})
@@ -67,7 +67,7 @@ def test_default_agent_runner_streams_safe_progress(tmp_path, capsys):
 
 
 def test_write_agent_uses_pinned_model_and_scoped_permissions(tmp_path):
-    from scripts.harness.run import run_agent
+    from scripts.lib.agent_runtime import run_agent
 
     executable = _executable(tmp_path)
     workspace = tmp_path / "target"
@@ -116,7 +116,7 @@ def test_write_agent_uses_pinned_model_and_scoped_permissions(tmp_path):
 
 
 def test_qa_agent_is_read_only_and_parses_multiline_json_from_event(tmp_path):
-    from scripts.harness.run import run_agent
+    from scripts.lib.agent_runtime import run_agent
 
     executable = _executable(tmp_path)
     workspace = tmp_path / "target"
@@ -157,7 +157,7 @@ def test_qa_agent_is_read_only_and_parses_multiline_json_from_event(tmp_path):
 
 
 def test_agent_failure_and_parse_errors_never_expose_api_key(tmp_path):
-    from scripts.harness.run import AgentRuntimeError, run_agent
+    from scripts.lib.agent_runtime import AgentRuntimeError, run_agent
 
     executable = _executable(tmp_path)
     workspace = tmp_path / "target"
@@ -183,7 +183,7 @@ def test_agent_failure_and_parse_errors_never_expose_api_key(tmp_path):
 
 
 def test_agent_rejects_successful_process_without_required_json_contract(tmp_path):
-    from scripts.harness.run import AgentRuntimeError, run_agent
+    from scripts.lib.agent_runtime import AgentRuntimeError, run_agent
 
     executable = _executable(tmp_path)
     workspace = tmp_path / "target"

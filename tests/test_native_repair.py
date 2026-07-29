@@ -51,7 +51,7 @@ class Fixer:
         self.calls = []
 
     def __call__(self, **kwargs):
-        from scripts.harness.run import AgentResult
+        from scripts.lib.agent_runtime import AgentResult
 
         self.calls.append(kwargs)
         return AgentResult(
@@ -67,7 +67,7 @@ class Fixer:
 def test_zero_repair_success_writes_nonempty_agent_artifact_directory(
     tmp_path,
 ):
-    from scripts.harness.run import validate_native_with_repairs
+    from scripts.lib.native_repair import validate_native_with_repairs
 
     workspace = tmp_path / "target"
     evidence = tmp_path / "evidence"
@@ -102,7 +102,7 @@ def test_zero_repair_success_writes_nonempty_agent_artifact_directory(
 
 
 def test_native_failure_is_fixed_gated_and_retried_up_to_success(tmp_path):
-    from scripts.harness.run import validate_native_with_repairs
+    from scripts.lib.native_repair import validate_native_with_repairs
 
     workspace = tmp_path / "target"
     evidence = tmp_path / "evidence"
@@ -151,7 +151,7 @@ def test_native_failure_is_fixed_gated_and_retried_up_to_success(tmp_path):
 
 
 def test_native_repair_fails_closed_after_exactly_three_fixes(tmp_path):
-    from scripts.harness.run import (
+    from scripts.lib.native_repair import (
         NativeRepairError,
         validate_native_with_repairs,
     )
@@ -185,7 +185,7 @@ def test_native_repair_fails_closed_after_exactly_three_fixes(tmp_path):
 
 
 def test_failed_scope_gate_stops_before_native_retry(tmp_path):
-    from scripts.harness.run import (
+    from scripts.lib.native_repair import (
         NativeRepairError,
         validate_native_with_repairs,
     )

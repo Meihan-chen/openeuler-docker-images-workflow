@@ -25,7 +25,7 @@ class StubAgent:
         self.calls = []
 
     def __call__(self, **kwargs):
-        from scripts.harness.run import AgentResult
+        from scripts.lib.agent_runtime import AgentResult
 
         self.calls.append(kwargs)
         role = kwargs["role"]
@@ -76,7 +76,7 @@ def test_generation_runs_adversarial_pairs_and_one_target_gate(
     tmp_path,
     capsys,
 ):
-    from scripts.harness.run import run_generation_pipeline
+    from scripts.lib.generation_pipeline import run_generation_pipeline
 
     workspace = tmp_path / "target"
     reports = tmp_path / "evidence"
@@ -183,7 +183,7 @@ def test_generation_continues_when_second_qa_records_disagreement(
     tmp_path,
     capsys,
 ):
-    from scripts.harness.run import run_generation_pipeline
+    from scripts.lib.generation_pipeline import run_generation_pipeline
 
     workspace = tmp_path / "target"
     reports = tmp_path / "evidence"
@@ -238,7 +238,7 @@ def test_generation_continues_when_second_qa_records_disagreement(
 
 
 def test_generation_redacts_secret_from_one_line_qa_summary(tmp_path, capsys):
-    from scripts.harness.run import run_generation_pipeline
+    from scripts.lib.generation_pipeline import run_generation_pipeline
 
     workspace = tmp_path / "target"
     reports = tmp_path / "evidence"
@@ -264,7 +264,7 @@ def test_generation_redacts_secret_from_one_line_qa_summary(tmp_path, capsys):
 
 
 def test_generation_records_failed_target_gate_before_raising(tmp_path):
-    from scripts.harness.run import (
+    from scripts.lib.generation_pipeline import (
         GenerationPipelineError,
         run_generation_pipeline,
     )
@@ -297,7 +297,7 @@ def test_generation_records_failed_target_gate_before_raising(tmp_path):
 
 
 def test_generation_reports_must_be_outside_target_workspace(tmp_path):
-    from scripts.harness.run import (
+    from scripts.lib.generation_pipeline import (
         GenerationPipelineError,
         run_generation_pipeline,
     )
@@ -319,7 +319,7 @@ def test_generation_reports_must_be_outside_target_workspace(tmp_path):
 
 
 def test_phase1_prompts_pin_kvrocks_paths_and_forbid_scope_escape():
-    from scripts.harness.run import build_role_prompt
+    from scripts.lib.generation_pipeline import build_role_prompt
 
     prompt = build_role_prompt(
         role="image_creator",

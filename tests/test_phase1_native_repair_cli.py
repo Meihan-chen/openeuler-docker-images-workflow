@@ -50,18 +50,18 @@ def _args(tmp_path):
 def test_native_repair_handler_passes_scoped_inputs_and_environment_key(
     tmp_path, monkeypatch, capsys
 ):
-    from scripts.harness import run
+    from scripts.harness import flow
 
     calls = []
     monkeypatch.setenv("DEEPSEEK_API_KEY", "secret")
     monkeypatch.setattr(
-        run,
+        flow,
         "validate_native_with_repairs",
         lambda **kwargs: calls.append(kwargs)
         or Result(report={"status": "passed"}),
     )
 
-    run.cmd_phase1_native_repair(_args(tmp_path))
+    flow.cmd_phase1_native_repair(_args(tmp_path))
 
     assert len(calls) == 1
     call = calls[0]
@@ -79,18 +79,18 @@ def test_native_repair_handler_passes_scoped_inputs_and_environment_key(
 def test_native_repair_handler_requires_deepseek_key_before_validation(
     tmp_path, monkeypatch
 ):
-    from scripts.harness import run
-    from scripts.harness.run import NativeRepairError
+    from scripts.harness import flow
+    from scripts.lib.native_repair import NativeRepairError
 
     calls = []
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     monkeypatch.setattr(
-        run,
+        flow,
         "validate_native_with_repairs",
         lambda **kwargs: calls.append(kwargs),
     )
 
     with pytest.raises(NativeRepairError, match="DEEPSEEK_API_KEY"):
-        run.cmd_phase1_native_repair(_args(tmp_path))
+        flow.cmd_phase1_native_repair(_args(tmp_path))
 
     assert calls == []

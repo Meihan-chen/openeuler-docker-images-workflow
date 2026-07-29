@@ -6,7 +6,7 @@ AGENTS_DIR = ROOT / ".github" / "agents"
 
 
 def test_scenario_one_reuses_the_shared_agent_definitions():
-    from scripts.harness.run import build_role_prompt
+    from scripts.lib.generation_pipeline import build_role_prompt
     from scripts.lib.task_spec import TaskSpec
 
     assert not (AGENTS_DIR / "phase1").exists()

@@ -1,800 +1,538 @@
 #!/usr/bin/env python3
-"""Workflow orchestrator for legacy and phase-one stage commands.
+"""Single public CLI for the phase-one new-image workflow."""
 
-Usage:
-    python flow.py --app nginx --version 1.27.2 --os 24.03-lts --domain Cloud
+from __future__ import annotations
 
-    # demo mode (skip LLM agents)
-    python flow.py --app nginx --version 1.27.2 --os 24.03-lts --domain Cloud --demo
-
-Environment:
-    GITCODE_TOKEN          - GitCode personal access token (write access)
-    TARGET_REPO            - "openeuler/openeuler-docker-images" (default)
-    TARGET_REPO_HOST       - "gitcode.com" (default)
-    DEEPSEEK_API_KEY       - (optional, for real agent mode)
-    OPENCODE_MODEL         - (default deepseek/deepseek-v4-pro)
-"""
-
+import argparse
 import json
 import os
-import re
-import shutil
-import subprocess
 import sys
-import time
-import urllib.parse
-import urllib.request
+from dataclasses import asdict
 from pathlib import Path
 
-# ── config ──────────────────────────────────────────────────────────────────
-GITCODE_TOKEN = os.environ.get("GITCODE_TOKEN", "")
-TARGET_REPO = os.environ.get("TARGET_REPO", "openeuler/openeuler-docker-images")
-TARGET_REPO_HOST = os.environ.get("TARGET_REPO_HOST", "gitcode.com")
-GITCODE_API = "https://api.gitcode.com/api/v5"
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-AGENTS_DIR = PROJECT_ROOT / ".github" / "agents"
-WORKSPACE = Path(os.environ.get("RUNNER_TEMP", "/tmp"))
-TARGET_DIR = WORKSPACE / "target-repo"
-WORKFLOW_DIR = PROJECT_ROOT
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-MAX_RETRIES = 3
-MAX_QA_ROUNDS = 2
-OPENCODE_TIMEOUT = int(os.environ.get("OPENCODE_TIMEOUT", "2400"))
-_PHASE1_STAGE_COMMANDS = {
-    "phase1-generate",
-    "phase1-smoke-generate",
-    "phase1-native-smoke",
-    "phase1-native-repair",
-    "phase1-native-validate",
-}
-
-
-# ── helpers ─────────────────────────────────────────────────────────────────
-def log(msg: str) -> None:
-    print(f"[flow] {msg}", flush=True)
-
-
-def die(msg: str) -> None:
-    print(f"[flow] FATAL: {msg}", file=sys.stderr, flush=True)
-    sys.exit(1)
-
-
-def sh(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
-    log(f"$ {' '.join(cmd)}")
-    return subprocess.run(cmd, **kwargs)
-
-
-def check_output(cmd: list[str], **kwargs) -> str:
-    log(f"$ {' '.join(cmd)}")
-    r = subprocess.run(cmd, capture_output=True, text=True, **kwargs)
-    if r.returncode != 0:
-        print(f"  stderr: {r.stderr[-500:]}")
-    return r.stdout
-
-
-# ── step 1: clone target repo ──────────────────────────────────────────────
-def clone_target() -> None:
-    if TARGET_DIR.exists():
-        sh(["rm", "-rf", str(TARGET_DIR)])
-    url = f"https://oauth2:{GITCODE_TOKEN}@{TARGET_REPO_HOST}/{TARGET_REPO}.git"
-    sh(["git", "clone", url, str(TARGET_DIR)], capture_output=True)
-    sh(["git", "-C", str(TARGET_DIR), "config", "user.name", "openeuler-bot"], capture_output=True)
-    sh(["git", "-C", str(TARGET_DIR), "config", "user.email", "bot@openeuler.org"], capture_output=True)
-
-
-# ── step 2: generate (adversarial pair or demo) ────────────────────────────
-def _load_agent(name: str) -> str:
-    p = AGENTS_DIR / f"{name}.md"
-    return p.read_text() if p.exists() else ""
-
-
-def _run_opencode(prompt: str) -> str:
-    if not shutil.which("opencode"):
-        die("opencode CLI not found; do `npm install -g opencode-ai`")
-
-    cmd = [
-        "opencode", "run", "--format", "json",
-        "--model", os.environ.get("OPENCODE_MODEL", "deepseek/deepseek-v4-pro"),
-        "--dangerously-skip-permissions",
-    ]
-    # Check if --auto is supported
-    hr = subprocess.run(["opencode", "run", "--help"], capture_output=True, text=True)
-    if "--auto" in (hr.stdout + hr.stderr):
-        cmd[cmd.index("--dangerously-skip-permissions")] = "--auto"
-    cmd += ["--", prompt]
-
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1, cwd=str(TARGET_DIR))
-    text_parts: list[str] = []
-    last_output = time.monotonic()
-    deadline = time.monotonic() + OPENCODE_TIMEOUT
-
-    assert proc.stdout is not None
-    for line in proc.stdout:
-        now = time.monotonic()
-        if now > deadline:
-            proc.kill()
-            log("opencode TIMEOUT")
-            break
-        if now - last_output > 300:
-            proc.kill()
-            log("opencode STALE (300s silence)")
-            break
-        last_output = now
-        try:
-            ev = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        t = ev.get("type")
-        part = ev.get("part", {})
-        if t == "text":
-            txt = part.get("text", "")
-            if txt:
-                text_parts.append(txt)
-        elif t == "tool_use":
-            s = part.get("state", {})
-            if s.get("status") == "pending":
-                inp = json.dumps(s.get("input", {}), ensure_ascii=False)[:200]
-                log(f"[opencode] {part.get('tool','')} -> {inp}")
-
-    proc.wait(timeout=10)
-    stderr_text = proc.stderr.read() if proc.stderr else ""
-    output = "".join(text_parts)
-    if not output.strip():
-        log(f"opencode produced no output; stderr: {stderr_text[-1000:]}")
-    return output
-
-
-def _parse_json(text: str) -> dict:
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-    m = text.rfind("{")
-    e = text.rfind("}")
-    if m != -1 and e > m:
-        try:
-            return json.loads(text[m:e + 1])
-        except json.JSONDecodeError:
-            pass
-    return {"status": "unknown", "raw": text}
-
-
-def _adversarial_pair(role: str, app: str, version: str, os_ver: str, domain: str, is_demo: bool) -> None:
-    if is_demo:
-        _create_demo(app, version, os_ver, domain)
-        return
-
-    os_tag = "oe" + os_ver.lower().replace(".", "").replace("-", "")
-    creator_md = _load_agent(f"{role}-creator")
-    qa_md = _load_agent(f"{role}-qa")
-
-    # Round 1: Creator
-    inst = (
-        f"Create the container image directory for {app} {version} on openEuler {os_ver}.\n"
-        if role == "image" else
-        f"Create functional test cases for {app} {version}.\n"
-    )
-    inst += (
-        f"Parameters: package_name={app}, os_version={os_ver}, os_tag={os_tag}, "
-        f"app_version={version}, category={domain}, image_repo_dir={TARGET_DIR}\n\n"
-        f"Place files under {TARGET_DIR}/{domain}/{app}/."
-    )
-    if role == "testcase":
-        inst += (
-            f" Read the Dockerfile at {TARGET_DIR}/{domain}/{app}/{version}/{os_ver}/Dockerfile. "
-            f"Create tests/goss.yaml, tests/test_helpers.sh, and a test.sh entry. "
-            f"Write test-ai-result.json."
-        )
-    else:
-        inst += " Create ONLY: Dockerfile, meta.yml, README.md, doc/image-info.yml, doc/picture/logo.png, update image-list.yml, and write ai-result.json."
-
-    creator_out = _run_opencode(f"{creator_md}\n\n## TASK (round 1):\n{inst}")
-
-    for rn in range(1, MAX_QA_ROUNDS + 1):
-        qa_inst = (
-            f"Review the files created by the {role} creator under {TARGET_DIR}/{domain}/{app}/. "
-            f"Read the actual files. Output JSON with status, issues, summary."
-        )
-        qa_out = _run_opencode(f"{qa_md}\n\n## TASK:\n{qa_inst}")
-        qa_result = _parse_json(qa_out)
-        log(f"[{role}] QA round {rn}: {qa_result.get('status')}")
-
-        # Save review record
-        record = TARGET_DIR / domain / app / f"qa-review-{role}-r{rn}.json"
-        record.parent.mkdir(parents=True, exist_ok=True)
-        record.write_text(json.dumps(qa_result, ensure_ascii=False, indent=2))
-
-        if qa_result.get("status") == "approved":
-            log(f"[{role}] approved at round {rn}")
-            return
-
-        if rn == MAX_QA_ROUNDS:
-            log(f"[{role}] not approved after {MAX_QA_ROUNDS} rounds; proceeding")
-            return
-
-        # Round N+1: Creator fixes
-        fix_inst = (
-            f"Fix these issues found by QA:\n"
-            f"{json.dumps(qa_result.get('issues', []), ensure_ascii=False, indent=2)}\n"
-            f"Only fix what QA flagged. Update ai-result.json."
-        )
-        creator_out = _run_opencode(f"{creator_md}\n\n## TASK (round {rn+1}):\n{fix_inst}")
-
-
-def _create_demo(app: str, version: str, os_ver: str, domain: str) -> None:
-    """Generate files matching the reference image structure EXACTLY.
-
-    Reference: https://gitcode.com/openeuler/openeuler-docker-images/tree/master/Bigdata/kylin
-
-    Structure:
-        {domain}/{app}/
-        ├── {version}/{os_ver}/Dockerfile
-        ├── doc/image-info.yml
-        ├── doc/picture/logo.png
-        ├── README.md
-        └── meta.yml
-
-    Additional CI-only files (NOT committed):
-        - {version}/{os_ver}/test.sh  — container verification
-        - ai-result.json              — generation metadata
-    """
-    os_tag = "oe" + os_ver.lower().replace(".", "").replace("-", "")
-    base = TARGET_DIR / domain / app
-    ver_dir = base / version / os_ver
-
-    files_committed: list[str] = []
-    app_exists = base.is_dir()
-    version_exists = ver_dir.is_dir()
-
-    if app_exists and version_exists:
-        log(f"{domain}/{app}/{version}/{os_ver} already exists; skipping")
-        return
-
-    # ── version directory + Dockerfile ──
-    ver_dir.mkdir(parents=True, exist_ok=True)
-    df_path = ver_dir / "Dockerfile"
-    if not df_path.exists():
-        df_path.write_text(f"""ARG BASE=openeuler/openeuler:{os_ver}
-FROM ${{BASE}}
-ARG TARGETARCH
-ARG VERSION={version}
-RUN dnf install -y {app} && dnf clean all
-EXPOSE 80
-STOPSIGNAL SIGQUIT
-CMD ["tail", "-f", "/dev/null"]
-""")
-    files_committed.append(f"{domain}/{app}/{version}/{os_ver}/Dockerfile")
-
-    # ── CI-only: test.sh alongside Dockerfile (NOT committed to repo) ──
-    (ver_dir / "test.sh").write_text(f"""#!/bin/bash
-set -e; set -o pipefail
-CONTAINER_NAME="${{CONTAINER_NAME:-${{PACKAGE_NAME:-{app}}}-test}}"
-BINARY="{app}"
-test_binary_exists() {{ docker exec "$CONTAINER_NAME" which "$BINARY" >/dev/null 2>&1 && echo "PASS: binary exists" || {{ echo "FAIL: binary not found"; return 1; }} }}
-test_version_command() {{ docker exec "$CONTAINER_NAME" "$BINARY" -v >/dev/null 2>&1 && echo "PASS: version command works: $(docker exec "$CONTAINER_NAME" "$BINARY" -v 2>&1 || true)" || {{ echo "FAIL: version command failed"; return 1; }} }}
-main() {{ local f=0; test_binary_exists || f=$((f+1)); test_version_command || f=$((f+1)); [ "$f" -eq 0 ] && echo "ALL_TESTS_PASSED" && exit 0 || {{ echo "TESTS_FAILED: $f failures"; exit 1; }} }}
-main "$@"
-""")
-
-    if not app_exists:
-        # ── New app: scaffold per reference structure ──
-        doc_dir = base / "doc" / "picture"
-        doc_dir.mkdir(parents=True, exist_ok=True)
-
-        # meta.yml
-        (base / "meta.yml").write_text(f"""{version}-{os_tag}:
-  path: {version}/{os_ver}/Dockerfile
-""")
-        files_committed.append(f"{domain}/{app}/meta.yml")
-
-        # README.md (matches kylin reference format)
-        url_prefix = f"https://gitee.com/openeuler/openeuler-docker-images/blob/master/{domain}/{app}"
-        (base / "README.md").write_text(f"""# Quick reference
-
-- The official {app} docker image.
-
-- Maintained by: [openEuler CloudNative SIG](https://gitee.com/openeuler/cloudnative).
-
-- Where to get help: [openEuler CloudNative SIG](https://gitee.com/openeuler/cloudnative), [openEuler](https://gitee.com/openeuler/community).
-# {app} | openEuler
-Current {app} docker images are built on the [openEuler](https://repo.openeuler.org/). This repository is free to use and exempted from per-user rate limits.
-
-Learn more on [{app} website](https://{app}.org/).
-
-# Supported tags and respective Dockerfile links
-The tag of each `{app}` docker image is consist of the version of `{app}` and the version of basic image. The details are as follows
-|    Tag   |  Currently  |   Architectures  |
-|----------|-------------|------------------|
-|[{version}-{os_tag}]({url_prefix}/{version}/{os_ver}/Dockerfile) | {app} {version} on openEuler {os_ver} | amd64, arm64 |
-
-# Usage
-```
-docker run -d --name my-{app} -p 80:80 openeuler/{app}:{{{{Tag}}}}
-```
-To stop and remove the container, use these commands.
-```
-docker stop my-{app}
-docker rm my-{app}
-```
-
-# Question and answering
-If you have any questions or want to use some special features, please submit an issue or a pull request on [openeuler-docker-images](https://gitee.com/openeuler/openeuler-docker-images).
-""")
-        files_committed.append(f"{domain}/{app}/README.md")
-
-        # doc/image-info.yml (matches kylin reference format)
-        (doc_dir.parent / "image-info.yml").write_text(f"""name: {app}
-category: {domain.lower()}
-description: {app} container image based on openEuler.
-environment: |
-  本应用在Docker环境中运行，安装Docker执行如下命令
-  ```
-  yum install -y docker
-  ```
-tags: |
-  | Tag | Currently | Architectures |
-  |-----|-----------|---------------|
-  | [{version}-{os_tag}]({url_prefix}/{version}/{os_ver}/Dockerfile) | {app} {version} on openEuler {os_ver} | amd64, arm64 |
-download: |
-  ```
-  docker pull openeuler/{app}:{{{{Tag}}}}
-  ```
-usage: |
-  启动容器：
-  ```
-  docker run -d --name my-{app} -p 80:80 openeuler/{app}:{{{{Tag}}}}
-  ```
-  - 查看运行日志
-  ```
-  docker logs -f my-{app}
-  ```
-  - 停止容器
-  ```
-  docker stop my-{app}
-  docker rm my-{app}
-  ```
-license: BSD-2-Clause
-similar_packages:
-  - {app}: {app} package on openEuler
-dependency:
-  - glibc
-homepage: https://{app}.org/
-upstream:
-  backend: GitHub
-  version_url: {app}/{app}
-  version_filter: alpha;rc;candidate;beta;pre
-  version_scheme: RPM
-""")
-        files_committed.append(f"{domain}/{app}/doc/image-info.yml")
-
-        # logo.png (1x1 placeholder)
-        (doc_dir / "logo.png").write_bytes(
-            b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde'
-            b'\x00\x00\x00\x0cIDATx\x9cc\xf8\x0f\x00\x00\x01\x01\x00\x05\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82'
-        )
-        files_committed.append(f"{domain}/{app}/doc/picture/logo.png")
-
-        # image-list.yml (append)
-        il = TARGET_DIR / domain / "image-list.yml"
-        if not il.exists():
-            il.write_text(f"images:\n  {app}: {app}\n")
-        elif app not in il.read_text():
-            with il.open("a") as f:
-                f.write(f"  {app}: {app}\n")
-    else:
-        # App exists — only append version to meta.yml
-        new_entry = f"\n{version}-{os_tag}:\n  path: {version}/{os_ver}/Dockerfile\n"
-        meta_path = base / "meta.yml"
-        curr = meta_path.read_text()
-        if f"{version}-{os_tag}" not in curr:
-            meta_path.write_text(curr.rstrip() + new_entry)
-
-    # ── ai-result.json (internal tracking, NOT committed) ──
-    (base / "ai-result.json").write_text(json.dumps({
-        "success": True, "package_name": app, "version": version,
-        "files_created": files_committed,
-    }, ensure_ascii=False, indent=2))
-
-    log(f"Demo: {len(files_committed)} files generated for {domain}/{app} (app_exists={app_exists})")
-
-
-# ── step 3: build + test ───────────────────────────────────────────────────
-def build_image(app: str, version: str, os_ver: str, platform: str) -> bool:
-    """Build Docker image; return True on success."""
-    # Find Dockerfile
-    r = subprocess.run(
-        ["find", str(TARGET_DIR), "-path", f"*/{app}/{version}/{os_ver}/Dockerfile",
-         "-not", "-path", "*.git*"],
-        capture_output=True, text=True
-    )
-    dockerfile = r.stdout.strip().split("\n")[0].strip() if r.stdout.strip() else ""
-
-    if not dockerfile:
-        log(f"No Dockerfile found for {app} {version} {os_ver}")
-        return False
-
-    arch = platform.split("/")[-1]
-    log(f"Building {app} ({platform}) from {dockerfile}")
-    r = sh([
-        "docker", "buildx", "build", "--platform", platform,
-        "--file", dockerfile, "--tag", f"openeuler/{app}:test", "--load",
-        str(Path(dockerfile).parent)
-    ], capture_output=True, text=True, timeout=1800)
-
-    # Save build log
-    (WORKSPACE / f"build-{arch}.log").write_text(r.stdout + r.stderr)
-
-    if r.returncode != 0:
-        log(f"Build FAILED for {app} ({platform})")
-        print(r.stderr[-1000:])
-        return False
-    log(f"Build SUCCESS for {app} ({platform})")
-    return True
-
-
-def test_image(app: str, platform: str) -> bool:
-    """Run test.sh (NOT dgoss). Returns True on pass."""
-    arch = platform.split("/")[-1]
-    container_name = f"{app}-test"
-    sh(["docker", "rm", "-f", container_name], capture_output=True)
-
-    # Find test.sh
-    r = subprocess.run(
-        ["find", str(TARGET_DIR), "-path", f"*/{app}/*/test.sh", "-not", "-path", "*.git*"],
-        capture_output=True, text=True
-    )
-    test_sh = r.stdout.strip().split("\n")[0].strip() if r.stdout.strip() else ""
-
-    if not test_sh:
-        log(f"No test.sh found for {app}; skipping tests")
-        return True  # no test = not a failure
-
-    log(f"Running test.sh for {app} ({platform})")
-
-    r = sh(["docker", "run", "-d", "--name", container_name, f"openeuler/{app}:test"],
-           capture_output=True, text=True, timeout=120)
-    if r.returncode != 0:
-        log(f"docker run failed: {r.stderr}")
-        return False
-
-    env = os.environ.copy()
-    env["PACKAGE_NAME"] = app
-    env["CONTAINER_NAME"] = container_name
-    r = sh(["bash", test_sh], env=env, capture_output=True, text=True, timeout=120)
-    print(r.stdout)
-    if r.stderr:
-        print(r.stderr, file=sys.stderr)
-
-    sh(["docker", "rm", "-f", container_name], capture_output=True)
-
-    if r.returncode != 0:
-        log(f"Tests FAILED for {app} ({platform})")
-        return False
-    log(f"Tests PASSED for {app} ({platform})")
-    return True
-
-
-def run_platform(app: str, version: str, os_ver: str, platform: str) -> bool:
-    """Build and test for one platform. Return True on success."""
-    if not build_image(app, version, os_ver, platform):
-        return False
-    return test_image(app, platform)
-
-
-# ── step 4: fix ────────────────────────────────────────────────────────────
-def run_fixer(app: str, version: str, os_ver: str, domain: str, logs: dict) -> bool:
-    """Run the fixer agent; return True if fix was applied."""
-    fixer_md = _load_agent("code-fixer")
-    if not fixer_md:
-        log("No code-fixer agent prompt found; skipping fix")
-        return False
-
-    # Read whitelist from ai-result.json
-    whitelist: list[str] = []
-    for p in TARGET_DIR.rglob("ai-result.json"):
-        try:
-            data = json.loads(p.read_text())
-            whitelist = data.get("files_created", [])
-            if whitelist:
-                break
-        except json.JSONDecodeError:
-            continue
-    if not whitelist:
-        # Fallback: all files except .git
-        for f in TARGET_DIR.rglob("*"):
-            if f.is_file() and ".git" not in str(f.parts):
-                whitelist.append(str(f.relative_to(TARGET_DIR)))
-
-    log_text = "\n\n".join(f"=== {k} ===\n{v[-2000:]}" for k, v in logs.items())
-    instruction = (
-        f"CI failures detected for {app} {version}.\n\n"
-        f"Build logs:\n{log_text}\n\n"
-        f"You may only modify these files:\n" + "\n".join(f"  - {f}" for f in whitelist) + "\n\n"
-        f"Diagnose and fix. Write ai-result.json with status and changes."
+from scripts.harness.compose_pr import PRDeliveryError
+from scripts.lib.agent_runtime import AgentRuntimeError
+from scripts.lib.candidate_bundle import CandidateBundle, CandidateBundleError
+from scripts.lib.candidate_promotion import CandidatePromotionError
+from scripts.lib.delivery_config import DeliveryConfig, DeliveryConfigError
+from scripts.lib.fork_pr_pipeline import (
+    ForkPRPipelineError,
+    TARGET_SOURCE,
+    deliver_validated_candidate,
+)
+from scripts.lib.generation_pipeline import (
+    GenerationPipelineError,
+    run_generation_pipeline,
+)
+from scripts.lib.git_delivery import GitDeliveryError
+from scripts.lib.git_workspace import GitWorkspaceError, TargetWorkspace
+from scripts.lib.issue_lifecycle import (
+    IssueLifecycleError,
+    run_controlled_issue_probe,
+)
+from scripts.lib.native_repair import (
+    NativeRepairError,
+    validate_native_with_repairs,
+)
+from scripts.lib.native_validation import (
+    NativeValidationError,
+    validate_native_image,
+    validate_native_smoke,
+)
+from scripts.lib.smoke_candidate import write_smoke_candidate
+from scripts.lib.task_spec import TaskSpec, TaskSpecError
+from scripts.lib.target_contract import (
+    TargetContractError,
+    validate_generated_target,
+)
+from scripts.utils.gitcode import GitCodeClient, GitCodeClientError
+
+
+def _write_json(path: Path, value: dict) -> None:
+    path.write_text(
+        json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     )
 
-    prompt = f"{fixer_md}\n\n## TASK:\n{instruction}"
-    output = _run_opencode(prompt)
-    result = _parse_json(output)
-    log(f"Fixer result: {json.dumps(result, ensure_ascii=False)[:500]}")
-    return True
+
+def _print_json(value: dict) -> None:
+    print(json.dumps(value, ensure_ascii=False, sort_keys=True))
 
 
-# ── step 5: compose PR ─────────────────────────────────────────────────────
-def compose_pr(app: str, version: str, os_ver: str, domain: str) -> None:
-    """Write /tmp/pr-title and /tmp/pr-body.md."""
-    title = f"[new-image] Add {app} {version} on {os_ver}"
-    Path("/tmp/pr-title").write_text(title)
-
-    body = [f"## Automated PR: {app} {version} on {os_ver}\n"]
-    body.append("### Changes\n")
-    # List files created (from ai-result.json, since nothing committed yet)
-    files_created: list[str] = []
-    for p in TARGET_DIR.rglob("ai-result.json"):
-        try:
-            data = json.loads(p.read_text())
-            files_created = data.get("files_created", [])
-            if files_created:
-                break
-        except json.JSONDecodeError:
-            continue
-    if files_created:
-        body.append("```\n" + "\n".join(files_created) + "\n```\n")
-    else:
-        body.append("(files created by agent)\n")
-
-    body.append("### Build Proof\n")
-    for arch in ["amd64", "arm64"]:
-        log_file = WORKSPACE / f"build-{arch}.log"
-        if log_file.exists():
-            content = log_file.read_text()[-1500:]
-            body.append(f"<details><summary>{arch} build</summary>\n```\n{content}\n```\n</details>\n")
-
-    body.append("### Test Results\n")
-    for arch in ["amd64", "arm64"]:
-        junit = TARGET_DIR / domain / app / "results" / version / os_ver / f"{arch}.junit.xml"
-        if junit.exists():
-            body.append(f"<details><summary>{arch} JUnit</summary>\n```\n{junit.read_text()}\n```\n</details>\n")
-
-    body.append("### Confidence Score\n")
-    body.append("- Build: 0.35 | Test: 0.30 | Lint: 0.20 | Meta: 0.15\n")
-    body.append("- Total: 1.00 (level: auto-merge)\n")
-
-    # Check for QA review records
-    qa_records = list(TARGET_DIR.glob(f"{domain}/{app}/qa-review-*.json"))
-    if qa_records:
-        body.append("### Adversarial Review Records\n")
-        for rec in sorted(qa_records):
-            data = json.loads(rec.read_text())
-            body.append(f"<details><summary>{data.get('role','?')} round {data.get('round','?')}</summary>\n")
-            body.append(f"Status: {data.get('status','?')}, Approved: {data.get('approved','?')}\n")
-            body.append(f"Summary: {data.get('summary','')}\n")
-            body.append("</details>\n")
-
-    body.append("\n### Generated By\n")
-    body.append("openEuler Docker Images Workflow\n")
-
-    Path("/tmp/pr-body.md").write_text("".join(body))
-    log(f"PR title: {title}")
+def _load_task(path: Path) -> TaskSpec:
+    return TaskSpec.from_json(path.read_text())
 
 
-# ── step 6: push + create PR ───────────────────────────────────────────────
-def _gitcode_api(method: str, path: str, body: dict | None = None) -> dict:
-    url = f"{GITCODE_API}{path}"
-    headers = {
-        "PRIVATE-TOKEN": GITCODE_TOKEN,
-        "Content-Type": "application/json",
-        "Accept": "application/json",
+def _task_spec(args: argparse.Namespace) -> None:
+    task = TaskSpec.from_workflow_dispatch(
+        {
+            "app": args.app,
+            "version": args.version,
+            "os_version": args.os_version,
+            "domain": args.domain,
+            "source_url": args.source_url,
+        }
+    )
+    _write_json(args.output, task.to_dict())
+    _print_json(
+        {
+            "branch": task.branch,
+            "output": str(args.output),
+            "task_id": task.task_id,
+        }
+    )
+
+
+def _delivery_config(args: argparse.Namespace) -> None:
+    config = DeliveryConfig.from_mapping(
+        {
+            "environment": args.environment,
+            "delivery_mode": args.delivery_mode,
+            "target_repo": args.target_repo,
+            "push_repo": args.push_repo,
+            "target_branch": args.target_branch,
+            "duplicate_pr_guard": args.duplicate_pr_guard,
+        }
+    )
+    summary = {
+        **asdict(config),
+        "allows_branch_push": config.allows_branch_push,
+        "allows_pr_create": config.allows_pr_create,
     }
-    data = json.dumps(body).encode() if body else None
-    req = urllib.request.Request(url, data=data, headers=headers, method=method)
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            payload = resp.read()
-            result = json.loads(payload) if payload else {}
-            log(f"GitCode API {method} {path} -> HTTP {resp.status}, keys: {list(result.keys()) if isinstance(result, dict) else type(result).__name__}")
-            return result if isinstance(result, dict) else {}
-    except urllib.error.HTTPError as e:
-        error_body = e.read().decode()
-        log(f"GitCode API error ({e.code}): {error_body}")
-        return {}
+    _write_json(args.output, summary)
+    _print_json(summary)
 
 
-def pr_exists(title: str) -> bool:
-    page = 1
-    while True:
-        result = _gitcode_api("GET", f"/repos/{TARGET_REPO}/pulls?state=open&per_page=100&page={page}")
-        if not result:
-            break
-        for pr in result if isinstance(result, list) else [result]:
-            if pr.get("title") == title:
-                log(f"PR already exists: #{pr.get('number')} - {pr.get('html_url', '')}")
-                return True
-        if len(result) < 100:
-            break
-        page += 1
-    return False
+def _candidate_create(args: argparse.Namespace) -> None:
+    bundle = CandidateBundle.create(
+        args.candidate_dir,
+        task=_load_task(args.task_spec),
+        base_sha=args.base_sha,
+        validated_run_id=args.validated_run_id,
+    )
+    _print_json(
+        {
+            "candidate_dir": str(bundle.root),
+            "content_sha256": bundle.manifest.content_sha256,
+            "task_id": bundle.manifest.task_id,
+            "validated_run_id": bundle.manifest.validated_run_id,
+        }
+    )
 
 
-def push_and_create_pr(app: str, version: str) -> None:
-    title = Path("/tmp/pr-title").read_text().strip()
-    if not title:
-        log("No PR title found; skipping")
-        return
+def _candidate_verify(args: argparse.Namespace) -> None:
+    bundle = CandidateBundle.verify(
+        args.candidate_dir,
+        expected_run_id=args.expected_run_id,
+    )
+    _print_json(
+        {
+            "content_sha256": bundle.manifest.content_sha256,
+            "promotion_action": bundle.promotion_action(args.current_base_sha),
+            "task_id": bundle.manifest.task_id,
+            "validated_run_id": bundle.manifest.validated_run_id,
+        }
+    )
 
-    if pr_exists(title):
-        log("PR already exists; skipping")
-        return
 
-    branch = f"auto/{app}-{version}-{int(time.time())}"
-    sh(["git", "-C", str(TARGET_DIR), "checkout", "-b", branch], capture_output=True)
+def _fork_deliver(args: argparse.Namespace) -> None:
+    token = os.environ.get("GITCODE_TOKEN", "")
+    if not token:
+        raise ForkPRPipelineError("GITCODE_TOKEN is required")
+    config = DeliveryConfig.from_mapping(
+        {
+            "environment": "test",
+            "delivery_mode": "fork_pr",
+            "target_repo": "openeuler/openeuler-docker-images",
+            "push_repo": "qq_42020325/openeuler-docker-images",
+            "target_branch": "master",
+        }
+    )
+    resource = deliver_validated_candidate(
+        candidate_dir=args.candidate_dir,
+        expected_run_id=args.expected_run_id,
+        workspace_dir=args.workspace,
+        target_source=TARGET_SOURCE,
+        config=config,
+        username=args.gitcode_username,
+        token=token,
+    )
+    _print_json(
+        {
+            "number": resource.number,
+            "url": resource.url,
+            "validated_run_id": args.expected_run_id,
+        }
+    )
 
-    # Only add standard files matching reference structure (no test.sh, no ai-result.json)
-    # Read committed file list from ai-result.json
-    committed: list[str] = []
-    for p in TARGET_DIR.rglob("ai-result.json"):
-        try:
-            data = json.loads(p.read_text())
-            committed = data.get("files_created", [])
-            if committed:
-                break
-        except json.JSONDecodeError:
-            continue
-    if committed:
-        for f in committed:
-            sh(["git", "-C", str(TARGET_DIR), "add", f], capture_output=True)
+
+def _issue_contract_test(args: argparse.Namespace) -> None:
+    token = os.environ.get("GITCODE_TOKEN", "")
+    if not token:
+        raise IssueLifecycleError("GITCODE_TOKEN is required")
+    resource = run_controlled_issue_probe(
+        client=GitCodeClient(token=token),
+        target_repo="openeuler/openeuler-docker-images",
+        task=_load_task(args.task_spec),
+        environment="test",
+        operation="failure_issue_contract_test",
+        github_run_id=args.github_run_id,
+        failure_stage=args.failure_stage,
+    )
+    _print_json(
+        {
+            "number": resource.number,
+            "state": "closed",
+            "url": resource.url,
+        }
+    )
+
+
+def _target_clone(args: argparse.Namespace) -> None:
+    if args.expected_sha:
+        workspace = TargetWorkspace.clone_at_sha(
+            args.source,
+            args.destination,
+            branch=args.branch,
+            expected_sha=args.expected_sha,
+        )
     else:
-        # Fallback: add standard paths, exclude test/ai artifacts
-        sh(["git", "-C", str(TARGET_DIR), "add", "."], capture_output=True)
-        sh(["git", "-C", str(TARGET_DIR), "reset", "--", "*/test.sh", "*/ai-result.json", "*/tests/", "*/goss*"], capture_output=True)
-
-    r = sh(["git", "-C", str(TARGET_DIR), "diff", "--cached", "--stat"], capture_output=True, text=True)
-    log(f"Files to commit:\n{r.stdout}")
-    sh(["git", "-C", str(TARGET_DIR), "commit", "-m", f"[new-image] Add {app} {version} container image"],
-       capture_output=True)
-
-    push_url = f"https://oauth2:{GITCODE_TOKEN}@{TARGET_REPO_HOST}/{TARGET_REPO}.git"
-    sh(["git", "-C", str(TARGET_DIR), "push", push_url, f"HEAD:refs/heads/{branch}"], capture_output=True, timeout=120)
-
-    body = Path("/tmp/pr-body.md").read_text()
-    result = _gitcode_api("POST", f"/repos/{TARGET_REPO}/pulls", {
-        "title": title, "head": branch, "base": "master", "body": body,
-    })
-    # GitCode (Gitea) API uses "web_url", not "html_url" like GitHub
-    pr_url = result.get("web_url") or result.get("html_url") or result.get("url") or ""
-    if pr_url:
-        Path("/tmp/pr-url").write_text(pr_url)
-    log(f"PR created: {pr_url or '(unknown URL)'}")
+        workspace = TargetWorkspace.clone(
+            args.source,
+            args.destination,
+            branch=args.branch,
+        )
+    _print_json(
+        {
+            "workspace": str(workspace.path),
+            "branch": workspace.branch,
+            "base_sha": workspace.base_sha,
+        }
+    )
 
 
-# ── step 7: create issue (all failed) ──────────────────────────────────────
-def create_failure_issue(app: str, version: str, os_ver: str) -> None:
-    title = f"[new-image] Needs human review: {app} {version}"
-    body = [f"# Build/Test Failure Report\n"]
-    body.append(f"\n{app} {version} on {os_ver} failed after {MAX_RETRIES} retry rounds.\n")
-    for log_file in sorted(WORKSPACE.glob("build-*.log")):
-        content = log_file.read_text()
-        if "ERROR" in content or "FAILED" in content:
-            body.append(f"\n## {log_file.name}\n```\n{content[-2000:]}\n```\n")
+def _target_create_patch(args: argparse.Namespace) -> None:
+    workspace = TargetWorkspace.open_existing(
+        args.workspace,
+        branch=args.branch,
+        base_sha=args.base_sha,
+    )
+    workspace.create_patch(args.output)
+    _print_json(
+        {
+            "workspace": str(workspace.path),
+            "base_sha": workspace.base_sha,
+            "patch": str(args.output),
+            "patch_bytes": args.output.stat().st_size,
+        }
+    )
 
-    issue_body = "".join(body)
-    Path("/tmp/failure-report.md").write_text(issue_body)
 
-    path = f"/repos/{TARGET_REPO}/issues?labels={urllib.parse.quote('new-image,needs-human-review')}"
-    result = _gitcode_api("POST", path, {"title": title, "body": issue_body})
-    log(f"Issue created: {result.get('html_url', '(unknown)')}")
+def _target_apply_patch(args: argparse.Namespace) -> None:
+    workspace = TargetWorkspace.open_existing(
+        args.workspace,
+        branch=args.branch,
+        base_sha=args.base_sha,
+    )
+    workspace.apply_patch(args.patch)
+    _print_json(
+        {
+            "workspace": str(workspace.path),
+            "base_sha": workspace.base_sha,
+            "patch": str(args.patch),
+        }
+    )
 
 
-# ── main ────────────────────────────────────────────────────────────────────
+def cmd_phase1_generate(args: argparse.Namespace) -> None:
+    api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+    if not api_key:
+        raise GenerationPipelineError("DEEPSEEK_API_KEY is required")
+    result = run_generation_pipeline(
+        workspace=args.workspace,
+        report_dir=args.report_dir,
+        task=_load_task(args.task_spec),
+        base_sha=args.base_sha,
+        executable=args.opencode,
+        api_key=api_key,
+    )
+    _print_json(
+        {
+            "status": result.status,
+            "qa_fix_rounds": result.qa_fix_rounds,
+            "gate_report": dict(result.gate_report),
+        }
+    )
+
+
+def cmd_phase1_smoke_generate(args: argparse.Namespace) -> None:
+    task = _load_task(args.task_spec)
+    args.report_dir.mkdir(parents=True, exist_ok=True)
+    smoke = write_smoke_candidate(workspace=args.workspace, task=task)
+    gate = validate_generated_target(
+        repo=args.workspace,
+        task=task,
+        base_sha=args.base_sha,
+    )
+    _write_json(args.report_dir / "smoke-generation.json", smoke)
+    _write_json(args.report_dir / "gates.json", gate)
+    _print_json({"status": "passed", "mode": "pipeline_smoke"})
+
+
+def cmd_phase1_native_repair(args: argparse.Namespace) -> None:
+    api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+    if not api_key:
+        raise NativeRepairError("DEEPSEEK_API_KEY is required")
+    result = validate_native_with_repairs(
+        workspace=args.workspace,
+        task=_load_task(args.task_spec),
+        base_sha=args.base_sha,
+        architecture=args.architecture,
+        run_id=args.run_id,
+        dgoss=args.dgoss,
+        goss=args.goss,
+        report_path=args.report,
+        junit_path=args.junit,
+        repair_report_dir=args.repair_report_dir,
+        executable=args.opencode,
+        api_key=api_key,
+    )
+    _print_json(
+        {
+            "status": result.status,
+            "repair_attempts": result.repair_attempts,
+            "report": dict(result.report),
+        }
+    )
+
+
+def cmd_phase1_native_validate(args: argparse.Namespace) -> None:
+    report = validate_native_image(
+        workspace=args.workspace,
+        task=_load_task(args.task_spec),
+        architecture=args.architecture,
+        run_id=args.run_id,
+        dgoss=args.dgoss,
+        goss=args.goss,
+        report_path=args.report,
+        junit_path=args.junit,
+    )
+    _print_json(report)
+
+
+def cmd_phase1_native_smoke(args: argparse.Namespace) -> None:
+    report = validate_native_smoke(
+        workspace=args.workspace,
+        task=_load_task(args.task_spec),
+        architecture=args.architecture,
+        run_id=args.run_id,
+        dgoss=args.dgoss,
+        goss=args.goss,
+        report_path=args.report,
+        junit_path=args.junit,
+        repair_report_dir=args.repair_report_dir,
+    )
+    _print_json(report)
+
+
+def _add_task_commands(commands: argparse._SubParsersAction) -> None:
+    task = commands.add_parser("task-spec")
+    task.add_argument("--app", required=True)
+    task.add_argument("--version", required=True)
+    task.add_argument("--os-version", required=True)
+    task.add_argument("--domain", required=True)
+    task.add_argument("--source-url", required=True)
+    task.add_argument("--output", required=True, type=Path)
+    task.set_defaults(handler=_task_spec)
+
+    delivery = commands.add_parser("delivery-config")
+    delivery.add_argument("--environment", required=True)
+    delivery.add_argument("--delivery-mode", required=True)
+    delivery.add_argument("--target-repo", required=True)
+    delivery.add_argument("--push-repo", required=True)
+    delivery.add_argument("--target-branch", required=True)
+    delivery.add_argument("--duplicate-pr-guard", default="")
+    delivery.add_argument("--output", required=True, type=Path)
+    delivery.set_defaults(handler=_delivery_config)
+
+
+def _add_candidate_commands(commands: argparse._SubParsersAction) -> None:
+    create = commands.add_parser("candidate-create")
+    create.add_argument("--candidate-dir", required=True, type=Path)
+    create.add_argument("--task-spec", required=True, type=Path)
+    create.add_argument("--base-sha", required=True)
+    create.add_argument("--validated-run-id", required=True)
+    create.set_defaults(handler=_candidate_create)
+
+    verify = commands.add_parser("candidate-verify")
+    verify.add_argument("--candidate-dir", required=True, type=Path)
+    verify.add_argument("--expected-run-id", required=True)
+    verify.add_argument("--current-base-sha", required=True)
+    verify.set_defaults(handler=_candidate_verify)
+
+    clone = commands.add_parser("target-clone")
+    clone.add_argument("--source", required=True)
+    clone.add_argument("--destination", required=True, type=Path)
+    clone.add_argument("--branch", required=True)
+    clone.add_argument("--expected-sha", default="")
+    clone.set_defaults(handler=_target_clone)
+
+    create_patch = commands.add_parser("target-create-patch")
+    create_patch.add_argument("--workspace", required=True, type=Path)
+    create_patch.add_argument("--branch", required=True)
+    create_patch.add_argument("--base-sha", required=True)
+    create_patch.add_argument("--output", required=True, type=Path)
+    create_patch.set_defaults(handler=_target_create_patch)
+
+    apply_patch = commands.add_parser("target-apply-patch")
+    apply_patch.add_argument("--workspace", required=True, type=Path)
+    apply_patch.add_argument("--branch", required=True)
+    apply_patch.add_argument("--base-sha", required=True)
+    apply_patch.add_argument("--patch", required=True, type=Path)
+    apply_patch.set_defaults(handler=_target_apply_patch)
+
+
+def _add_delivery_commands(commands: argparse._SubParsersAction) -> None:
+    fork = commands.add_parser(
+        "fork-deliver",
+        description=(
+            "Promote one exact validate_only artifact and create its GitCode "
+            "fork PR. Authentication is read from GITCODE_TOKEN."
+        ),
+    )
+    fork.add_argument("--candidate-dir", required=True, type=Path)
+    fork.add_argument("--expected-run-id", required=True)
+    fork.add_argument("--workspace", required=True, type=Path)
+    fork.add_argument(
+        "--gitcode-username",
+        default="qq_42020325",
+        help="GitCode bot username (default: qq_42020325)",
+    )
+    fork.set_defaults(handler=_fork_deliver)
+
+    issue_probe = commands.add_parser(
+        "issue-contract-test",
+        description=(
+            "Explicit test-only GitCode Issue probe: create, update, comment "
+            "and close one [E2E TEST] Issue. Authentication is read from "
+            "GITCODE_TOKEN."
+        ),
+    )
+    issue_probe.add_argument("--task-spec", required=True, type=Path)
+    issue_probe.add_argument("--github-run-id", required=True)
+    issue_probe.add_argument("--failure-stage", required=True)
+    issue_probe.set_defaults(handler=_issue_contract_test)
+
+
+def _add_generation_commands(commands: argparse._SubParsersAction) -> None:
+    generate = commands.add_parser(
+        "phase1-generate",
+        help="Generate and review one TaskSpec",
+    )
+    generate.add_argument("--workspace", required=True, type=Path)
+    generate.add_argument("--task-spec", required=True, type=Path)
+    generate.add_argument("--base-sha", required=True)
+    generate.add_argument("--report-dir", required=True, type=Path)
+    generate.add_argument("--opencode", required=True, type=Path)
+    generate.set_defaults(handler=cmd_phase1_generate)
+
+    smoke = commands.add_parser(
+        "phase1-smoke-generate",
+        help="Create the deterministic zero-AI candidate",
+    )
+    smoke.add_argument("--workspace", required=True, type=Path)
+    smoke.add_argument("--task-spec", required=True, type=Path)
+    smoke.add_argument("--base-sha", required=True)
+    smoke.add_argument("--report-dir", required=True, type=Path)
+    smoke.set_defaults(handler=cmd_phase1_smoke_generate)
+
+
+def _add_native_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--workspace", required=True, type=Path)
+    parser.add_argument("--task-spec", required=True, type=Path)
+    parser.add_argument(
+        "--architecture",
+        required=True,
+        choices=("x86_64", "aarch64"),
+    )
+    parser.add_argument("--run-id", required=True)
+    parser.add_argument("--dgoss", required=True, type=Path)
+    parser.add_argument("--goss", required=True, type=Path)
+    parser.add_argument("--report", required=True, type=Path)
+    parser.add_argument("--junit", required=True, type=Path)
+
+
+def _add_native_commands(commands: argparse._SubParsersAction) -> None:
+    repair = commands.add_parser(
+        "phase1-native-repair",
+        help="Run native validation with the bounded Fixer loop",
+    )
+    _add_native_arguments(repair)
+    repair.add_argument("--base-sha", required=True)
+    repair.add_argument("--repair-report-dir", required=True, type=Path)
+    repair.add_argument("--opencode", required=True, type=Path)
+    repair.set_defaults(handler=cmd_phase1_native_repair)
+
+    validate = commands.add_parser(
+        "phase1-native-validate",
+        help="Run deterministic native validation",
+    )
+    _add_native_arguments(validate)
+    validate.set_defaults(handler=cmd_phase1_native_validate)
+
+    smoke = commands.add_parser(
+        "phase1-native-smoke",
+        help="Exercise native Docker and dgoss plumbing without AI",
+    )
+    _add_native_arguments(smoke)
+    smoke.add_argument("--repair-report-dir", required=True, type=Path)
+    smoke.set_defaults(handler=cmd_phase1_native_smoke)
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="flow",
+        description="Phase-one openEuler new-image workflow",
+    )
+    commands = parser.add_subparsers(dest="command", required=True)
+    _add_task_commands(commands)
+    _add_candidate_commands(commands)
+    _add_delivery_commands(commands)
+    _add_generation_commands(commands)
+    _add_native_commands(commands)
+    return parser
+
+
 def main(argv: list[str] | None = None) -> int:
-    import argparse
-
-    argv = list(sys.argv[1:] if argv is None else argv)
-    if argv and argv[0] in _PHASE1_STAGE_COMMANDS:
-        from scripts.harness.run import main as run_stage
-
-        return run_stage(argv)
-
-    parser = argparse.ArgumentParser(description="openEuler Docker image orchestrator")
-    parser.add_argument("--app", required=True)
-    parser.add_argument("--version", required=True)
-    parser.add_argument("--os", required=True)
-    parser.add_argument("--domain", default="Cloud")
-    parser.add_argument("--demo", action="store_true", help="Skip LLM agents, use demo files")
-    parser.add_argument("--source", default="", help="Upstream source URL")
+    parser = _parser()
     args = parser.parse_args(argv)
-
-    os.environ["PACKAGE"] = args.app
-    os.environ["APP_VERSION"] = args.version
-    os.environ["OS_VERSION"] = args.os
-    os.environ["DOMAIN"] = args.domain
-    os.environ["TARGET_REPO_DIR"] = str(TARGET_DIR)
-
-    if not GITCODE_TOKEN:
-        die("GITCODE_TOKEN not set")
-
-    # ── Step 1: Clone ──
-    log("=== Step 1: Clone target repo ===")
-    clone_target()
-
-    # ── Step 2: Generate (adversarial pair or demo) ──
-    log("=== Step 2: Generate ===")
-    _adversarial_pair("image", args.app, args.version, args.os, args.domain, args.demo)
-    _adversarial_pair("testcase", args.app, args.version, args.os, args.domain, args.demo)
-
-    # ── Step 3-4: Build + Test with retry loop ──
-    log("=== Step 3: Build + Test (retry loop) ===")
-    platforms = ["linux/amd64", "linux/arm64"]
-    last_results: dict[str, bool] = {}
-
-    for attempt in range(1, MAX_RETRIES + 1):
-        log(f"--- Attempt {attempt}/{MAX_RETRIES} ---")
-        all_ok = True
-
-        for plat in platforms:
-            arch = plat.split("/")[-1]
-
-            # Build
-            ok = build_image(args.app, args.version, args.os, plat)
-            if not ok:
-                all_ok = False
-                last_results[arch] = False
-                # Record skipped test
-                results_dir = TARGET_DIR / args.domain / args.app / "results" / args.version / args.os
-                results_dir.mkdir(parents=True, exist_ok=True)
-                (results_dir / f"{arch}.junit.xml").write_text(
-                    f'<?xml version="1.0"?><testsuite name="{args.app}" tests="0" failures="0"/>'
-                )
-                continue
-
-            # Test
-            ok = test_image(args.app, plat)
-            if not ok:
-                all_ok = False
-                last_results[arch] = False
-                # Record failure
-                results_dir = TARGET_DIR / args.domain / args.app / "results" / args.version / args.os
-                results_dir.mkdir(parents=True, exist_ok=True)
-                (results_dir / f"{arch}.junit.xml").write_text(
-                    f'<?xml version="1.0"?><testsuite name="{args.app}" tests="1" failures="1">'
-                    f'<testcase name="test_sh"><failure message="test.sh failed"/></testcase></testsuite>'
-                )
-            else:
-                last_results[arch] = True
-
-        if all_ok:
-            log("All platforms passed!")
-            break
-
-        if attempt < MAX_RETRIES:
-            if args.demo:
-                log("Demo mode: skipping fixer, retrying build+test")
-            else:
-                log(f"Some platforms failed; running fixer (attempt {attempt})")
-                logs = {}
-                for lf in WORKSPACE.glob("build-*.log"):
-                    logs[lf.name] = lf.read_text()
-                run_fixer(args.app, args.version, args.os, args.domain, logs)
-        else:
-            log(f"All {MAX_RETRIES} attempts exhausted")
-
-    # ── Step 5: Compose PR ──
-    log("=== Step 5: Compose PR ===")
-    compose_pr(args.app, args.version, args.os, args.domain)
-
-    # ── Step 6: Push + Create PR (or issue) ──
-    any_success = any(last_results.values())
-    if any_success:
-        log("=== Step 6: Push + Create PR ===")
-        push_and_create_pr(args.app, args.version)
-    else:
-        log("=== Step 6: All failed -> Create issue ===")
-        create_failure_issue(args.app, args.version, args.os)
-
-    log("=== DONE ===")
+    try:
+        args.handler(args)
+    except (
+        AgentRuntimeError,
+        CandidateBundleError,
+        CandidatePromotionError,
+        DeliveryConfigError,
+        ForkPRPipelineError,
+        GenerationPipelineError,
+        GitCodeClientError,
+        GitDeliveryError,
+        GitWorkspaceError,
+        IssueLifecycleError,
+        NativeRepairError,
+        NativeValidationError,
+        PRDeliveryError,
+        TargetContractError,
+        TaskSpecError,
+        json.JSONDecodeError,
+        OSError,
+    ) as error:
+        print(f"flow: error: {error}", file=sys.stderr)
+        return 2
     return 0
 
 
