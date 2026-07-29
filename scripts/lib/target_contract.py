@@ -328,9 +328,9 @@ def _validate_tests(
     )
     if not version_assignment.search(entry_text):
         errors.append("Dockerfile-level test.sh must inject the expected version")
-    if not any(
-        fragment in entry_text
-        for fragment in ("../../tests/test.sh", "$SHARED_DIR/test.sh")
+    if not re.search(
+        r"(?:\.\./\.\./tests/test\.sh|\$\{?SHARED_DIR\}?/test\.sh)",
+        entry_text,
     ):
         errors.append("Dockerfile-level test.sh must call the app-level shared tests")
     if task.version in shared_text:

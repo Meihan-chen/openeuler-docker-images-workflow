@@ -257,6 +257,13 @@ def test_generated_contract_accepts_equivalent_shell_and_docker_syntax(tmp_path)
             'BINARY=kvrocks\n"${BINARY}" --version',
         )
     )
+    entry_test = app / "2.16.0" / "24.03-lts-sp4" / "test.sh"
+    entry_test.write_text(
+        entry_test.read_text().replace(
+            '"$SHARED_DIR/test.sh"',
+            '"${SHARED_DIR}/test.sh"',
+        )
+    )
 
     report = validate_generated_target(
         repo=repo,
