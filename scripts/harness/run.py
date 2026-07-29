@@ -11,9 +11,8 @@ Usage:
 
 Environment:
     TARGET_REPO_DIR   - absolute path to the cloned target repo (agent cwd)
-    ANTHROPIC_BASE_URL - DeepSeek Anthropic-compatible endpoint
-    ANTHROPIC_AUTH_TOKEN - DeepSeek API key
-    OPENCODE_MODEL    - model id (default deepseek/deepseek-v4-pro)
+    DEEPSEEK_API_KEY  - DeepSeek API key for scenario-one commands
+    OPENCODE_MODEL    - legacy command model override
     OPENCODE_TIMEOUT  - per-call timeout seconds (default 2400)
 """
 
@@ -29,8 +28,36 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 AGENTS_DIR = PROJECT_ROOT / ".github" / "agents"
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
-OPENCODE_MODEL = os.environ.get("OPENCODE_MODEL", "deepseek/deepseek-v4-pro")
+# Scenario-one extends this established Agent harness instead of exposing a
+# second Agent entrypoint.  The implementation modules remain small/testable;
+# callers use this module as the public orchestration boundary.
+from scripts.lib.agent_runtime import (  # noqa: E402
+    AgentResult,
+    AgentRuntimeError,
+    MODEL,
+    run_agent,
+)
+from scripts.lib.generation_pipeline import (  # noqa: E402
+    GenerationPipelineError,
+    GenerationResult,
+    build_role_prompt,
+    run_generation_pipeline,
+)
+from scripts.lib.native_repair import (  # noqa: E402
+    NativeRepairError,
+    NativeRepairResult,
+    validate_native_with_repairs,
+)
+from scripts.lib.native_validation import (  # noqa: E402
+    NativeValidationError,
+    validate_native_image,
+)
+from scripts.lib.task_spec import TaskSpec, TaskSpecError  # noqa: E402
+
+OPENCODE_MODEL = os.environ.get("OPENCODE_MODEL", MODEL)
 OPENCODE_TIMEOUT = int(os.environ.get("OPENCODE_TIMEOUT", "2400"))
 OPENCODE_STALE_SECONDS = 300
 MAX_QA_ROUNDS = 2
@@ -273,9 +300,10 @@ def _run_adversarial_pair(role: str) -> None:
             return
 
         if round_num == MAX_QA_ROUNDS:
-            print(f"[{role}] QA did not approve after {MAX_QA_ROUNDS} rounds; "
-                  f"proceeding with disagreement recorded")
-            return
+            raise AgentRuntimeError(
+                f"{role} QA did not approve after "
+                f"{MAX_QA_ROUNDS} rounds"
+            )
 
         print(f"[{role}] QA found issues; running Creator round {round_num + 1} to fix")
         creator_out = _run_opencode(
@@ -476,7 +504,84 @@ def cmd_report_failures(args: argparse.Namespace) -> None:
     print(f"Failure report written to {out}")
 
 
-def main() -> None:
+def _load_task_spec(path: Path) -> TaskSpec:
+    return TaskSpec.from_json(path.read_text())
+
+
+def cmd_phase1_generate(args: argparse.Namespace) -> None:
+    """Run scenario-one generation through the shared Agent harness."""
+    api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+    if not api_key:
+        raise GenerationPipelineError("DEEPSEEK_API_KEY is required")
+    result = run_generation_pipeline(
+        workspace=args.workspace,
+        report_dir=args.report_dir,
+        task=_load_task_spec(args.task_spec),
+        base_sha=args.base_sha,
+        executable=args.opencode,
+        api_key=api_key,
+    )
+    print(
+        json.dumps(
+            {
+                "status": result.status,
+                "qa_fix_rounds": result.qa_fix_rounds,
+                "gate_report": dict(result.gate_report),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
+
+
+def cmd_phase1_native_repair(args: argparse.Namespace) -> None:
+    """Run bounded native repair through the shared Fixer harness."""
+    api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+    if not api_key:
+        raise NativeRepairError("DEEPSEEK_API_KEY is required")
+    result = validate_native_with_repairs(
+        workspace=args.workspace,
+        task=_load_task_spec(args.task_spec),
+        base_sha=args.base_sha,
+        architecture=args.architecture,
+        run_id=args.run_id,
+        dgoss=args.dgoss,
+        goss=args.goss,
+        report_path=args.report,
+        junit_path=args.junit,
+        repair_report_dir=args.repair_report_dir,
+        executable=args.opencode,
+        api_key=api_key,
+    )
+    print(
+        json.dumps(
+            {
+                "status": result.status,
+                "repair_attempts": result.repair_attempts,
+                "report": dict(result.report),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
+
+
+def cmd_phase1_native_validate(args: argparse.Namespace) -> None:
+    """Run one deterministic native validation through the shared harness."""
+    report = validate_native_image(
+        workspace=args.workspace,
+        task=_load_task_spec(args.task_spec),
+        architecture=args.architecture,
+        run_id=args.run_id,
+        dgoss=args.dgoss,
+        goss=args.goss,
+        report_path=args.report,
+        junit_path=args.junit,
+    )
+    print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+
+
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="openEuler Docker image orchestrator")
     sub = parser.add_subparsers(dest="command")
 
@@ -493,21 +598,87 @@ def main() -> None:
     p = sub.add_parser("report-failures")
     p.add_argument("--oe-version")
 
-    args = parser.parse_args()
+    p = sub.add_parser(
+        "phase1-generate",
+        help="Generate/review one TaskSpec through the shared Agent harness",
+    )
+    p.add_argument("--workspace", required=True, type=Path)
+    p.add_argument("--task-spec", required=True, type=Path)
+    p.add_argument("--base-sha", required=True)
+    p.add_argument("--report-dir", required=True, type=Path)
+    p.add_argument("--opencode", required=True, type=Path)
 
-    if args.command == "adversarial-pair":
-        cmd_adversarial_pair(args)
-    elif args.command == "test":
-        cmd_test(args)
-    elif args.command == "fix":
-        cmd_fix(args)
-    elif args.command == "get-app-name":
-        cmd_get_app_name(args)
-    elif args.command == "report-failures":
-        cmd_report_failures(args)
-    else:
-        parser.print_help()
+    p = sub.add_parser(
+        "phase1-native-repair",
+        help="Run native validation with the shared bounded Fixer loop",
+    )
+    p.add_argument("--workspace", required=True, type=Path)
+    p.add_argument("--task-spec", required=True, type=Path)
+    p.add_argument("--base-sha", required=True)
+    p.add_argument(
+        "--architecture",
+        required=True,
+        choices=("x86_64", "aarch64"),
+    )
+    p.add_argument("--run-id", required=True)
+    p.add_argument("--dgoss", required=True, type=Path)
+    p.add_argument("--goss", required=True, type=Path)
+    p.add_argument("--report", required=True, type=Path)
+    p.add_argument("--junit", required=True, type=Path)
+    p.add_argument("--repair-report-dir", required=True, type=Path)
+    p.add_argument("--opencode", required=True, type=Path)
+
+    p = sub.add_parser(
+        "phase1-native-validate",
+        help="Run deterministic native validation for one TaskSpec",
+    )
+    p.add_argument("--workspace", required=True, type=Path)
+    p.add_argument("--task-spec", required=True, type=Path)
+    p.add_argument(
+        "--architecture",
+        required=True,
+        choices=("x86_64", "aarch64"),
+    )
+    p.add_argument("--run-id", required=True)
+    p.add_argument("--dgoss", required=True, type=Path)
+    p.add_argument("--goss", required=True, type=Path)
+    p.add_argument("--report", required=True, type=Path)
+    p.add_argument("--junit", required=True, type=Path)
+
+    args = parser.parse_args(argv)
+
+    try:
+        if args.command == "adversarial-pair":
+            cmd_adversarial_pair(args)
+        elif args.command == "test":
+            cmd_test(args)
+        elif args.command == "fix":
+            cmd_fix(args)
+        elif args.command == "get-app-name":
+            cmd_get_app_name(args)
+        elif args.command == "report-failures":
+            cmd_report_failures(args)
+        elif args.command == "phase1-generate":
+            cmd_phase1_generate(args)
+        elif args.command == "phase1-native-repair":
+            cmd_phase1_native_repair(args)
+        elif args.command == "phase1-native-validate":
+            cmd_phase1_native_validate(args)
+        else:
+            parser.print_help()
+    except (
+        AgentRuntimeError,
+        GenerationPipelineError,
+        NativeRepairError,
+        NativeValidationError,
+        TaskSpecError,
+        json.JSONDecodeError,
+        OSError,
+    ) as error:
+        print(f"run: error: {error}", file=sys.stderr)
+        return 2
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

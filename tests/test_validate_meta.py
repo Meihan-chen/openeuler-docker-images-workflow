@@ -74,3 +74,32 @@ def test_empty_meta():
             f.write("")
         errors = validate_meta_file(meta_path)
         assert len(errors) > 0
+
+
+def test_task_meta_reuses_shared_validator_for_exact_dual_arch_contract(tmp_path):
+    from scripts.harness.validate_meta import validate_task_meta_file
+    from scripts.lib.task_spec import TaskSpec
+
+    image = tmp_path / "2.16.0" / "24.03-lts-sp4"
+    image.mkdir(parents=True)
+    (image / "Dockerfile").write_text("FROM scratch\n")
+    meta = tmp_path / "meta.yml"
+    meta.write_text(
+        "2.16.0-oe2403sp4:\n"
+        "  path: 2.16.0/24.03-lts-sp4/Dockerfile\n"
+    )
+    task = TaskSpec.from_workflow_dispatch(
+        {
+            "app": "kvrocks",
+            "version": "2.16.0",
+            "os_version": "24.03-lts-sp4",
+            "domain": "Database",
+            "source_url": "https://github.com/apache/kvrocks/tree/v2.16.0",
+        }
+    )
+
+    assert validate_task_meta_file(meta, task) == []
+
+    meta.write_text(meta.read_text() + "  arch: aarch64\n")
+    errors = validate_task_meta_file(meta, task)
+    assert any("dual-architecture" in error for error in errors)

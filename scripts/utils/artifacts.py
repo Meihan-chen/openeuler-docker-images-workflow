@@ -4,9 +4,22 @@ Archives test results in the target repository structure:
     <app>/results/<app-ver>/<oe-ver>/<arch>.junit.xml
 """
 
+import json
 import os
 import shutil
+import sys
 from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+# Scenario-one bounded evidence extends the existing artifact utility.
+from scripts.lib.result_aggregation import (  # noqa: E402
+    ResultAggregationError,
+    aggregate_native_results,
+)
+from scripts.lib.task_spec import TaskSpec  # noqa: E402
 
 
 def archive_results(
@@ -86,6 +99,16 @@ def main() -> None:
 
     sub.add_parser("list")
 
+    aggregate = sub.add_parser(
+        "aggregate-native",
+        help="Aggregate bounded dual-architecture TaskSpec evidence",
+    )
+    aggregate.add_argument("--workspace", required=True, type=Path)
+    aggregate.add_argument("--task-spec", required=True, type=Path)
+    aggregate.add_argument("--run-id", required=True)
+    aggregate.add_argument("--run-url", required=True)
+    aggregate.add_argument("--report-dir", required=True, type=Path)
+
     args = parser.parse_args()
 
     if args.command == "archive":
@@ -96,8 +119,17 @@ def main() -> None:
         print(f"Archived to {path}")
     elif args.command == "list":
         results = collect_all_results()
-        import json
         print(json.dumps(results, indent=2))
+    elif args.command == "aggregate-native":
+        task = TaskSpec.from_json(args.task_spec.read_text())
+        report = aggregate_native_results(
+            workspace=args.workspace,
+            task=task,
+            run_id=args.run_id,
+            run_url=args.run_url,
+            report_dir=args.report_dir,
+        )
+        print(json.dumps(report, ensure_ascii=False, sort_keys=True))
     else:
         parser.print_help()
 

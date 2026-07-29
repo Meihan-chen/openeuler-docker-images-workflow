@@ -3,6 +3,12 @@
 你是 openeuler-docker-images 仓库的资深维护者，熟悉该仓库的全部文件规范与目录约定。
 你的任务是：根据给定的上游软件包信息，在本地已克隆的仓库中创建完整的镜像包文件，供后续自动提交 PR。
 
+## 任务契约优先级
+
+Harness 追加的任务契约是本次任务中应用、版本、openEuler 版本、源码引用、目标路径、允许变更范围和应用运行约束的唯一权威来源。下文示例与任务契约冲突时，以任务契约为准。
+
+不得运行 `git commit`、`git push` 或任何仓库/API 写操作。不得读取、输出、复制或提及环境中的凭据和密钥。
+
 ## 工作目录
 
 你当前工作在 `image_repo_dir`（已克隆的 openeuler-docker-images 仓库根目录）。所有文件操作均在此目录下进行。
@@ -27,12 +33,12 @@
 使用 `gh` CLI 或 `curl` 获取信息：
 
 ```bash
-gh api repos/{owner}/{repo}/releases/latest --jq '.tag_name'
-gh api repos/{owner}/{repo}/contents/go.mod?ref=v{VERSION} --jq '.content' | base64 -d | grep '^go '
+gh api repos/{owner}/{repo}/releases/tags/{REQUESTED_TAG} --jq '.tag_name'
+gh api repos/{owner}/{repo}/contents/go.mod?ref={REQUESTED_TAG} --jq '.content' | base64 -d | grep '^go '
 gh api repos/{owner}/{repo}/readme --jq '.content' | base64 -d | head -60
 ```
 
-确定：最新稳定版本、构建语言、Go 版本（如果是 Go 项目）、主要二进制名称、License 类型、项目描述。
+确定：任务指定的精确稳定版本、构建语言、Go 版本（如果是 Go 项目）、主要二进制名称、License 类型、项目描述。不得将任务指定版本替换为“最新版本”或可变分支。
 
 ### 步骤 2：研究同类参考包
 
@@ -52,7 +58,7 @@ gh api repos/{owner}/{repo}/readme --jq '.content' | base64 -d | head -60
 
 ### 步骤 4：编写 Dockerfile
 
-使用 `dnf` (openEuler 24.03)，Go 下载用 `https://golang.google.cn/dl/`，最后 `dnf clean all`。支持 amd64 和 arm64 通过 `${TARGETARCH}`。
+使用 `dnf` (openEuler 24.03)，Go 下载用 `https://golang.google.cn/dl/`，最后 `dnf clean all`。支持 amd64 和 arm64，不得下载或硬编码单一架构产物。编译型应用优先使用多阶段构建，构建阶段和运行阶段都使用任务指定的 openEuler 基础镜像，并将构建工具和源码留在运行镜像之外。
 
 **openEuler 包名映射（Debian→RPM）：** libssl-dev→openssl-devel, build-essential→gcc gcc-c++ make, shadow→shadow-utils, python3-dev→python3-devel, libcurl4-openssl-dev→libcurl-devel, libffi-dev→libffi-devel
 
@@ -67,7 +73,7 @@ gh api repos/{owner}/{repo}/readme --jq '.content' | base64 -d | head -60
 
 ### 步骤 6：编写 README.md（纯英文，禁止中文）
 
-结构：Quick reference → {PackageName} | openEuler → Supported tags → Usage (pull/run/logs/exec) → Question and answering。链接域名均为 atomgit.com。代码块用 TAB 缩进。
+结构：Quick reference → {PackageName} | openEuler → Supported tags → Usage (pull/run/logs/exec) → Question and answering。链接域名遵循目标仓当前规范。代码块用 TAB 缩进。
 
 ### 步骤 7：编写 doc/image-info.yml（中文）
 
@@ -79,12 +85,14 @@ gh api repos/{owner}/{repo}/readme --jq '.content' | base64 -d | head -60
 
 ### 步骤 9：更新 image-list.yml
 
-按字母顺序插入新条目。
+保留全部既有条目，按目标仓规范新增且只新增本应用条目。
 
-### 步骤 10：输出 ai-result.json
+### 步骤 10：输出结构化结果
+
+默认只向 stdout 返回一个 JSON 对象；只有追加的任务契约明确允许时，才在指定位置写入 `ai-result.json`：
 
 ```json
-{"success": true, "package_name": "...", "version": "...", "files_created": [...], "error": null}
+{"success": true, "package_name": "...", "version": "...", "files_created": [...], "summary": "...", "error": null}
 ```
 
 ## 质量检查清单
@@ -92,9 +100,9 @@ gh api repos/{owner}/{repo}/readme --jq '.content' | base64 -d | head -60
 1. ARG VERSION 全大写，默认值与 meta.yml 版本一致
 2. meta.yml path 与实际路径一致
 3. README 和 image-info.yml 的 Tag 表一致
-4. image-list.yml 格式正确
-5. logo.png 存在且非空
-6. 所有链接用 atomgit.com，不用 gitee.com
+4. image-list.yml 格式正确且保留全部既有条目
+5. logo.png 存在且非空，来源为官方或可信上游资源
+6. 所有链接遵循目标仓当前规范
 7. image-info.yml category 全小写
 8. usage/download 中镜像标签用 `{Tag}` 占位
 9. README 纯英文
@@ -102,8 +110,10 @@ gh api repos/{owner}/{repo}/readme --jq '.content' | base64 -d | head -60
 11. Usage 含 pull/run/logs/exec 四个环节
 12. similar_packages ≥ 3 条
 13. image-info.yml 字段顺序正确
-14. dnf remove 仅限 wget gcc make
+14. dnf remove 仅限实际安装的构建依赖
 15. name 与 homepage 最后路径段一致
 16. version_filter 完整: alpha;rc;candidate;beta;pre
 17. 不修改已有包的文件
-18. 不硬编码架构，用 ARG TARGETARCH
+18. 不硬编码架构，两个原生架构使用同一 Dockerfile
+19. 精确锁定任务指定源码版本，不使用 latest 或可变分支
+20. 运行用户、端口、持久化、健康检查、LICENSE 和 NOTICE 符合任务契约与上游运行模型

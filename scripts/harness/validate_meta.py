@@ -47,6 +47,38 @@ def validate_meta_file(meta_path: str) -> list[str]:
     return errors
 
 
+def validate_task_meta_file(meta_path: str | Path, task: object) -> list[str]:
+    """Apply the shared schema checks plus one exact TaskSpec contract."""
+    path = Path(meta_path)
+    errors = validate_meta_file(str(path))
+    try:
+        data = yaml.safe_load(path.read_text())
+    except (OSError, yaml.YAMLError):
+        return errors
+    if not isinstance(data, dict):
+        return errors
+
+    version = str(getattr(task, "version"))
+    os_version = str(getattr(task, "os_version"))
+    expected_tag = (
+        f"{version}-oe"
+        f"{os_version.replace('.', '').replace('-lts-sp', 'sp')}"
+    )
+    if set(data) != {expected_tag}:
+        errors.append(f"meta.yml must contain only tag {expected_tag}")
+        return errors
+    entry = data[expected_tag]
+    expected_path = f"{version}/{os_version}/Dockerfile"
+    if not isinstance(entry, dict) or entry.get("path") != expected_path:
+        errors.append(f"meta.yml path must be {expected_path}")
+        return errors
+    if "arch" in entry:
+        errors.append(
+            "meta.yml must omit arch for dual-architecture publication"
+        )
+    return errors
+
+
 def find_all_meta_files(root: str) -> list[str]:
     """Find all meta.yml files under the repository root."""
     meta_files = []
