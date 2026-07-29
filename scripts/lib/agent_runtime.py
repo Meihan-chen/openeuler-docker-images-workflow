@@ -20,7 +20,16 @@ class AgentRuntimeError(RuntimeError):
 
 MODEL = "deepseek/deepseek-v4-flash"
 _AGENT_HEARTBEAT_SECONDS = 60.0
-_EVENT_DETAIL_LIMIT = 1000
+_MESSAGE_DETAIL_LIMIT = 4000
+_ACTION_DETAIL_LIMIT = 240
+_VISIBLE_ACTION_TOOLS = {
+    "bash",
+    "edit",
+    "invalid",
+    "task",
+    "webfetch",
+    "write",
+}
 _WRITE_ROLES = {"image_creator", "testcase_creator", "fixer"}
 _READ_ONLY_ROLES = {"image_qa", "testcase_qa"}
 _ROLES = _WRITE_ROLES | _READ_ONLY_ROLES
@@ -49,45 +58,134 @@ def _default_runner(
     secret = env.get("DEEPSEEK_API_KEY", "")
     started = time.monotonic()
     last_output = [started]
+    last_action = ["none"]
+    message_count = [0]
+    action_counts: dict[str, int] = {}
     completed = threading.Event()
 
-    def safe_detail(value: object) -> str:
+    def safe_detail(value: object, *, limit: int) -> str:
         if isinstance(value, str):
             detail = value
         else:
             detail = json.dumps(value, ensure_ascii=False, sort_keys=True)
         if secret:
             detail = detail.replace(secret, "REDACTED")
-        return " ".join(detail.split())[:_EVENT_DETAIL_LIMIT]
+        return " ".join(detail.split())[:limit]
+
+    def safe_path(value: object) -> str:
+        detail = safe_detail(value, limit=_ACTION_DETAIL_LIMIT)
+        try:
+            return str(Path(detail).resolve().relative_to(cwd.resolve()))
+        except ValueError:
+            return detail
+
+    def tool_summary(tool: str, state: object) -> str:
+        if not isinstance(state, dict):
+            return f"tool={tool}"
+        tool_input = state.get("input", {})
+        metadata = state.get("metadata", {})
+        fields = [f"tool={tool}"]
+        if isinstance(tool_input, dict):
+            file_path = tool_input.get("filePath") or tool_input.get("path")
+            if file_path:
+                fields.append(f"path={safe_path(file_path)}")
+            elif tool == "bash" and tool_input.get("command"):
+                command = safe_detail(
+                    tool_input["command"],
+                    limit=_ACTION_DETAIL_LIMIT,
+                )
+                fields.append(
+                    f"command={json.dumps(command, ensure_ascii=False)}"
+                )
+            elif tool in {"grep", "glob"} and tool_input.get("pattern"):
+                pattern = safe_detail(
+                    tool_input["pattern"],
+                    limit=_ACTION_DETAIL_LIMIT,
+                )
+                fields.append(
+                    f"pattern={json.dumps(pattern, ensure_ascii=False)}"
+                )
+            elif tool == "webfetch" and tool_input.get("url"):
+                fields.append(
+                    "url="
+                    + safe_detail(
+                        tool_input["url"],
+                        limit=_ACTION_DETAIL_LIMIT,
+                    )
+                )
+            elif tool == "task" and tool_input.get("description"):
+                description = safe_detail(
+                    tool_input["description"],
+                    limit=_ACTION_DETAIL_LIMIT,
+                )
+                fields.append(
+                    f"description={json.dumps(description, ensure_ascii=False)}"
+                )
+            elif tool == "todowrite":
+                todos = tool_input.get("todos", [])
+                count = len(todos) if isinstance(todos, list) else 0
+                fields.append(f"items={count}")
+        status = state.get("status")
+        if status:
+            fields.append(f"status={status}")
+        if isinstance(metadata, dict) and metadata.get("exit") is not None:
+            fields.append(f"exit={metadata['exit']}")
+        return " ".join(fields)
 
     def emit(line: str) -> None:
-        last_output[0] = time.monotonic()
         safe_line = line.replace(secret, "REDACTED") if secret else line
         try:
             event = json.loads(safe_line)
         except json.JSONDecodeError:
             detail = safe_line.strip()
             if detail:
-                log(f"agent:{role}", detail[:500])
+                last_output[0] = time.monotonic()
+                log(
+                    f"agent:{role}",
+                    safe_detail(detail, limit=_MESSAGE_DETAIL_LIMIT),
+                )
             return
         event_type = str(event.get("type", "unknown"))
         part = event.get("part")
         if event_type == "text" and isinstance(part, dict):
-            log(f"agent:{role}", f"TEXT {safe_detail(part.get('text', ''))}")
+            last_output[0] = time.monotonic()
+            message_count[0] += 1
+            message = safe_detail(
+                part.get("text", ""),
+                limit=_MESSAGE_DETAIL_LIMIT,
+            )
+            log(f"agent:{role}", f"MESSAGE {message}")
         elif event_type == "tool_use" and isinstance(part, dict):
             tool = str(part.get("tool", "unknown"))
-            log(
-                f"agent:{role}",
-                f"TOOL tool={tool} detail={safe_detail(part.get('state', part))}",
+            state = part.get("state", part)
+            summary = tool_summary(tool, state)
+            last_output[0] = time.monotonic()
+            last_action[0] = summary
+            action_counts[tool] = action_counts.get(tool, 0) + 1
+            status = state.get("status") if isinstance(state, dict) else None
+            metadata = state.get("metadata", {}) if isinstance(state, dict) else {}
+            failed_command = (
+                isinstance(metadata, dict)
+                and metadata.get("exit") not in {None, 0}
             )
+            if (
+                tool in _VISIBLE_ACTION_TOOLS
+                or status in {"error", "failed"}
+                or failed_command
+            ):
+                log(f"agent:{role}", f"ACTION {summary}")
 
     def heartbeat() -> None:
         while not completed.wait(_AGENT_HEARTBEAT_SECONDS):
             now = time.monotonic()
+            silence = now - last_output[0]
+            if silence < _AGENT_HEARTBEAT_SECONDS:
+                continue
             log(
                 f"agent:{role}",
                 f"WAIT elapsed={now - started:.1f}s "
-                f"silence={now - last_output[0]:.1f}s "
+                f"silence={silence:.1f}s "
+                f"last_action={last_action[0]} "
                 f"timeout={float(timeout):g}s",
             )
 
@@ -98,7 +196,7 @@ def _default_runner(
     )
     heartbeat_thread.start()
     try:
-        return run_streaming(
+        result = run_streaming(
             command,
             cwd=cwd,
             env=process_env,
@@ -108,6 +206,15 @@ def _default_runner(
     finally:
         completed.set()
         heartbeat_thread.join(timeout=1)
+    tools = ",".join(
+        f"{tool}:{count}" for tool, count in sorted(action_counts.items())
+    )
+    log(
+        f"agent:{role}",
+        f"ACTIVITY messages={message_count[0]} "
+        f"actions={sum(action_counts.values())} tools={tools or 'none'}",
+    )
+    return result
 
 
 def _scan_json(text: str) -> Iterator[object]:

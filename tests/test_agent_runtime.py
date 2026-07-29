@@ -42,17 +42,60 @@ def test_default_agent_runner_streams_safe_progress(tmp_path, capsys):
     from scripts.lib.agent_runtime import run_agent
 
     executable = tmp_path / "opencode"
+    workspace = tmp_path / "target"
+    workspace.mkdir()
     payload = json.dumps({"success": True, "files_created": ["meta.yml"]})
     event = json.dumps({"type": "text", "part": {"text": payload}})
     step = json.dumps({"type": "step_start", "part": {"id": "step-1"}})
+    tool = json.dumps(
+        {
+            "type": "tool_use",
+            "part": {
+                "tool": "read",
+                "state": {
+                    "status": "completed",
+                    "input": {
+                        "filePath": str(
+                            workspace / "Database" / "kvrocks" / "meta.yml"
+                        )
+                    },
+                    "metadata": {
+                        "display": {
+                            "text": "low-value file contents deepseek-secret"
+                        }
+                    },
+                    "output": "low-value file contents deepseek-secret",
+                },
+            },
+        }
+    )
+    write_tool = json.dumps(
+        {
+            "type": "tool_use",
+            "part": {
+                "tool": "write",
+                "state": {
+                    "status": "completed",
+                    "input": {
+                        "filePath": str(
+                            workspace / "Database" / "kvrocks" / "README.md"
+                        ),
+                        "content": "low-value generated contents deepseek-secret",
+                    },
+                    "metadata": {"exists": False},
+                    "output": "Wrote file successfully.",
+                },
+            },
+        }
+    )
     executable.write_text(
         "#!/bin/sh\n"
         f"printf '%s\\n' '{step}'\n"
+        f"printf '%s\\n' '{tool}'\n"
+        f"printf '%s\\n' '{write_tool}'\n"
         f"printf '%s\\n' '{event}'\n"
     )
     executable.chmod(0o755)
-    workspace = tmp_path / "target"
-    workspace.mkdir()
 
     result = run_agent(
         executable=executable,
@@ -69,8 +112,19 @@ def test_default_agent_runner_streams_safe_progress(tmp_path, capsys):
         "[flow][agent:image_creator] START "
         "model=deepseek/deepseek-v4-flash timeout=1800s"
     ) in output
-    assert "[flow][agent:image_creator] TEXT " in output
+    assert (
+        "[flow][agent:image_creator] ACTION tool=write "
+        "path=Database/kvrocks/README.md status=completed"
+    ) in output
+    assert "ACTION tool=read" not in output
+    assert "[flow][agent:image_creator] MESSAGE " in output
+    assert (
+        "[flow][agent:image_creator] ACTIVITY "
+        "messages=1 actions=2 tools=read:1,write:1"
+    ) in output
     assert '"files_created": ["meta.yml"]' in output
+    assert "low-value file contents" not in output
+    assert "metadata" not in output
     assert re.search(
         r"\[flow\]\[agent:image_creator\] PASS elapsed=\d+\.\d+s",
         output,
@@ -119,7 +173,8 @@ def test_default_agent_runner_logs_heartbeat_before_timeout(
     output = capsys.readouterr().out
     assert re.search(
         r"\[flow\]\[agent:image_qa\] WAIT "
-        r"elapsed=\d+\.\d+s silence=\d+\.\d+s timeout=0.08s",
+        r"elapsed=\d+\.\d+s silence=\d+\.\d+s "
+        r"last_action=none timeout=0.08s",
         output,
     )
     assert re.search(
