@@ -134,7 +134,11 @@ def test_native_validation_uses_dedicated_builder_and_full_runtime_checks(
     )
     assert dgoss_call["env"]["GOSS_FILE"] == "goss.yaml"
     assert "GOSS_WAIT_FILE" not in dgoss_call["env"]
-    assert "EXPECTED_VERSION=2.16.0" in flattened
+    assert dgoss_call["command"][-3:] == [
+        "--env",
+        "EXPECTED_VERSION=2.16.0",
+        "oe-autopilot/kvrocks:2.16.0-123456-x86-64",
+    ]
     assert " SET oe-e2e-persistence run-123456" in flattened
     assert " GET oe-e2e-persistence" in flattened
     assert "docker buildx rm" in flattened

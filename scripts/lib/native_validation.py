@@ -295,6 +295,8 @@ def validate_native_image(
                 "run",
                 "--name",
                 dgoss_container,
+                "--env",
+                f"EXPECTED_VERSION={task.version}",
                 image,
             ],
             cwd=workspace,

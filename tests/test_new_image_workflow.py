@@ -243,6 +243,32 @@ def test_prepare_uploads_reports_and_diagnostic_patch_after_generation_failure()
     assert upload["with"]["path"] == "${{ runner.temp }}/phase1-prepare/"
 
 
+def test_native_jobs_upload_reports_and_diagnostic_patch_after_failure():
+    jobs = _workflow()["jobs"]
+
+    for job_name, label, directory in (
+        ("validate_x86", "x86", "phase1-x86"),
+        ("validate_arm", "ARM", "phase1-arm"),
+    ):
+        steps = {step["name"]: step for step in jobs[job_name]["steps"]}
+        diagnostic = steps[f"Create {label} failure diagnostic patch"]
+        assert "failure()" in diagnostic["if"]
+        assert diagnostic["continue-on-error"] is True
+        assert "target-create-patch" in diagnostic["run"]
+        assert "changes.patch" in diagnostic["run"]
+
+        upload_name = (
+            "Upload x86-converged artifact"
+            if job_name == "validate_x86"
+            else "Upload ARM-converged artifact"
+        )
+        upload = steps[upload_name]
+        assert "always()" in upload["if"]
+        assert upload["with"]["path"] == (
+            f"${{{{ runner.temp }}}}/{directory}/"
+        )
+
+
 def test_summary_markdown_does_not_trigger_single_quote_shellcheck_warning():
     text = WORKFLOW_PATH.read_text()
 

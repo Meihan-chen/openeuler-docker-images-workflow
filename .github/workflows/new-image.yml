@@ -309,8 +309,28 @@ jobs:
           cp "${RUNNER_TEMP}/phase1-input/base-sha.txt" \
             "${RUNNER_TEMP}/phase1-x86/base-sha.txt"
 
+      - name: Create x86 failure diagnostic patch
+        if: ${{ failure() }}
+        continue-on-error: true
+        run: |
+          mkdir -p "${RUNNER_TEMP}/phase1-x86"
+          if [ -f "${RUNNER_TEMP}/phase1-input/base-sha.txt" ]; then
+            cp "${RUNNER_TEMP}/phase1-input/task-spec.json" \
+              "${RUNNER_TEMP}/phase1-x86/task-spec.json"
+            cp "${RUNNER_TEMP}/phase1-input/base-sha.txt" \
+              "${RUNNER_TEMP}/phase1-x86/base-sha.txt"
+            base_sha="$(tr -d '\n' \
+              < "${RUNNER_TEMP}/phase1-input/base-sha.txt")"
+            "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
+              target-create-patch \
+              --workspace "${RUNNER_TEMP}/phase1-target" \
+              --branch master \
+              --base-sha "${base_sha}" \
+              --output "${RUNNER_TEMP}/phase1-x86/changes.patch"
+          fi
+
       - name: Upload x86-converged artifact
-        if: ${{ success() }}
+        if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: phase1-x86-${{ github.run_id }}
@@ -432,8 +452,28 @@ jobs:
           cp "${RUNNER_TEMP}/phase1-input/base-sha.txt" \
             "${RUNNER_TEMP}/phase1-arm/base-sha.txt"
 
+      - name: Create ARM failure diagnostic patch
+        if: ${{ failure() }}
+        continue-on-error: true
+        run: |
+          mkdir -p "${RUNNER_TEMP}/phase1-arm"
+          if [ -f "${RUNNER_TEMP}/phase1-input/base-sha.txt" ]; then
+            cp "${RUNNER_TEMP}/phase1-input/task-spec.json" \
+              "${RUNNER_TEMP}/phase1-arm/task-spec.json"
+            cp "${RUNNER_TEMP}/phase1-input/base-sha.txt" \
+              "${RUNNER_TEMP}/phase1-arm/base-sha.txt"
+            base_sha="$(tr -d '\n' \
+              < "${RUNNER_TEMP}/phase1-input/base-sha.txt")"
+            "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
+              target-create-patch \
+              --workspace "${RUNNER_TEMP}/phase1-target" \
+              --branch master \
+              --base-sha "${base_sha}" \
+              --output "${RUNNER_TEMP}/phase1-arm/changes.patch"
+          fi
+
       - name: Upload ARM-converged artifact
-        if: ${{ success() }}
+        if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: phase1-arm-${{ github.run_id }}
