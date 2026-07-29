@@ -1,0 +1,6 @@
+self-hosted-runner:
+  labels:
+    - oe-image-x86
+    - oe-image-arm64
+
+config-variables: null

@@ -1,72 +1,691 @@
-name: New Image
+name: Phase 1 - New Image E2E
 
 on:
-  issues:
-    types: [opened, labeled]
   workflow_dispatch:
     inputs:
-      package:
-        description: 'App name'
+      operation:
+        description: "Explicit phase-one operation"
         required: true
-        default: 'nginx'
-      source:
-        description: 'Upstream repo URL'
-        required: true
-        default: 'https://github.com/nginx/nginx'
-      domain:
-        description: 'Domain dir'
-        required: true
-        default: 'Cloud'
-      os_version:
-        description: 'openEuler version'
-        required: true
-        default: '24.03-lts'
-      app_version:
-        description: 'App version'
-        required: true
-        default: '1.27.2'
-      demo_mode:
-        description: 'Skip LLM agents, use create_demo.py (for testing pipeline without API key)'
+        type: choice
+        default: validate_only
+        options:
+          - validate_only
+          - fork_pr
+          - failure_issue_contract_test
+      validated_run_id:
+        description: "Successful validate_only run ID required by fork_pr"
         required: false
-        type: boolean
-        default: false
+        type: string
+      app:
+        description: "Application name"
+        required: true
+        type: string
+        default: kvrocks
+      version:
+        description: "Application version"
+        required: true
+        type: string
+        default: 2.16.0
+      os_version:
+        description: "openEuler version"
+        required: true
+        type: string
+        default: 24.03-lts-sp4
+      domain:
+        description: "Target repository domain"
+        required: true
+        type: string
+        default: Database
+      source_url:
+        description: "Pinned upstream release URL"
+        required: true
+        type: string
+        default: https://github.com/apache/kvrocks/tree/v2.16.0
+
+permissions:
+  actions: read
+  contents: read
 
 env:
   PYTHONUNBUFFERED: "1"
-  TARGET_REPO: openeuler/openeuler-docker-images
-  TARGET_REPO_HOST: gitcode.com
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+# TODO(production-duplicate-pr-guard): test fork_pr intentionally skips
+# duplicate PR handling. Before production rollout, remove this test-only
+# behavior and require production/direct_branch_pr with its duplicate PR guard.
 
 jobs:
-  run:
-    runs-on: ubuntu-latest
-    if: |
-      contains(github.event.issue.labels.*.name, 'new-image') ||
-      github.event_name == 'workflow_dispatch'
+  prepare:
+    if: ${{ inputs.operation == 'validate_only' }}
+    runs-on: [self-hosted, Linux, X64, oe-image-x86]
+    timeout-minutes: 120
+    outputs:
+      base_sha: ${{ steps.base.outputs.sha }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out workflow source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
-      - name: Setup QEMU (arm64)
-        uses: docker/setup-qemu-action@v3
-      - name: Setup buildx
-        uses: docker/setup-buildx-action@v3
+      - name: Create locked Python environment
+        run: |
+          python3 -m venv "${RUNNER_TEMP}/phase1-venv"
+          "${RUNNER_TEMP}/phase1-venv/bin/python" -m pip install \
+            --require-hashes \
+            -r .github/python-phase1.lock.txt
 
-      - name: Run flow
-        id: flow
+      - name: Bootstrap locked runner tools
+        id: tools
+        run: |
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/bootstrap_tools.py \
+            --cache-root /opt/oe-image-tools \
+            --arch x86_64 \
+            --output-json "${RUNNER_TEMP}/toolchain.json" \
+            --github-output "${GITHUB_OUTPUT}"
+
+      - name: Enforce native x86 runner preflight
+        run: |
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/runner_preflight.py \
+            --expected-arch x86_64 \
+            --workspace "${GITHUB_WORKSPACE}" \
+            --toolchain-json "${RUNNER_TEMP}/toolchain.json" \
+            --output-json "${RUNNER_TEMP}/preflight-x86.json"
+
+      - name: Normalize TaskSpec
+        env:
+          APP: ${{ inputs.app }}
+          VERSION: ${{ inputs.version }}
+          OS_VERSION: ${{ inputs.os_version }}
+          DOMAIN: ${{ inputs.domain }}
+          SOURCE_URL: ${{ inputs.source_url }}
+        run: |
+          mkdir -p "${RUNNER_TEMP}/phase1-prepare"
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/phase1.py \
+            task-spec \
+            --app "${APP}" \
+            --version "${VERSION}" \
+            --os-version "${OS_VERSION}" \
+            --domain "${DOMAIN}" \
+            --source-url "${SOURCE_URL}" \
+            --output "${RUNNER_TEMP}/phase1-prepare/task-spec.json"
+
+      - name: Clone current target master
+        run: |
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/phase1.py \
+            target-clone \
+            --source \
+              https://gitcode.com/openeuler/openeuler-docker-images.git \
+            --destination "${RUNNER_TEMP}/phase1-target" \
+            --branch master
+
+      - name: Record immutable target base
+        id: base
+        run: |
+          base_sha="$(git -C "${RUNNER_TEMP}/phase1-target" rev-parse HEAD)"
+          printf '%s\n' "${base_sha}" \
+            > "${RUNNER_TEMP}/phase1-prepare/base-sha.txt"
+          printf 'sha=%s\n' "${base_sha}" >> "${GITHUB_OUTPUT}"
+
+      - name: Generate and adversarially review target content
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/run.py \
+            phase1-generate \
+            --workspace "${RUNNER_TEMP}/phase1-target" \
+            --task-spec "${RUNNER_TEMP}/phase1-prepare/task-spec.json" \
+            --base-sha "${{ steps.base.outputs.sha }}" \
+            --report-dir \
+              "${RUNNER_TEMP}/phase1-prepare/generation-reports" \
+            --opencode "${{ steps.tools.outputs.opencode_path }}"
+
+      - name: Lint generated Dockerfile
+        env:
+          APP: ${{ inputs.app }}
+          VERSION: ${{ inputs.version }}
+          OS_VERSION: ${{ inputs.os_version }}
+          DOMAIN: ${{ inputs.domain }}
+        run: |
+          "${{ steps.tools.outputs.hadolint_path }}" \
+            "${RUNNER_TEMP}/phase1-target/${DOMAIN}/${APP}/${VERSION}/${OS_VERSION}/Dockerfile"
+
+      - name: Create generation patch
+        run: |
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/phase1.py \
+            target-create-patch \
+            --workspace "${RUNNER_TEMP}/phase1-target" \
+            --branch master \
+            --base-sha "${{ steps.base.outputs.sha }}" \
+            --output "${RUNNER_TEMP}/phase1-prepare/changes.patch"
+
+      - name: Upload generation artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: phase1-generation-${{ github.run_id }}
+          path: ${{ runner.temp }}/phase1-prepare/
+          if-no-files-found: error
+          retention-days: 30
+
+  validate_x86:
+    if: ${{ inputs.operation == 'validate_only' }}
+    needs: prepare
+    runs-on: [self-hosted, Linux, X64, oe-image-x86]
+    timeout-minutes: 180
+    steps:
+      - name: Check out workflow source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Create locked Python environment
+        run: |
+          python3 -m venv "${RUNNER_TEMP}/phase1-venv"
+          "${RUNNER_TEMP}/phase1-venv/bin/python" -m pip install \
+            --require-hashes \
+            -r .github/python-phase1.lock.txt
+
+      - name: Bootstrap locked runner tools
+        id: tools
+        run: |
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/bootstrap_tools.py \
+            --cache-root /opt/oe-image-tools \
+            --arch x86_64 \
+            --output-json "${RUNNER_TEMP}/toolchain.json" \
+            --github-output "${GITHUB_OUTPUT}"
+
+      - name: Enforce native x86 runner preflight
+        run: |
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/runner_preflight.py \
+            --expected-arch x86_64 \
+            --workspace "${GITHUB_WORKSPACE}" \
+            --toolchain-json "${RUNNER_TEMP}/toolchain.json"
+
+      - name: Download generation artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: phase1-generation-${{ github.run_id }}
+          path: ${{ runner.temp }}/phase1-input
+
+      - name: Replay exact generation candidate
+        run: |
+          base_sha="$(tr -d '\n' \
+            < "${RUNNER_TEMP}/phase1-input/base-sha.txt")"
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/phase1.py \
+            target-clone \
+            --source \
+              https://gitcode.com/openeuler/openeuler-docker-images.git \
+            --destination "${RUNNER_TEMP}/phase1-target" \
+            --branch master \
+            --expected-sha "${base_sha}"
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/phase1.py \
+            target-apply-patch \
+            --workspace "${RUNNER_TEMP}/phase1-target" \
+            --branch master \
+            --base-sha "${base_sha}" \
+            --patch "${RUNNER_TEMP}/phase1-input/changes.patch"
+
+      - name: Validate x86 and repair at most three times
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          base_sha="$(tr -d '\n' \
+            < "${RUNNER_TEMP}/phase1-input/base-sha.txt")"
+          mkdir -p "${RUNNER_TEMP}/phase1-x86"
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/run.py \
+            phase1-native-repair \
+            --workspace "${RUNNER_TEMP}/phase1-target" \
+            --task-spec "${RUNNER_TEMP}/phase1-input/task-spec.json" \
+            --base-sha "${base_sha}" \
+            --architecture x86_64 \
+            --run-id "${{ github.run_id }}" \
+            --dgoss "${{ steps.tools.outputs.dgoss_path }}" \
+            --goss "${{ steps.tools.outputs.goss_path }}" \
+            --report "${RUNNER_TEMP}/phase1-x86/x86_64.json" \
+            --junit "${RUNNER_TEMP}/phase1-x86/x86_64.junit.xml" \
+            --repair-report-dir \
+              "${RUNNER_TEMP}/phase1-x86/x86-repair-agents" \
+            --opencode "${{ steps.tools.outputs.opencode_path }}"
+
+      - name: Create x86-converged patch
+        run: |
+          base_sha="$(tr -d '\n' \
+            < "${RUNNER_TEMP}/phase1-input/base-sha.txt")"
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/phase1.py \
+            target-create-patch \
+            --workspace "${RUNNER_TEMP}/phase1-target" \
+            --branch master \
+            --base-sha "${base_sha}" \
+            --output "${RUNNER_TEMP}/phase1-x86/changes.patch"
+          cp "${RUNNER_TEMP}/phase1-input/task-spec.json" \
+            "${RUNNER_TEMP}/phase1-x86/task-spec.json"
+          cp "${RUNNER_TEMP}/phase1-input/base-sha.txt" \
+            "${RUNNER_TEMP}/phase1-x86/base-sha.txt"
+
+      - name: Upload x86-converged artifact
+        if: ${{ success() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: phase1-x86-${{ github.run_id }}
+          path: ${{ runner.temp }}/phase1-x86/
+          if-no-files-found: error
+          retention-days: 30
+
+  validate_arm:
+    if: ${{ inputs.operation == 'validate_only' }}
+    needs: validate_x86
+    runs-on: [self-hosted, Linux, ARM64, oe-image-arm64]
+    timeout-minutes: 180
+    steps:
+      - name: Check out workflow source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Create locked Python environment
+        run: |
+          python3 -m venv "${RUNNER_TEMP}/phase1-venv"
+          "${RUNNER_TEMP}/phase1-venv/bin/python" -m pip install \
+            --require-hashes \
+            -r .github/python-phase1.lock.txt
+
+      - name: Bootstrap locked runner tools
+        id: tools
+        run: |
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/bootstrap_tools.py \
+            --cache-root /opt/oe-image-tools \
+            --arch aarch64 \
+            --output-json "${RUNNER_TEMP}/toolchain.json" \
+            --github-output "${GITHUB_OUTPUT}"
+
+      - name: Enforce native ARM runner preflight
+        run: |
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/runner_preflight.py \
+            --expected-arch aarch64 \
+            --workspace "${GITHUB_WORKSPACE}" \
+            --toolchain-json "${RUNNER_TEMP}/toolchain.json"
+
+      - name: Download x86-converged artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: phase1-x86-${{ github.run_id }}
+          path: ${{ runner.temp }}/phase1-input
+
+      - name: Replay exact x86-converged candidate
+        run: |
+          base_sha="$(tr -d '\n' \
+            < "${RUNNER_TEMP}/phase1-input/base-sha.txt")"
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/phase1.py \
+            target-clone \
+            --source \
+              https://gitcode.com/openeuler/openeuler-docker-images.git \
+            --destination "${RUNNER_TEMP}/phase1-target" \
+            --branch master \
+            --expected-sha "${base_sha}"
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/phase1.py \
+            target-apply-patch \
+            --workspace "${RUNNER_TEMP}/phase1-target" \
+            --branch master \
+            --base-sha "${base_sha}" \
+            --patch "${RUNNER_TEMP}/phase1-input/changes.patch"
+
+      - name: Validate ARM and repair at most three times
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          base_sha="$(tr -d '\n' \
+            < "${RUNNER_TEMP}/phase1-input/base-sha.txt")"
+          mkdir -p "${RUNNER_TEMP}/phase1-arm"
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/run.py \
+            phase1-native-repair \
+            --workspace "${RUNNER_TEMP}/phase1-target" \
+            --task-spec "${RUNNER_TEMP}/phase1-input/task-spec.json" \
+            --base-sha "${base_sha}" \
+            --architecture aarch64 \
+            --run-id "${{ github.run_id }}" \
+            --dgoss "${{ steps.tools.outputs.dgoss_path }}" \
+            --goss "${{ steps.tools.outputs.goss_path }}" \
+            --report "${RUNNER_TEMP}/phase1-arm/aarch64.json" \
+            --junit "${RUNNER_TEMP}/phase1-arm/aarch64.junit.xml" \
+            --repair-report-dir \
+              "${RUNNER_TEMP}/phase1-arm/arm-repair-agents" \
+            --opencode "${{ steps.tools.outputs.opencode_path }}"
+
+      - name: Create ARM-converged final patch
+        run: |
+          base_sha="$(tr -d '\n' \
+            < "${RUNNER_TEMP}/phase1-input/base-sha.txt")"
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/phase1.py \
+            target-create-patch \
+            --workspace "${RUNNER_TEMP}/phase1-target" \
+            --branch master \
+            --base-sha "${base_sha}" \
+            --output "${RUNNER_TEMP}/phase1-arm/changes.patch"
+          cp "${RUNNER_TEMP}/phase1-input/task-spec.json" \
+            "${RUNNER_TEMP}/phase1-arm/task-spec.json"
+          cp "${RUNNER_TEMP}/phase1-input/base-sha.txt" \
+            "${RUNNER_TEMP}/phase1-arm/base-sha.txt"
+
+      - name: Upload ARM-converged artifact
+        if: ${{ success() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: phase1-arm-${{ github.run_id }}
+          path: ${{ runner.temp }}/phase1-arm/
+          if-no-files-found: error
+          retention-days: 30
+
+  revalidate_x86:
+    if: ${{ inputs.operation == 'validate_only' }}
+    needs: validate_arm
+    runs-on: [self-hosted, Linux, X64, oe-image-x86]
+    timeout-minutes: 180
+    steps:
+      - name: Check out workflow source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Create locked Python environment
+        run: |
+          python3 -m venv "${RUNNER_TEMP}/phase1-venv"
+          "${RUNNER_TEMP}/phase1-venv/bin/python" -m pip install \
+            --require-hashes \
+            -r .github/python-phase1.lock.txt
+
+      - name: Bootstrap locked runner tools
+        id: tools
+        run: |
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/bootstrap_tools.py \
+            --cache-root /opt/oe-image-tools \
+            --arch x86_64 \
+            --output-json "${RUNNER_TEMP}/toolchain.json" \
+            --github-output "${GITHUB_OUTPUT}"
+
+      - name: Enforce native x86 runner preflight
+        run: |
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/runner_preflight.py \
+            --expected-arch x86_64 \
+            --workspace "${GITHUB_WORKSPACE}" \
+            --toolchain-json "${RUNNER_TEMP}/toolchain.json"
+
+      - name: Download ARM-converged artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: phase1-arm-${{ github.run_id }}
+          path: ${{ runner.temp }}/phase1-input
+
+      - name: Replay final patch
+        run: |
+          base_sha="$(tr -d '\n' \
+            < "${RUNNER_TEMP}/phase1-input/base-sha.txt")"
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/phase1.py \
+            target-clone \
+            --source \
+              https://gitcode.com/openeuler/openeuler-docker-images.git \
+            --destination "${RUNNER_TEMP}/phase1-target" \
+            --branch master \
+            --expected-sha "${base_sha}"
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/phase1.py \
+            target-apply-patch \
+            --workspace "${RUNNER_TEMP}/phase1-target" \
+            --branch master \
+            --base-sha "${base_sha}" \
+            --patch "${RUNNER_TEMP}/phase1-input/changes.patch"
+
+      - name: Revalidate final patch natively on x86
+        run: |
+          mkdir -p "${RUNNER_TEMP}/phase1-final-x86"
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/run.py \
+            phase1-native-validate \
+            --workspace "${RUNNER_TEMP}/phase1-target" \
+            --task-spec "${RUNNER_TEMP}/phase1-input/task-spec.json" \
+            --architecture x86_64 \
+            --run-id "${{ github.run_id }}" \
+            --dgoss "${{ steps.tools.outputs.dgoss_path }}" \
+            --goss "${{ steps.tools.outputs.goss_path }}" \
+            --report "${RUNNER_TEMP}/phase1-final-x86/x86_64.json" \
+            --junit \
+              "${RUNNER_TEMP}/phase1-final-x86/x86_64.junit.xml"
+
+      - name: Upload final x86 evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: phase1-final-x86-${{ github.run_id }}
+          path: ${{ runner.temp }}/phase1-final-x86/
+          if-no-files-found: error
+          retention-days: 30
+
+  package_candidate:
+    if: ${{ inputs.operation == 'validate_only' }}
+    needs: revalidate_x86
+    runs-on: [self-hosted, Linux, X64, oe-image-x86]
+    timeout-minutes: 60
+    steps:
+      - name: Check out workflow source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Create locked Python environment
+        run: |
+          python3 -m venv "${RUNNER_TEMP}/phase1-venv"
+          "${RUNNER_TEMP}/phase1-venv/bin/python" -m pip install \
+            --require-hashes \
+            -r .github/python-phase1.lock.txt
+
+      - name: Bootstrap locked runner tools
+        id: tools
+        run: |
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/bootstrap_tools.py \
+            --cache-root /opt/oe-image-tools \
+            --arch x86_64 \
+            --output-json "${RUNNER_TEMP}/toolchain.json" \
+            --github-output "${GITHUB_OUTPUT}"
+
+      - name: Download generation evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: phase1-generation-${{ github.run_id }}
+          path: ${{ runner.temp }}/generation
+
+      - name: Download x86 repair evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: phase1-x86-${{ github.run_id }}
+          path: ${{ runner.temp }}/x86
+
+      - name: Download ARM final patch and evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: phase1-arm-${{ github.run_id }}
+          path: ${{ runner.temp }}/arm
+
+      - name: Download final x86 evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: phase1-final-x86-${{ github.run_id }}
+          path: ${{ runner.temp }}/final-x86
+
+      - name: Replay final validated patch
+        run: |
+          base_sha="$(tr -d '\n' < "${RUNNER_TEMP}/arm/base-sha.txt")"
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/phase1.py \
+            target-clone \
+            --source \
+              https://gitcode.com/openeuler/openeuler-docker-images.git \
+            --destination "${RUNNER_TEMP}/phase1-target" \
+            --branch master \
+            --expected-sha "${base_sha}"
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/phase1.py \
+            target-apply-patch \
+            --workspace "${RUNNER_TEMP}/phase1-target" \
+            --branch master \
+            --base-sha "${base_sha}" \
+            --patch "${RUNNER_TEMP}/arm/changes.patch"
+
+      - name: Aggregate dual-architecture result evidence
+        run: |
+          mkdir -p "${RUNNER_TEMP}/native-reports"
+          cp "${RUNNER_TEMP}/final-x86/x86_64.json" \
+            "${RUNNER_TEMP}/native-reports/x86_64.json"
+          cp "${RUNNER_TEMP}/final-x86/x86_64.junit.xml" \
+            "${RUNNER_TEMP}/native-reports/x86_64.junit.xml"
+          cp "${RUNNER_TEMP}/arm/aarch64.json" \
+            "${RUNNER_TEMP}/native-reports/aarch64.json"
+          cp "${RUNNER_TEMP}/arm/aarch64.junit.xml" \
+            "${RUNNER_TEMP}/native-reports/aarch64.junit.xml"
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/utils/artifacts.py \
+            aggregate-native \
+            --workspace "${RUNNER_TEMP}/phase1-target" \
+            --task-spec "${RUNNER_TEMP}/arm/task-spec.json" \
+            --run-id "${{ github.run_id }}" \
+            --run-url \
+              "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --report-dir "${RUNNER_TEMP}/native-reports"
+
+      - name: Enforce final target gates and lint
+        env:
+          APP: ${{ inputs.app }}
+          VERSION: ${{ inputs.version }}
+          OS_VERSION: ${{ inputs.os_version }}
+          DOMAIN: ${{ inputs.domain }}
+        run: |
+          base_sha="$(tr -d '\n' < "${RUNNER_TEMP}/arm/base-sha.txt")"
+          mkdir -p "${RUNNER_TEMP}/candidate/reports/agents"
+          "${{ steps.tools.outputs.hadolint_path }}" \
+            "${RUNNER_TEMP}/phase1-target/${DOMAIN}/${APP}/${VERSION}/${OS_VERSION}/Dockerfile"
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/gate_diff.py \
+            task-contract \
+            --phase final \
+            --workspace "${RUNNER_TEMP}/phase1-target" \
+            --task-spec "${RUNNER_TEMP}/arm/task-spec.json" \
+            --base-sha "${base_sha}" \
+            --expected-run-id "${{ github.run_id }}" \
+            > "${RUNNER_TEMP}/candidate/reports/gates.json"
+
+      - name: Seal immutable candidate bundle
+        run: |
+          base_sha="$(tr -d '\n' < "${RUNNER_TEMP}/arm/base-sha.txt")"
+          cp "${RUNNER_TEMP}/native-reports/x86_64.json" \
+            "${RUNNER_TEMP}/candidate/reports/x86_64.json"
+          cp "${RUNNER_TEMP}/native-reports/aarch64.json" \
+            "${RUNNER_TEMP}/candidate/reports/aarch64.json"
+          cp -a "${RUNNER_TEMP}/generation/generation-reports/." \
+            "${RUNNER_TEMP}/candidate/reports/agents/"
+          cp -a "${RUNNER_TEMP}/x86/x86-repair-agents/." \
+            "${RUNNER_TEMP}/candidate/reports/agents/"
+          cp -a "${RUNNER_TEMP}/arm/arm-repair-agents/." \
+            "${RUNNER_TEMP}/candidate/reports/agents/"
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/phase1.py \
+            target-create-patch \
+            --workspace "${RUNNER_TEMP}/phase1-target" \
+            --branch master \
+            --base-sha "${base_sha}" \
+            --output "${RUNNER_TEMP}/candidate/changes.patch"
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/phase1.py \
+            candidate-create \
+            --candidate-dir "${RUNNER_TEMP}/candidate" \
+            --task-spec "${RUNNER_TEMP}/arm/task-spec.json" \
+            --base-sha "${base_sha}" \
+            --validated-run-id "${{ github.run_id }}"
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/phase1.py \
+            candidate-verify \
+            --candidate-dir "${RUNNER_TEMP}/candidate" \
+            --expected-run-id "${{ github.run_id }}" \
+            --current-base-sha "${base_sha}"
+
+      - name: Upload immutable candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: phase1-candidate-${{ github.run_id }}
+          path: ${{ runner.temp }}/candidate/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish dry-run handoff
+        run: |
+          {
+            printf '## Phase-one validate_only passed\n\n'
+            printf -- "- Candidate artifact: \`phase1-candidate-%s\`\n" \
+              "${{ github.run_id }}"
+            printf -- "- Promotion input \`validated_run_id\`: \`%s\`\n" \
+              "${{ github.run_id }}"
+            printf -- '- No GitCode branch, PR, or Issue was written.\n'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  deliver_fork_pr:
+    if: ${{ inputs.operation == 'fork_pr' }}
+    runs-on: [self-hosted, Linux, X64, oe-image-x86]
+    timeout-minutes: 30
+    steps:
+      - name: Require the validated run ID
+        env:
+          VALIDATED_RUN_ID: ${{ inputs.validated_run_id }}
+        run: |
+          case "${VALIDATED_RUN_ID}" in
+            ''|*[!0-9]*|0) echo "validated_run_id must be a positive integer" >&2; exit 2 ;;
+          esac
+
+      - name: Check out workflow source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Create locked Python environment
+        run: |
+          python3 -m venv "${RUNNER_TEMP}/phase1-venv"
+          "${RUNNER_TEMP}/phase1-venv/bin/python" -m pip install \
+            --require-hashes \
+            -r .github/python-phase1.lock.txt
+
+      - name: Download exact validated candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: phase1-candidate-${{ inputs.validated_run_id }}
+          path: ${{ runner.temp }}/candidate
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.validated_run_id }}
+
+      - name: Promote candidate and create fork PR
         env:
           GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
         run: |
-          python scripts/harness/flow.py \
-            --app "${{ inputs.package || github.event.issue.body.package }}" \
-            --version "${{ inputs.app_version || '1.27.2' }}" \
-            --os "${{ inputs.os_version || '24.03-lts' }}" \
-            --domain "${{ inputs.domain || 'Cloud' }}" \
-            ${{ inputs.demo_mode == true && '--demo' || '' }}
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/phase1.py \
+            fork-deliver \
+            --candidate-dir "${RUNNER_TEMP}/candidate" \
+            --expected-run-id "${{ inputs.validated_run_id }}" \
+            --workspace \
+              "${RUNNER_TEMP}/promotion-${{ github.run_id }}-${{ github.run_attempt }}" \
+            --gitcode-username qq_42020325
 
-      - name: Show PR URL
-        if: always()
+  issue_contract_test:
+    if: ${{ inputs.operation == 'failure_issue_contract_test' }}
+    runs-on: [self-hosted, Linux, X64, oe-image-x86]
+    timeout-minutes: 15
+    steps:
+      - name: Check out workflow source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Create locked Python environment
         run: |
-          if [ -f /tmp/pr-url ]; then
-            echo "PR: $(cat /tmp/pr-url)"
-          else
-            echo "No PR created (all attempts failed or issue filed)"
-          fi
+          python3 -m venv "${RUNNER_TEMP}/phase1-venv"
+          "${RUNNER_TEMP}/phase1-venv/bin/python" -m pip install \
+            --require-hashes \
+            -r .github/python-phase1.lock.txt
+
+      - name: Normalize controlled probe TaskSpec
+        env:
+          APP: ${{ inputs.app }}
+          VERSION: ${{ inputs.version }}
+          OS_VERSION: ${{ inputs.os_version }}
+          DOMAIN: ${{ inputs.domain }}
+          SOURCE_URL: ${{ inputs.source_url }}
+        run: |
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/phase1.py \
+            task-spec \
+            --app "${APP}" \
+            --version "${VERSION}" \
+            --os-version "${OS_VERSION}" \
+            --domain "${DOMAIN}" \
+            --source-url "${SOURCE_URL}" \
+            --output "${RUNNER_TEMP}/issue-task.json"
+
+      - name: Create, update, comment and close controlled Issue
+        env:
+          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+        run: |
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/phase1.py \
+            issue-contract-test \
+            --task-spec "${RUNNER_TEMP}/issue-task.json" \
+            --github-run-id "${{ github.run_id }}" \
+            --failure-stage controlled-contract

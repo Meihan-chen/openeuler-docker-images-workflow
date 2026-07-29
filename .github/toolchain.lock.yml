@@ -1,0 +1,90 @@
+{
+  "schema_version": 1,
+  "cache_root": "/opt/oe-image-tools",
+  "tools": {
+    "dgoss": {
+      "version": "0.4.10",
+      "binary": "dgoss",
+      "assets": {
+        "common": {
+          "url": "https://github.com/goss-org/goss/releases/download/v0.4.10/dgoss",
+          "format": "raw",
+          "sha256": "3bb3ac9df33eeab8ce71a35763f4a69582eceb7db7bf02b4d0a551e72c7a888d",
+          "binary_sha256": "3bb3ac9df33eeab8ce71a35763f4a69582eceb7db7bf02b4d0a551e72c7a888d"
+        }
+      }
+    },
+    "goss": {
+      "version": "0.4.10",
+      "binary": "goss",
+      "assets": {
+        "x86_64": {
+          "url": "https://github.com/goss-org/goss/releases/download/v0.4.10/goss_0.4.10_linux_x86_64.tar.gz",
+          "format": "tar.gz",
+          "sha256": "26e365428946294bcec0c61d867bb3c8349f39feb3d0e6f59084e98632785cc7",
+          "binary_sha256": "29d64f541c2b6edee5c7ee75dd5dd4da1c8b94e336c56ffeb864ae460a527c4f"
+        },
+        "aarch64": {
+          "url": "https://github.com/goss-org/goss/releases/download/v0.4.10/goss_0.4.10_linux_arm64.tar.gz",
+          "format": "tar.gz",
+          "sha256": "90a59612b4d67d9f1a9038634c000790136bb82526a69de1e81ac075c2f6d2c6",
+          "binary_sha256": "e841af0f55fa0b146bcceb35d2d3bf5db623e17e45034113374c047623ffdde4"
+        }
+      }
+    },
+    "hadolint": {
+      "version": "2.14.0",
+      "binary": "hadolint",
+      "assets": {
+        "x86_64": {
+          "url": "https://github.com/hadolint/hadolint/releases/download/v2.14.0/hadolint-linux-x86_64",
+          "format": "raw",
+          "sha256": "6bf226944684f56c84dd014e8b979d27425c0148f61b3bd99bcc6f39e9dc5a47",
+          "binary_sha256": "6bf226944684f56c84dd014e8b979d27425c0148f61b3bd99bcc6f39e9dc5a47"
+        },
+        "aarch64": {
+          "url": "https://github.com/hadolint/hadolint/releases/download/v2.14.0/hadolint-linux-arm64",
+          "format": "raw",
+          "sha256": "331f1d3511b84a4f1e3d18d52fec284723e4019552f4f47b19322a53ce9a40ed",
+          "binary_sha256": "331f1d3511b84a4f1e3d18d52fec284723e4019552f4f47b19322a53ce9a40ed"
+        }
+      }
+    },
+    "jq": {
+      "version": "1.8.2",
+      "binary": "jq",
+      "assets": {
+        "x86_64": {
+          "url": "https://github.com/jqlang/jq/releases/download/jq-1.8.2/jq-linux-amd64",
+          "format": "raw",
+          "sha256": "b1c22172dd303f3be49e935aa56aa48a8b7a46e0bc838b4997d3bb451495870f",
+          "binary_sha256": "b1c22172dd303f3be49e935aa56aa48a8b7a46e0bc838b4997d3bb451495870f"
+        },
+        "aarch64": {
+          "url": "https://github.com/jqlang/jq/releases/download/jq-1.8.2/jq-linux-arm64",
+          "format": "raw",
+          "sha256": "8b85c817833814ddca00a144c33705546355afccf0cf39b188f3cdb48b852309",
+          "binary_sha256": "8b85c817833814ddca00a144c33705546355afccf0cf39b188f3cdb48b852309"
+        }
+      }
+    },
+    "opencode": {
+      "version": "1.18.8",
+      "binary": "opencode",
+      "assets": {
+        "x86_64": {
+          "url": "https://github.com/anomalyco/opencode/releases/download/v1.18.8/opencode-linux-x64.tar.gz",
+          "format": "tar.gz",
+          "sha256": "b72014b8b53427fdb5a628d2433569ee7ccd289bd5c4490636064b24791c1305",
+          "binary_sha256": "8179ed5ef819eb5a11310ceeb7a4e30e2ecbf29b1486ea06531f8b8375003972"
+        },
+        "aarch64": {
+          "url": "https://github.com/anomalyco/opencode/releases/download/v1.18.8/opencode-linux-arm64.tar.gz",
+          "format": "tar.gz",
+          "sha256": "3e1b4f3bd12764c911f9211910608f85429b6209900a662c7ed27196c9033b93",
+          "binary_sha256": "cbda492128e61f48466aeb8c2d0a1f4bc457a453e5fb58ca4b4503314bf12d21"
+        }
+      }
+    }
+  }
+}
