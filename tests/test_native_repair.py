@@ -126,6 +126,16 @@ def test_native_failure_is_fixed_gated_and_retried_up_to_success(tmp_path):
     fixer = Fixer()
     gates = []
 
+    def strict_target_validator(*, repo, task, base_sha):
+        gates.append(
+            {
+                "repo": repo,
+                "task": task,
+                "base_sha": base_sha,
+            }
+        )
+        return {"status": "passed"}
+
     result = validate_native_with_repairs(
         workspace=workspace,
         task=_task(),
@@ -141,8 +151,7 @@ def test_native_failure_is_fixed_gated_and_retried_up_to_success(tmp_path):
         api_key="deepseek-secret",
         native_validator=validator,
         agent_runner=fixer,
-        target_validator=lambda **kwargs: gates.append(kwargs)
-        or {"status": "passed"},
+        target_validator=strict_target_validator,
     )
 
     assert result.status == "passed"
@@ -150,6 +159,7 @@ def test_native_failure_is_fixed_gated_and_retried_up_to_success(tmp_path):
     assert len(validator.calls) == 3
     assert len(fixer.calls) == 2
     assert len(gates) == 2
+    assert all(call["repo"] == workspace for call in gates)
     assert all(call["role"] == "fixer" for call in fixer.calls)
     assert "aarch64" in fixer.calls[0]["prompt"]
     assert "compile failed attempt 1" in fixer.calls[0]["prompt"]

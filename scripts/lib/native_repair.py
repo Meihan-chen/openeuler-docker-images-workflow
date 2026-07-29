@@ -161,7 +161,7 @@ def validate_native_with_repairs(
                     f"{repair_attempts}"
                 )
             gate = target_validator(
-                workspace=workspace,
+                repo=workspace,
                 task=task,
                 base_sha=base_sha,
             )
