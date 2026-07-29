@@ -1,5 +1,6 @@
 import subprocess
 import json
+import shutil
 import xml.etree.ElementTree as ET
 
 import pytest
@@ -204,6 +205,35 @@ def _write_valid_results(repo):
     )
 
 
+def _remove_testcase_owned_files(repo):
+    app = repo / "Database" / "kvrocks"
+    shutil.rmtree(app / "tests")
+    (
+        app
+        / "2.16.0"
+        / "24.03-lts-sp4"
+        / "test.sh"
+    ).unlink()
+
+
+def test_image_phase_accepts_candidate_before_testcase_creator(tmp_path):
+    from scripts.harness.gate_diff import validate_generated_target
+
+    repo, base_sha = _repo(tmp_path)
+    _write_valid_generated_candidate(repo)
+    _remove_testcase_owned_files(repo)
+
+    report = validate_generated_target(
+        repo=repo,
+        task=_task(),
+        base_sha=base_sha,
+        phase="image",
+    )
+
+    assert report["status"] == "passed"
+    assert report["phase"] == "image"
+
+
 def test_valid_generated_kvrocks_candidate_passes_contract(tmp_path):
     from scripts.harness.gate_diff import validate_generated_target
 
@@ -222,48 +252,83 @@ def test_valid_generated_kvrocks_candidate_passes_contract(tmp_path):
     assert report["modified_files"] == ["Database/image-list.yml"]
 
 
-def test_generated_contract_accepts_equivalent_shell_and_docker_syntax(tmp_path):
+@pytest.mark.parametrize(
+    "variant",
+    [
+        "unbraced_base_variable",
+        "alternative_builder_alias",
+        "named_runtime_user",
+        "git_clone_source",
+        "fixed_binary_variable",
+        "defaulted_binary_variable",
+        "braced_shared_directory",
+    ],
+)
+def test_generated_contract_accepts_historical_equivalent_syntax(
+    tmp_path,
+    variant,
+):
     from scripts.harness.gate_diff import validate_generated_target
 
     repo, base_sha = _repo(tmp_path)
     _write_valid_generated_candidate(repo)
     app = repo / "Database" / "kvrocks"
     dockerfile = app / "2.16.0" / "24.03-lts-sp4" / "Dockerfile"
-    dockerfile.write_text(
-        dockerfile.read_text()
-        .replace("FROM ${BASE}", "FROM $BASE")
-        .replace("AS builder", "AS build")
-        .replace("--from=builder", "--from=build")
-        .replace(
-            "FROM $BASE\nRUN groupadd",
-            "FROM openeuler/openeuler:24.03-lts-sp4\nRUN groupadd",
+    dockerfile_text = dockerfile.read_text()
+    if variant == "unbraced_base_variable":
+        dockerfile.write_text(
+            dockerfile_text.replace("FROM ${BASE}", "FROM $BASE")
         )
-        .replace("USER 999", "USER kvrocks")
-        .replace(
-            "RUN curl -fSL -o source.tar.gz "
-            "https://github.com/apache/kvrocks/archive/refs/tags/"
-            "v${VERSION}.tar.gz && mkdir -p /src/kvrocks && "
-            "tar -zxf source.tar.gz -C /src/kvrocks --strip-components=1 && "
-            "cd /src/kvrocks && ./x.py build -j 4",
-            "RUN git clone --depth 1 -b v${VERSION} "
-            "https://github.com/apache/kvrocks.git /src/kvrocks && "
-            "cd /src/kvrocks && ./x.py build -j 4",
+    elif variant == "alternative_builder_alias":
+        dockerfile.write_text(
+            dockerfile_text
+            .replace("AS builder", "AS build")
+            .replace("--from=builder", "--from=build")
         )
-    )
-    shared_test = app / "tests" / "test.sh"
-    shared_test.write_text(
-        shared_test.read_text().replace(
-            "kvrocks --version",
-            'BINARY="${BINARY:-kvrocks}"\n"${BINARY}" --version',
+    elif variant == "named_runtime_user":
+        dockerfile.write_text(
+            dockerfile_text.replace(
+                "FROM ${BASE}\nRUN groupadd",
+                "FROM openeuler/openeuler:24.03-lts-sp4\nRUN groupadd",
+            ).replace("USER 999", "USER kvrocks")
         )
-    )
-    entry_test = app / "2.16.0" / "24.03-lts-sp4" / "test.sh"
-    entry_test.write_text(
-        entry_test.read_text().replace(
-            '"$SHARED_DIR/test.sh"',
-            '"${SHARED_DIR}/test.sh"',
+    elif variant == "git_clone_source":
+        dockerfile.write_text(
+            dockerfile_text.replace(
+                "RUN curl -fSL -o source.tar.gz "
+                "https://github.com/apache/kvrocks/archive/refs/tags/"
+                "v${VERSION}.tar.gz && mkdir -p /src/kvrocks && "
+                "tar -zxf source.tar.gz -C /src/kvrocks --strip-components=1 && "
+                "cd /src/kvrocks && ./x.py build -j 4",
+                "RUN git clone --depth 1 -b v${VERSION} "
+                "https://github.com/apache/kvrocks.git /src/kvrocks && "
+                "cd /src/kvrocks && ./x.py build -j 4",
+            )
         )
-    )
+    elif variant in {
+        "fixed_binary_variable",
+        "defaulted_binary_variable",
+    }:
+        shared_test = app / "tests" / "test.sh"
+        assignment = (
+            'BINARY=kvrocks\n"$BINARY" --version'
+            if variant == "fixed_binary_variable"
+            else 'BINARY="${BINARY:-kvrocks}"\n"${BINARY}" --version'
+        )
+        shared_test.write_text(
+            shared_test.read_text().replace(
+                "kvrocks --version",
+                assignment,
+            )
+        )
+    elif variant == "braced_shared_directory":
+        entry_test = app / "2.16.0" / "24.03-lts-sp4" / "test.sh"
+        entry_test.write_text(
+            entry_test.read_text().replace(
+                '"$SHARED_DIR/test.sh"',
+                '"${SHARED_DIR}/test.sh"',
+            )
+        )
 
     report = validate_generated_target(
         repo=repo,

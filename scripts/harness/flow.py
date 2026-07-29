@@ -23,6 +23,7 @@ from scripts.lib.candidate_bundle import (
 )
 from scripts.lib.generation_pipeline import (
     GenerationPipelineError,
+    lint_dockerfile,
     run_generation_pipeline,
     write_smoke_candidate,
 )
@@ -266,6 +267,10 @@ def cmd_phase1_generate(args: argparse.Namespace) -> None:
         base_sha=args.base_sha,
         executable=args.opencode,
         api_key=api_key,
+        image_linter=lambda dockerfile: lint_dockerfile(
+            executable=args.hadolint,
+            dockerfile=dockerfile,
+        ),
     )
     _print_json(
         {
@@ -445,6 +450,7 @@ def _add_generation_commands(commands: argparse._SubParsersAction) -> None:
     generate.add_argument("--base-sha", required=True)
     generate.add_argument("--report-dir", required=True, type=Path)
     generate.add_argument("--opencode", required=True, type=Path)
+    generate.add_argument("--hadolint", required=True, type=Path)
     generate.set_defaults(handler=cmd_phase1_generate)
 
     smoke = commands.add_parser(

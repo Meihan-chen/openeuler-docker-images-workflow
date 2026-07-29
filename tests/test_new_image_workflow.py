@@ -261,6 +261,20 @@ def test_hadolint_only_ignores_unpinned_dnf_packages():
     assert WORKFLOW_PATH.read_text().count("--ignore DL3041") == 2
 
 
+def test_validate_only_lints_before_agent_qa_inside_generation():
+    prepare_steps = {
+        step["name"]: step
+        for step in _workflow()["jobs"]["prepare"]["steps"]
+    }
+
+    generate = prepare_steps["Generate and review candidate content"]
+    assert "--hadolint" in generate["run"]
+    assert "steps.tools.outputs.hadolint_path" in generate["run"]
+
+    standalone_lint = prepare_steps["Lint generated Dockerfile"]
+    assert standalone_lint["if"] == "${{ inputs.operation == 'pipeline_smoke' }}"
+
+
 def test_native_jobs_upload_reports_and_diagnostic_patch_after_failure():
     jobs = _workflow()["jobs"]
 

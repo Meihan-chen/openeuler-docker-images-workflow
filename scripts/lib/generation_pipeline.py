@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping
@@ -57,6 +58,41 @@ class GenerationResult:
 def _tag(task: TaskSpec) -> str:
     os_tag = task.os_version.replace(".", "").replace("-lts-sp", "sp")
     return f"{task.version}-oe{os_tag}"
+
+
+def lint_dockerfile(
+    *,
+    executable: Path,
+    dockerfile: Path,
+) -> dict[str, object]:
+    try:
+        completed = subprocess.run(
+            [
+                str(executable),
+                "--ignore",
+                "DL3041",
+                str(dockerfile),
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except OSError as error:
+        return {
+            "status": "failed",
+            "returncode": None,
+            "output": str(error),
+        }
+    output = "\n".join(
+        part.strip()
+        for part in (completed.stdout, completed.stderr)
+        if part.strip()
+    )
+    return {
+        "status": "passed" if completed.returncode == 0 else "failed",
+        "returncode": completed.returncode,
+        "output": output,
+    }
 
 
 def _require_phase1_task(task: TaskSpec) -> None:
@@ -145,6 +181,12 @@ def build_role_prompt(
                 f"- Shared tests: `{app_root}/tests/`",
                 f"- Shared test entrypoint: `{app_root}/tests/test.sh`",
             )
+        )
+    if role in {"testcase_creator", "testcase_qa"}:
+        contract_lines.append(
+            "- Only the Dockerfile-level test entrypoint and shared test "
+            "paths above are writable; image-list, Dockerfile, metadata, "
+            "documentation and logo are read-only."
         )
     contract_lines.extend(_application_contract(task, role))
     contract_lines.append(
@@ -322,8 +364,14 @@ def _default_validator(
     workspace: Path,
     task: TaskSpec,
     base_sha: str,
+    phase: str,
 ) -> dict[str, object]:
-    return validate_generated_target(repo=workspace, task=task, base_sha=base_sha)
+    return validate_generated_target(
+        repo=workspace,
+        task=task,
+        base_sha=base_sha,
+        phase=phase,
+    )
 
 
 def _target_gate_report(
@@ -332,14 +380,16 @@ def _target_gate_report(
     workspace: Path,
     task: TaskSpec,
     base_sha: str,
+    phase: str,
 ) -> Mapping[str, object]:
     try:
         return target_validator(
             workspace=workspace,
             task=task,
             base_sha=base_sha,
+            phase=phase,
         )
-    except TargetContractError as error:
+    except (TargetContractError, OSError, UnicodeError) as error:
         return {
             "status": "failed",
             "errors": str(error).splitlines(),
@@ -396,7 +446,33 @@ def _review_pair(
     task: TaskSpec,
     base_sha: str,
     api_key: str,
+    post_repair_check: Callable[[], None] | None = None,
 ) -> int:
+    def qa_prompt(
+        previous_review: Mapping[str, object] | None = None,
+    ) -> str:
+        try:
+            return _qa_prompt(
+                role=qa_role,
+                workspace=workspace,
+                task=task,
+                base_sha=base_sha,
+                previous_review=previous_review,
+            )
+        except GenerationPipelineError as error:
+            _write_report(
+                report_dir,
+                "generation-failure.json",
+                {
+                    "status": "failed",
+                    "stage": "qa_snapshot",
+                    "role": qa_role,
+                    "error": str(error),
+                },
+                api_key,
+            )
+            raise
+
     log("review", f"START {qa_role} round=1")
     review = _run(
         agent_runner=agent_runner,
@@ -405,12 +481,7 @@ def _review_pair(
         api_key=api_key,
         role=qa_role,
         report_dir=report_dir,
-        prompt=_qa_prompt(
-            role=qa_role,
-            workspace=workspace,
-            task=task,
-            base_sha=base_sha,
-        ),
+        prompt=qa_prompt(),
     )
     _write_report(report_dir, f"{qa_role.replace('_', '-')}-round1.json", review.payload, api_key)
     _log_review_result(
@@ -451,6 +522,9 @@ def _review_pair(
         raise GenerationPipelineError(f"{creator_role} repair failed")
     log("repair", f"PASS {creator_role} round=2")
 
+    if post_repair_check is not None:
+        post_repair_check()
+
     log("review", f"START {qa_role} round=2")
     second = _run(
         agent_runner=agent_runner,
@@ -459,13 +533,7 @@ def _review_pair(
         api_key=api_key,
         role=qa_role,
         report_dir=report_dir,
-        prompt=_qa_prompt(
-            role=qa_role,
-            workspace=workspace,
-            task=task,
-            base_sha=base_sha,
-            previous_review=review.payload,
-        ),
+        prompt=qa_prompt(review.payload),
     )
     _write_report(
         report_dir,
@@ -502,6 +570,9 @@ def run_generation_pipeline(
     api_key: str,
     agent_runner: Callable[..., AgentResult] = run_agent,
     target_validator: Callable[..., Mapping[str, object]] = _default_validator,
+    image_linter: (
+        Callable[[Path], Mapping[str, object]] | None
+    ) = None,
 ) -> GenerationResult:
     workspace = Path(workspace).resolve()
     report_dir = Path(report_dir).resolve()
@@ -513,6 +584,67 @@ def run_generation_pipeline(
     if report_dir.exists() and any(report_dir.iterdir()):
         raise GenerationPipelineError("Agent evidence directory must be empty")
     report_dir.mkdir(parents=True, exist_ok=True)
+    dockerfile = (
+        workspace
+        / task.domain
+        / task.app
+        / task.version
+        / task.os_version
+        / "Dockerfile"
+    )
+    app_root = workspace / task.domain / task.app
+    testcase_owned = {
+        app_root / task.version / task.os_version / "test.sh",
+        app_root / "tests" / "goss.yaml",
+        app_root / "tests" / "goss_wait.yaml",
+        app_root / "tests" / "test_helpers.sh",
+        app_root / "tests" / "test.sh",
+    }
+
+    def enforce_gate(
+        *,
+        phase: str,
+        report_name: str,
+        stage: str,
+        failure_message: str,
+    ) -> Mapping[str, object]:
+        log("gate", f"START {stage}")
+        report = _target_gate_report(
+            target_validator=target_validator,
+            workspace=workspace,
+            task=task,
+            base_sha=base_sha,
+            phase=phase,
+        )
+        _write_report(report_dir, report_name, report, api_key)
+        if report.get("status") != "passed":
+            raise GenerationPipelineError(failure_message)
+        log("gate", f"PASS {stage}")
+        return report
+
+    def lint_image(*, report_name: str, stage: str) -> None:
+        if image_linter is None:
+            return
+        log("lint", f"START {stage}")
+        report = image_linter(dockerfile)
+        _write_report(report_dir, report_name, report, api_key)
+        if report.get("status") != "passed":
+            raise GenerationPipelineError(f"{stage} did not pass")
+        log("lint", f"PASS {stage}")
+
+    def image_owned_snapshot() -> dict[str, str]:
+        image_list = workspace / task.domain / "image-list.yml"
+        candidates = [image_list] if image_list.is_file() else []
+        if app_root.is_dir():
+            candidates.extend(path for path in app_root.rglob("*") if path.is_file())
+        return {
+            str(path.relative_to(workspace)): (
+                f"{path.stat().st_mode & 0o777:o}:"
+                f"{hashlib.sha256(path.read_bytes()).hexdigest()}"
+            )
+            for path in candidates
+            if path not in testcase_owned
+        }
 
     log("generate", "START image_creator")
     creator = _run(
@@ -533,6 +665,31 @@ def run_generation_pipeline(
         raise GenerationPipelineError("image_creator did not complete successfully")
     log("generate", "PASS image_creator")
 
+    enforce_gate(
+        phase="image",
+        report_name="image-precheck-gates.json",
+        stage="image_precheck",
+        failure_message="deterministic image precheck did not pass",
+    )
+    lint_image(
+        report_name="image-lint.json",
+        stage="image_lint",
+    )
+
+    def recheck_image_repair() -> None:
+        enforce_gate(
+            phase="image",
+            report_name="image-repair-gates.json",
+            stage="image_repair_precheck",
+            failure_message=(
+                "deterministic image repair precheck did not pass"
+            ),
+        )
+        lint_image(
+            report_name="image-repair-lint.json",
+            stage="image_repair_lint",
+        )
+
     fix_rounds = _review_pair(
         creator_role="image_creator",
         qa_role="image_qa",
@@ -543,7 +700,30 @@ def run_generation_pipeline(
         task=task,
         base_sha=base_sha,
         api_key=api_key,
+        post_repair_check=recheck_image_repair,
     )
+    frozen_image = image_owned_snapshot()
+
+    def enforce_testcase_ownership(
+        *,
+        report_name: str,
+        role: str,
+    ) -> None:
+        current = image_owned_snapshot()
+        changed = sorted(
+            relative
+            for relative in set(frozen_image) | set(current)
+            if frozen_image.get(relative) != current.get(relative)
+        )
+        report: dict[str, object] = {
+            "status": "failed" if changed else "passed",
+            "changed_files": changed,
+        }
+        _write_report(report_dir, report_name, report, api_key)
+        if changed:
+            raise GenerationPipelineError(
+                f"{role} changed image-owned content"
+            )
 
     log("generate", "START testcase_creator")
     testcase = _run(
@@ -563,25 +743,31 @@ def run_generation_pipeline(
     if testcase.payload.get("success") is not True:
         raise GenerationPipelineError("testcase_creator did not complete successfully")
     log("generate", "PASS testcase_creator")
+    enforce_testcase_ownership(
+        report_name="testcase-ownership.json",
+        role="testcase_creator",
+    )
 
-    log("gate", "START generated_precheck")
-    precheck_report = _target_gate_report(
-        target_validator=target_validator,
-        workspace=workspace,
-        task=task,
-        base_sha=base_sha,
+    enforce_gate(
+        phase="full",
+        report_name="precheck-gates.json",
+        stage="generated_precheck",
+        failure_message="deterministic target precheck did not pass",
     )
-    _write_report(
-        report_dir,
-        "precheck-gates.json",
-        precheck_report,
-        api_key,
-    )
-    if precheck_report.get("status") != "passed":
-        raise GenerationPipelineError(
-            "deterministic target precheck did not pass"
+
+    def recheck_testcase_repair() -> None:
+        enforce_testcase_ownership(
+            report_name="testcase-repair-ownership.json",
+            role="testcase_creator repair",
         )
-    log("gate", "PASS generated_precheck")
+        enforce_gate(
+            phase="full",
+            report_name="testcase-repair-gates.json",
+            stage="testcase_repair_precheck",
+            failure_message=(
+                "deterministic testcase repair precheck did not pass"
+            ),
+        )
 
     fix_rounds += _review_pair(
         creator_role="testcase_creator",
@@ -593,19 +779,15 @@ def run_generation_pipeline(
         task=task,
         base_sha=base_sha,
         api_key=api_key,
+        post_repair_check=recheck_testcase_repair,
     )
 
-    log("gate", "START target_contract")
-    gate_report = _target_gate_report(
-        target_validator=target_validator,
-        workspace=workspace,
-        task=task,
-        base_sha=base_sha,
+    gate_report = enforce_gate(
+        phase="full",
+        report_name="gates.json",
+        stage="target_contract",
+        failure_message="deterministic target contract did not pass",
     )
-    _write_report(report_dir, "gates.json", gate_report, api_key)
-    if gate_report.get("status") != "passed":
-        raise GenerationPipelineError("deterministic target contract did not pass")
-    log("gate", "PASS target_contract")
     return GenerationResult(
         status="passed",
         qa_fix_rounds=fix_rounds,

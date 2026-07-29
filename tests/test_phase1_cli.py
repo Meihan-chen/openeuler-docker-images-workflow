@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -371,6 +372,8 @@ def test_shared_agent_cli_reports_contract_errors_without_traceback(tmp_path):
             str(tmp_path / "reports"),
             "--opencode",
             str(tmp_path / "opencode"),
+            "--hadolint",
+            str(tmp_path / "hadolint"),
         ],
         cwd=ROOT,
         env=env,
@@ -381,3 +384,50 @@ def test_shared_agent_cli_reports_contract_errors_without_traceback(tmp_path):
     assert result.returncode == 2
     assert "DEEPSEEK_API_KEY is required" in result.stderr
     assert "Traceback" not in result.stderr
+
+
+def test_phase1_generate_wires_hadolint_into_pipeline(
+    tmp_path,
+    monkeypatch,
+):
+    from scripts.harness import flow
+
+    calls = {}
+    task = object()
+    dockerfile = tmp_path / "Dockerfile"
+    hadolint = tmp_path / "hadolint"
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "secret")
+    monkeypatch.setattr(flow, "_load_task", lambda _: task)
+
+    def fake_lint_dockerfile(**kwargs):
+        calls["lint"] = kwargs
+        return {"status": "passed"}
+
+    def fake_pipeline(**kwargs):
+        calls["pipeline"] = kwargs
+        kwargs["image_linter"](dockerfile)
+        return SimpleNamespace(
+            status="passed",
+            qa_fix_rounds=0,
+            gate_report={"status": "passed"},
+        )
+
+    monkeypatch.setattr(flow, "lint_dockerfile", fake_lint_dockerfile)
+    monkeypatch.setattr(flow, "run_generation_pipeline", fake_pipeline)
+
+    flow.cmd_phase1_generate(
+        SimpleNamespace(
+            workspace=tmp_path / "target",
+            report_dir=tmp_path / "reports",
+            task_spec=tmp_path / "task.json",
+            base_sha="1" * 40,
+            opencode=tmp_path / "opencode",
+            hadolint=hadolint,
+        )
+    )
+
+    assert calls["pipeline"]["task"] is task
+    assert calls["lint"] == {
+        "executable": hadolint,
+        "dockerfile": dockerfile,
+    }

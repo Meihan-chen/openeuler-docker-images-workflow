@@ -169,15 +169,23 @@ def _changed_files(repo: Path, base_sha: str) -> list[tuple[str, str]]:
     return changes
 
 
-def _required_paths(task: TaskSpec) -> tuple[str, list[str]]:
+def _required_paths(
+    task: TaskSpec,
+    *,
+    phase: str,
+) -> tuple[str, list[str]]:
     app_root = f"{task.domain}/{task.app}"
     image_root = f"{app_root}/{task.version}/{task.os_version}"
-    return app_root, [
+    image_paths = [
         f"{app_root}/README.md",
         f"{app_root}/meta.yml",
         f"{app_root}/doc/image-info.yml",
         f"{app_root}/doc/picture/logo.png",
         f"{image_root}/Dockerfile",
+    ]
+    if phase == "image":
+        return app_root, image_paths
+    return app_root, image_paths + [
         f"{image_root}/test.sh",
         f"{app_root}/tests/goss.yaml",
         f"{app_root}/tests/goss_wait.yaml",
@@ -422,14 +430,17 @@ def validate_generated_target(
     repo: Path,
     task: TaskSpec,
     base_sha: str,
+    phase: str = "full",
 ) -> dict[str, object]:
     repo = Path(repo)
+    if phase not in {"image", "full"}:
+        raise TargetContractError("generated target phase must be image or full")
     if not _SHA_RE.fullmatch(base_sha):
         raise TargetContractError("base_sha must be a full lowercase Git SHA")
     if not (repo / ".git").is_dir():
         raise TargetContractError("target repository is not a Git workspace")
 
-    app_root, required = _required_paths(task)
+    app_root, required = _required_paths(task, phase=phase)
     if _git(
         repo,
         "cat-file",
@@ -472,8 +483,9 @@ def validate_generated_target(
     if not any(error.startswith("required generated file") for error in errors):
         _validate_meta(repo, task, app_root, errors)
         _validate_dockerfile(repo, task, app_root, errors)
-        _validate_tests(repo, task, app_root, errors)
         _validate_docs(repo, task, app_root, errors)
+        if phase == "full":
+            _validate_tests(repo, task, app_root, errors)
 
     if errors:
         raise TargetContractError("\n".join(errors))
@@ -481,6 +493,7 @@ def validate_generated_target(
         "status": "passed",
         "task_id": task.task_id,
         "base_sha": base_sha,
+        "phase": phase,
         "added_files": len(added_files),
         "modified_files": modified_files,
         "details": json.dumps(
