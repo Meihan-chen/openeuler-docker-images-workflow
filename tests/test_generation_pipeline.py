@@ -1097,6 +1097,8 @@ def test_phase1_prompts_pin_kvrocks_paths_and_forbid_scope_escape():
     assert "/dev/tcp" in prompt
     assert "restart persistence" in prompt
     assert "LICENSE and NOTICE" in prompt
+    assert "base image may already contain UID/GID 999" in prompt
+    assert "--non-unique" in prompt
     assert "Do not install or upgrade host tools or packages" in prompt
     assert "Do not run Docker builds or invoke linters" in prompt
     assert "Your final response MUST be exactly one JSON object" in prompt
@@ -1116,3 +1118,19 @@ def test_phase1_prompts_pin_kvrocks_paths_and_forbid_scope_escape():
     assert "redis-cli -p 6666 PING" in testcase_prompt
     assert "image-list, Dockerfile, metadata" in testcase_prompt
     assert "read-only" in testcase_prompt
+
+
+def test_fixer_prompt_whitelists_generated_candidate_files():
+    from scripts.lib.generation_pipeline import build_role_prompt
+
+    prompt = build_role_prompt(
+        role="fixer",
+        task=_task(),
+        base_sha="1" * 40,
+    )
+
+    assert "Fixer whitelist (only these files may be modified)" in prompt
+    assert "Database/image-list.yml" in prompt
+    assert "Database/kvrocks/2.16.0/24.03-lts-sp4/Dockerfile" in prompt
+    assert "Database/kvrocks/2.16.0/24.03-lts-sp4/test.sh" in prompt
+    assert "Database/kvrocks/tests/goss.yaml" in prompt

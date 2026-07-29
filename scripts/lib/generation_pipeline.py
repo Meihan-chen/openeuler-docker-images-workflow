@@ -117,6 +117,9 @@ def _application_contract(task: TaskSpec, role: str) -> tuple[str, ...]:
         "- Kvrocks runtime contract: UID/GID 999, TCP 6666, writable "
         "`/var/lib/kvrocks`, Redis-protocol PING, restart persistence, "
         "configuration, LICENSE and NOTICE.",
+        "- The locked openEuler base image may already contain UID/GID 999; "
+        "use `groupadd --non-unique` and `useradd --non-unique` so the "
+        "Kvrocks runtime identity remains exactly 999:999.",
         "- The runtime image must install the openEuler `redis` package, "
         "start Kvrocks with `ENTRYPOINT`, and run "
         "`redis-cli -p 6666 PING` in `HEALTHCHECK`; `/dev/tcp` probes or "
@@ -187,6 +190,26 @@ def build_role_prompt(
             "- Only the Dockerfile-level test entrypoint and shared test "
             "paths above are writable; image-list, Dockerfile, metadata, "
             "documentation and logo are read-only."
+        )
+    if role == "fixer":
+        fixer_whitelist = (
+            f"{task.domain}/image-list.yml",
+            f"{app_root}/meta.yml",
+            f"{app_root}/README.md",
+            f"{app_root}/doc/image-info.yml",
+            f"{app_root}/doc/picture/logo.png",
+            f"{image_root}/Dockerfile",
+            f"{image_root}/test.sh",
+            f"{app_root}/tests/goss.yaml",
+            f"{app_root}/tests/goss_wait.yaml",
+            f"{app_root}/tests/test_helpers.sh",
+            f"{app_root}/tests/test.sh",
+        )
+        contract_lines.extend(
+            (
+                "## Fixer whitelist (only these files may be modified)",
+                *(f"- `{path}`" for path in fixer_whitelist),
+            )
         )
     contract_lines.extend(_application_contract(task, role))
     contract_lines.extend(
@@ -972,8 +995,8 @@ def write_smoke_candidate(
         "https://github.com/apache/kvrocks.git . && ./x.py build -j 4\n"
         "FROM ${BASE}\n"
         "RUN dnf install -y redis && dnf clean all\n"
-        "RUN groupadd --gid 999 kvrocks && "
-        "useradd --uid 999 --gid kvrocks kvrocks && "
+        "RUN groupadd --non-unique --gid 999 kvrocks && "
+        "useradd --non-unique --uid 999 --gid kvrocks kvrocks && "
         "mkdir -p /var/lib/kvrocks && "
         "chown -R 999:999 /var/lib/kvrocks\n"
         "COPY --from=builder /src/kvrocks/build/kvrocks "
