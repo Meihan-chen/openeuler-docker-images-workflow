@@ -208,6 +208,9 @@ def run_agent(
         "--format",
         "json",
         "--auto",
+        "--dir",
+        str(workspace),
+        "--",
         prompt,
     ]
     env = {
@@ -219,7 +222,7 @@ def run_agent(
     log(
         f"agent:{role}",
         f"START model={MODEL} timeout={float(timeout):g}s "
-        f"prompt_chars={len(prompt)}",
+        f"prompt_chars={len(prompt)} workspace={workspace}",
     )
     result = runner(command, workspace, env, timeout)
     elapsed = time.monotonic() - started

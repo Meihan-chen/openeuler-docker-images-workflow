@@ -169,6 +169,12 @@ def test_write_agent_uses_pinned_model_and_scoped_permissions(tmp_path):
         "json",
         "--auto",
     ]
+    assert call["command"][-4:] == [
+        "--dir",
+        str(workspace),
+        "--",
+        "Create the task-scoped image files.",
+    ]
     assert call["command"][-1] == "Create the task-scoped image files."
     assert call["cwd"] == workspace
     assert call["env"]["DEEPSEEK_API_KEY"] == "deepseek-secret"

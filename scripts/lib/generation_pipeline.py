@@ -107,6 +107,9 @@ def build_role_prompt(
                 "```json",
                 json.dumps(review, ensure_ascii=False, indent=2, sort_keys=True),
                 "```",
+                "Your final response MUST be exactly one JSON object containing "
+                "the documented `success` and `files_created` keys. Do not end "
+                "with prose, Markdown, a table, or commentary.",
             )
         )
     return "\n\n".join(parts) + "\n"
