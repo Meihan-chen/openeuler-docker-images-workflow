@@ -41,12 +41,13 @@ def test_phase1_orchestration_imports_existing_public_facades():
     assert "from scripts.utils.gitcode import" in issue_lifecycle
 
 
-def test_agent_execution_is_only_exposed_through_shared_harness():
+def test_agent_execution_is_exposed_through_flow_orchestrator():
     workflow = (
         ROOT / ".github" / "workflows" / "new-image.yml"
     ).read_text()
 
-    assert "scripts/harness/run.py" in workflow
+    assert "scripts/harness/flow.py" in workflow
+    assert "scripts/harness/run.py" not in workflow
     assert "agent-generate" not in workflow
     assert "native-validate-repair" not in workflow
 

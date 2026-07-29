@@ -23,14 +23,15 @@ def _job_text(job):
     return yaml.safe_dump(job, sort_keys=True)
 
 
-def test_phase1_is_manual_only_with_three_explicit_operations():
+def test_phase1_is_manual_only_with_explicit_operations():
     trigger = _trigger(_workflow())
 
     assert set(trigger) == {"workflow_dispatch"}
     operation = trigger["workflow_dispatch"]["inputs"]["operation"]
     assert operation["type"] == "choice"
-    assert operation["default"] == "validate_only"
+    assert operation["default"] == "pipeline_smoke"
     assert operation["options"] == [
+        "pipeline_smoke",
         "validate_only",
         "fork_pr",
         "failure_issue_contract_test",
@@ -87,8 +88,10 @@ def test_candidate_patch_converges_x86_then_arm_then_final_x86():
     assert jobs["validate_arm"]["needs"] == "validate_x86"
     assert jobs["revalidate_x86"]["needs"] == "validate_arm"
     assert jobs["package_candidate"]["needs"] == "revalidate_x86"
-    assert "scripts/harness/run.py" in _job_text(jobs["validate_x86"])
-    assert "scripts/harness/run.py" in _job_text(jobs["validate_arm"])
+    assert "scripts/harness/flow.py" in _job_text(jobs["validate_x86"])
+    assert "scripts/harness/flow.py" in _job_text(jobs["validate_arm"])
+    assert "scripts/harness/flow.py" in _job_text(jobs["revalidate_x86"])
+    assert "scripts/harness/run.py" not in WORKFLOW_PATH.read_text()
     assert "phase1-native-repair" in _job_text(jobs["validate_x86"])
     assert "phase1-native-repair" in _job_text(jobs["validate_arm"])
     assert "phase1-native-validate" in _job_text(jobs["revalidate_x86"])
@@ -167,6 +170,60 @@ def test_actionlint_knows_the_confirmed_custom_runner_labels():
         "oe-image-x86",
         "oe-image-arm64",
     ]
+
+
+def test_jobs_and_run_have_readable_display_names():
+    data = _workflow()
+
+    assert "inputs.operation" in data["run-name"]
+    assert "inputs.app" in data["run-name"]
+    expected = {
+        "prepare": "Generate candidate on x86_64",
+        "validate_x86": "Build, test, and repair on x86_64",
+        "validate_arm": "Build, test, and repair on aarch64",
+        "revalidate_x86": "Revalidate final candidate on x86_64",
+        "package_candidate": "Verify and seal validated candidate",
+        "deliver_fork_pr": "Promote validated candidate to fork PR",
+        "issue_contract_test": "Exercise failure Issue lifecycle",
+    }
+    assert {
+        job_id: job["name"]
+        for job_id, job in data["jobs"].items()
+    } == expected
+
+
+def test_pipeline_smoke_reuses_candidate_chain_without_ai_or_gitcode_steps():
+    jobs = _workflow()["jobs"]
+    for job_name in (
+        "prepare",
+        "validate_x86",
+        "validate_arm",
+        "revalidate_x86",
+        "package_candidate",
+    ):
+        assert "pipeline_smoke" in jobs[job_name]["if"]
+
+    prepare_steps = {
+        step["name"]: step for step in jobs["prepare"]["steps"]
+    }
+    smoke_generate = prepare_steps["Create deterministic smoke candidate"]
+    assert "pipeline_smoke" in smoke_generate["if"]
+    assert "phase1-smoke-generate" in smoke_generate["run"]
+    assert "DEEPSEEK_API_KEY" not in _job_text(smoke_generate)
+
+    for job_name in ("validate_x86", "validate_arm", "revalidate_x86"):
+        smoke_steps = [
+            step
+            for step in jobs[job_name]["steps"]
+            if step["name"].startswith("Run native pipeline smoke")
+        ]
+        assert len(smoke_steps) == 1
+        assert "phase1-native-smoke" in smoke_steps[0]["run"]
+        assert "DEEPSEEK_API_KEY" not in _job_text(smoke_steps[0])
+
+    package_text = _job_text(jobs["package_candidate"])
+    assert "phase1-smoke-candidate-" in package_text
+    assert "not promotable" in package_text
 
 
 def test_summary_markdown_does_not_trigger_single_quote_shellcheck_warning():

@@ -8,6 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 CLI = ROOT / "scripts" / "harness" / "phase1.py"
 AGENT_CLI = ROOT / "scripts" / "harness" / "run.py"
+FLOW_CLI = ROOT / "scripts" / "harness" / "flow.py"
 GATE_CLI = ROOT / "scripts" / "harness" / "gate_diff.py"
 ARTIFACT_CLI = ROOT / "scripts" / "utils" / "artifacts.py"
 BASE_SHA = "1d49c0858d8d8152acb1bd3caf5cd862b091160f"
@@ -327,6 +328,21 @@ def test_pipeline_stage_commands_are_exposed():
     ):
         result = _run_script(script, command, "--help")
         assert result.returncode == 0, f"{command}: {result.stderr}"
+
+
+def test_flow_is_the_public_entry_for_agent_and_native_stages():
+    for command in (
+        "phase1-generate",
+        "phase1-smoke-generate",
+        "phase1-native-smoke",
+        "phase1-native-repair",
+        "phase1-native-validate",
+    ):
+        result = _run_script(FLOW_CLI, command, "--help")
+        assert result.returncode == 0, f"{command}: {result.stderr}"
+        assert "--task-spec" in result.stdout
+        if command == "phase1-smoke-generate":
+            assert "--opencode" not in result.stdout
 
 
 def test_fork_delivery_reads_token_only_from_environment():

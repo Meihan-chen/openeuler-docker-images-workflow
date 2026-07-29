@@ -1,4 +1,7 @@
 name: Phase 1 - New Image E2E
+run-name: >-
+  ${{ inputs.operation }} / ${{ inputs.app }} ${{ inputs.version }} /
+  ${{ inputs.os_version }}
 
 on:
   workflow_dispatch:
@@ -7,8 +10,9 @@ on:
         description: "Explicit phase-one operation"
         required: true
         type: choice
-        default: validate_only
+        default: pipeline_smoke
         options:
+          - pipeline_smoke
           - validate_only
           - fork_pr
           - failure_issue_contract_test
@@ -56,7 +60,10 @@ env:
 
 jobs:
   prepare:
-    if: ${{ inputs.operation == 'validate_only' }}
+    name: Generate candidate on x86_64
+    if: >-
+      ${{ inputs.operation == 'pipeline_smoke' ||
+          inputs.operation == 'validate_only' }}
     runs-on: [self-hosted, Linux, X64, oe-image-x86]
     timeout-minutes: 120
     outputs:
@@ -124,11 +131,12 @@ jobs:
             > "${RUNNER_TEMP}/phase1-prepare/base-sha.txt"
           printf 'sha=%s\n' "${base_sha}" >> "${GITHUB_OUTPUT}"
 
-      - name: Generate and adversarially review target content
+      - name: Generate and review candidate content
+        if: ${{ inputs.operation == 'validate_only' }}
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
         run: |
-          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/run.py \
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
             phase1-generate \
             --workspace "${RUNNER_TEMP}/phase1-target" \
             --task-spec "${RUNNER_TEMP}/phase1-prepare/task-spec.json" \
@@ -136,6 +144,17 @@ jobs:
             --report-dir \
               "${RUNNER_TEMP}/phase1-prepare/generation-reports" \
             --opencode "${{ steps.tools.outputs.opencode_path }}"
+
+      - name: Create deterministic smoke candidate
+        if: ${{ inputs.operation == 'pipeline_smoke' }}
+        run: |
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
+            phase1-smoke-generate \
+            --workspace "${RUNNER_TEMP}/phase1-target" \
+            --task-spec "${RUNNER_TEMP}/phase1-prepare/task-spec.json" \
+            --base-sha "${{ steps.base.outputs.sha }}" \
+            --report-dir \
+              "${RUNNER_TEMP}/phase1-prepare/generation-reports"
 
       - name: Lint generated Dockerfile
         env:
@@ -165,7 +184,10 @@ jobs:
           retention-days: 30
 
   validate_x86:
-    if: ${{ inputs.operation == 'validate_only' }}
+    name: Build, test, and repair on x86_64
+    if: >-
+      ${{ inputs.operation == 'pipeline_smoke' ||
+          inputs.operation == 'validate_only' }}
     needs: prepare
     runs-on: [self-hosted, Linux, X64, oe-image-x86]
     timeout-minutes: 180
@@ -220,14 +242,15 @@ jobs:
             --base-sha "${base_sha}" \
             --patch "${RUNNER_TEMP}/phase1-input/changes.patch"
 
-      - name: Validate x86 and repair at most three times
+      - name: Build, test, and repair on x86_64 (max 3)
+        if: ${{ inputs.operation == 'validate_only' }}
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
         run: |
           base_sha="$(tr -d '\n' \
             < "${RUNNER_TEMP}/phase1-input/base-sha.txt")"
           mkdir -p "${RUNNER_TEMP}/phase1-x86"
-          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/run.py \
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
             phase1-native-repair \
             --workspace "${RUNNER_TEMP}/phase1-target" \
             --task-spec "${RUNNER_TEMP}/phase1-input/task-spec.json" \
@@ -241,6 +264,23 @@ jobs:
             --repair-report-dir \
               "${RUNNER_TEMP}/phase1-x86/x86-repair-agents" \
             --opencode "${{ steps.tools.outputs.opencode_path }}"
+
+      - name: Run native pipeline smoke on x86_64
+        if: ${{ inputs.operation == 'pipeline_smoke' }}
+        run: |
+          mkdir -p "${RUNNER_TEMP}/phase1-x86"
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
+            phase1-native-smoke \
+            --workspace "${RUNNER_TEMP}/phase1-target" \
+            --task-spec "${RUNNER_TEMP}/phase1-input/task-spec.json" \
+            --architecture x86_64 \
+            --run-id "${{ github.run_id }}" \
+            --dgoss "${{ steps.tools.outputs.dgoss_path }}" \
+            --goss "${{ steps.tools.outputs.goss_path }}" \
+            --report "${RUNNER_TEMP}/phase1-x86/x86_64.json" \
+            --junit "${RUNNER_TEMP}/phase1-x86/x86_64.junit.xml" \
+            --repair-report-dir \
+              "${RUNNER_TEMP}/phase1-x86/x86-repair-agents"
 
       - name: Create x86-converged patch
         run: |
@@ -267,7 +307,10 @@ jobs:
           retention-days: 30
 
   validate_arm:
-    if: ${{ inputs.operation == 'validate_only' }}
+    name: Build, test, and repair on aarch64
+    if: >-
+      ${{ inputs.operation == 'pipeline_smoke' ||
+          inputs.operation == 'validate_only' }}
     needs: validate_x86
     runs-on: [self-hosted, Linux, ARM64, oe-image-arm64]
     timeout-minutes: 180
@@ -322,14 +365,15 @@ jobs:
             --base-sha "${base_sha}" \
             --patch "${RUNNER_TEMP}/phase1-input/changes.patch"
 
-      - name: Validate ARM and repair at most three times
+      - name: Build, test, and repair on aarch64 (max 3)
+        if: ${{ inputs.operation == 'validate_only' }}
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
         run: |
           base_sha="$(tr -d '\n' \
             < "${RUNNER_TEMP}/phase1-input/base-sha.txt")"
           mkdir -p "${RUNNER_TEMP}/phase1-arm"
-          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/run.py \
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
             phase1-native-repair \
             --workspace "${RUNNER_TEMP}/phase1-target" \
             --task-spec "${RUNNER_TEMP}/phase1-input/task-spec.json" \
@@ -343,6 +387,23 @@ jobs:
             --repair-report-dir \
               "${RUNNER_TEMP}/phase1-arm/arm-repair-agents" \
             --opencode "${{ steps.tools.outputs.opencode_path }}"
+
+      - name: Run native pipeline smoke on aarch64
+        if: ${{ inputs.operation == 'pipeline_smoke' }}
+        run: |
+          mkdir -p "${RUNNER_TEMP}/phase1-arm"
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
+            phase1-native-smoke \
+            --workspace "${RUNNER_TEMP}/phase1-target" \
+            --task-spec "${RUNNER_TEMP}/phase1-input/task-spec.json" \
+            --architecture aarch64 \
+            --run-id "${{ github.run_id }}" \
+            --dgoss "${{ steps.tools.outputs.dgoss_path }}" \
+            --goss "${{ steps.tools.outputs.goss_path }}" \
+            --report "${RUNNER_TEMP}/phase1-arm/aarch64.json" \
+            --junit "${RUNNER_TEMP}/phase1-arm/aarch64.junit.xml" \
+            --repair-report-dir \
+              "${RUNNER_TEMP}/phase1-arm/arm-repair-agents"
 
       - name: Create ARM-converged final patch
         run: |
@@ -369,7 +430,10 @@ jobs:
           retention-days: 30
 
   revalidate_x86:
-    if: ${{ inputs.operation == 'validate_only' }}
+    name: Revalidate final candidate on x86_64
+    if: >-
+      ${{ inputs.operation == 'pipeline_smoke' ||
+          inputs.operation == 'validate_only' }}
     needs: validate_arm
     runs-on: [self-hosted, Linux, X64, oe-image-x86]
     timeout-minutes: 180
@@ -425,9 +489,10 @@ jobs:
             --patch "${RUNNER_TEMP}/phase1-input/changes.patch"
 
       - name: Revalidate final patch natively on x86
+        if: ${{ inputs.operation == 'validate_only' }}
         run: |
           mkdir -p "${RUNNER_TEMP}/phase1-final-x86"
-          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/run.py \
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
             phase1-native-validate \
             --workspace "${RUNNER_TEMP}/phase1-target" \
             --task-spec "${RUNNER_TEMP}/phase1-input/task-spec.json" \
@@ -439,6 +504,24 @@ jobs:
             --junit \
               "${RUNNER_TEMP}/phase1-final-x86/x86_64.junit.xml"
 
+      - name: Run native pipeline smoke on final x86_64 candidate
+        if: ${{ inputs.operation == 'pipeline_smoke' }}
+        run: |
+          mkdir -p "${RUNNER_TEMP}/phase1-final-x86"
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
+            phase1-native-smoke \
+            --workspace "${RUNNER_TEMP}/phase1-target" \
+            --task-spec "${RUNNER_TEMP}/phase1-input/task-spec.json" \
+            --architecture x86_64 \
+            --run-id "${{ github.run_id }}" \
+            --dgoss "${{ steps.tools.outputs.dgoss_path }}" \
+            --goss "${{ steps.tools.outputs.goss_path }}" \
+            --report "${RUNNER_TEMP}/phase1-final-x86/x86_64.json" \
+            --junit \
+              "${RUNNER_TEMP}/phase1-final-x86/x86_64.junit.xml" \
+            --repair-report-dir \
+              "${RUNNER_TEMP}/phase1-final-x86/smoke-agents"
+
       - name: Upload final x86 evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -449,7 +532,10 @@ jobs:
           retention-days: 30
 
   package_candidate:
-    if: ${{ inputs.operation == 'validate_only' }}
+    name: Verify and seal validated candidate
+    if: >-
+      ${{ inputs.operation == 'pipeline_smoke' ||
+          inputs.operation == 'validate_only' }}
     needs: revalidate_x86
     runs-on: [self-hosted, Linux, X64, oe-image-x86]
     timeout-minutes: 60
@@ -588,12 +674,15 @@ jobs:
       - name: Upload immutable candidate
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: phase1-candidate-${{ github.run_id }}
+          name: >-
+            phase1-${{ inputs.operation == 'pipeline_smoke' &&
+            'smoke-' || '' }}candidate-${{ github.run_id }}
           path: ${{ runner.temp }}/candidate/
           if-no-files-found: error
           retention-days: 30
 
       - name: Publish dry-run handoff
+        if: ${{ inputs.operation == 'validate_only' }}
         run: |
           {
             printf '## Phase-one validate_only passed\n\n'
@@ -604,7 +693,19 @@ jobs:
             printf -- '- No GitCode branch, PR, or Issue was written.\n'
           } >> "${GITHUB_STEP_SUMMARY}"
 
+      - name: Publish pipeline smoke result
+        if: ${{ inputs.operation == 'pipeline_smoke' }}
+        run: |
+          {
+            printf '## Pipeline smoke passed\n\n'
+            printf -- "- Evidence artifact: \`phase1-smoke-candidate-%s\`\n" \
+              "${{ github.run_id }}"
+            printf -- '- This synthetic candidate is not promotable.\n'
+            printf -- '- No AI or GitCode write API was used.\n'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
   deliver_fork_pr:
+    name: Promote validated candidate to fork PR
     if: ${{ inputs.operation == 'fork_pr' }}
     runs-on: [self-hosted, Linux, X64, oe-image-x86]
     timeout-minutes: 30
@@ -649,6 +750,7 @@ jobs:
             --gitcode-username qq_42020325
 
   issue_contract_test:
+    name: Exercise failure Issue lifecycle
     if: ${{ inputs.operation == 'failure_issue_contract_test' }}
     runs-on: [self-hosted, Linux, X64, oe-image-x86]
     timeout-minutes: 15

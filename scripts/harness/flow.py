@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Single-file orchestrator: generate -> build+test -> fix loop -> compose PR.
+"""Workflow orchestrator for legacy and phase-one stage commands.
 
 Usage:
     python flow.py --app nginx --version 1.27.2 --os 24.03-lts --domain Cloud
@@ -37,10 +37,19 @@ AGENTS_DIR = PROJECT_ROOT / ".github" / "agents"
 WORKSPACE = Path(os.environ.get("RUNNER_TEMP", "/tmp"))
 TARGET_DIR = WORKSPACE / "target-repo"
 WORKFLOW_DIR = PROJECT_ROOT
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 MAX_RETRIES = 3
 MAX_QA_ROUNDS = 2
 OPENCODE_TIMEOUT = int(os.environ.get("OPENCODE_TIMEOUT", "2400"))
+_PHASE1_STAGE_COMMANDS = {
+    "phase1-generate",
+    "phase1-smoke-generate",
+    "phase1-native-smoke",
+    "phase1-native-repair",
+    "phase1-native-validate",
+}
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────
@@ -680,8 +689,15 @@ def create_failure_issue(app: str, version: str, os_ver: str) -> None:
 
 
 # ── main ────────────────────────────────────────────────────────────────────
-def main() -> None:
+def main(argv: list[str] | None = None) -> int:
     import argparse
+
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] in _PHASE1_STAGE_COMMANDS:
+        from scripts.harness.run import main as run_stage
+
+        return run_stage(argv)
+
     parser = argparse.ArgumentParser(description="openEuler Docker image orchestrator")
     parser.add_argument("--app", required=True)
     parser.add_argument("--version", required=True)
@@ -689,7 +705,7 @@ def main() -> None:
     parser.add_argument("--domain", default="Cloud")
     parser.add_argument("--demo", action="store_true", help="Skip LLM agents, use demo files")
     parser.add_argument("--source", default="", help="Upstream source URL")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     os.environ["PACKAGE"] = args.app
     os.environ["APP_VERSION"] = args.version
@@ -779,7 +795,8 @@ def main() -> None:
         create_failure_issue(args.app, args.version, args.os)
 
     log("=== DONE ===")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

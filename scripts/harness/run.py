@@ -31,9 +31,8 @@ AGENTS_DIR = PROJECT_ROOT / ".github" / "agents"
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-# Scenario-one extends this established Agent harness instead of exposing a
-# second Agent entrypoint.  The implementation modules remain small/testable;
-# callers use this module as the public orchestration boundary.
+# Scenario-one keeps the established Agent implementations here while
+# scripts/harness/flow.py provides the public workflow entrypoint.
 from scripts.lib.agent_runtime import (  # noqa: E402
     AgentResult,
     AgentRuntimeError,
@@ -54,8 +53,14 @@ from scripts.lib.native_repair import (  # noqa: E402
 from scripts.lib.native_validation import (  # noqa: E402
     NativeValidationError,
     validate_native_image,
+    validate_native_smoke,
 )
+from scripts.lib.smoke_candidate import write_smoke_candidate  # noqa: E402
 from scripts.lib.task_spec import TaskSpec, TaskSpecError  # noqa: E402
+from scripts.lib.target_contract import (  # noqa: E402
+    TargetContractError,
+    validate_generated_target,
+)
 
 OPENCODE_MODEL = os.environ.get("OPENCODE_MODEL", MODEL)
 OPENCODE_TIMEOUT = int(os.environ.get("OPENCODE_TIMEOUT", "2400"))
@@ -534,6 +539,32 @@ def cmd_phase1_generate(args: argparse.Namespace) -> None:
     )
 
 
+def cmd_phase1_smoke_generate(args: argparse.Namespace) -> None:
+    """Create a deterministic candidate without calling an AI provider."""
+    task = _load_task_spec(args.task_spec)
+    report_dir = Path(args.report_dir)
+    report_dir.mkdir(parents=True, exist_ok=True)
+    smoke = write_smoke_candidate(workspace=args.workspace, task=task)
+    gate = validate_generated_target(
+        repo=args.workspace,
+        task=task,
+        base_sha=args.base_sha,
+    )
+    (report_dir / "smoke-generation.json").write_text(
+        json.dumps(smoke, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    )
+    (report_dir / "gates.json").write_text(
+        json.dumps(gate, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    )
+    print(
+        json.dumps(
+            {"status": "passed", "mode": "pipeline_smoke"},
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
+
+
 def cmd_phase1_native_repair(args: argparse.Namespace) -> None:
     """Run bounded native repair through the shared Fixer harness."""
     api_key = os.environ.get("DEEPSEEK_API_KEY", "")
@@ -581,6 +612,22 @@ def cmd_phase1_native_validate(args: argparse.Namespace) -> None:
     print(json.dumps(report, ensure_ascii=False, sort_keys=True))
 
 
+def cmd_phase1_native_smoke(args: argparse.Namespace) -> None:
+    """Exercise native Docker and dgoss plumbing without an AI call."""
+    report = validate_native_smoke(
+        workspace=args.workspace,
+        task=_load_task_spec(args.task_spec),
+        architecture=args.architecture,
+        run_id=args.run_id,
+        dgoss=args.dgoss,
+        goss=args.goss,
+        report_path=args.report,
+        junit_path=args.junit,
+        repair_report_dir=args.repair_report_dir,
+    )
+    print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="openEuler Docker image orchestrator")
     sub = parser.add_subparsers(dest="command")
@@ -607,6 +654,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--base-sha", required=True)
     p.add_argument("--report-dir", required=True, type=Path)
     p.add_argument("--opencode", required=True, type=Path)
+
+    p = sub.add_parser(
+        "phase1-smoke-generate",
+        help="Create the deterministic zero-AI pipeline smoke candidate",
+    )
+    p.add_argument("--workspace", required=True, type=Path)
+    p.add_argument("--task-spec", required=True, type=Path)
+    p.add_argument("--base-sha", required=True)
+    p.add_argument("--report-dir", required=True, type=Path)
 
     p = sub.add_parser(
         "phase1-native-repair",
@@ -645,6 +701,24 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--report", required=True, type=Path)
     p.add_argument("--junit", required=True, type=Path)
 
+    p = sub.add_parser(
+        "phase1-native-smoke",
+        help="Exercise native Docker and dgoss plumbing without AI",
+    )
+    p.add_argument("--workspace", required=True, type=Path)
+    p.add_argument("--task-spec", required=True, type=Path)
+    p.add_argument(
+        "--architecture",
+        required=True,
+        choices=("x86_64", "aarch64"),
+    )
+    p.add_argument("--run-id", required=True)
+    p.add_argument("--dgoss", required=True, type=Path)
+    p.add_argument("--goss", required=True, type=Path)
+    p.add_argument("--report", required=True, type=Path)
+    p.add_argument("--junit", required=True, type=Path)
+    p.add_argument("--repair-report-dir", required=True, type=Path)
+
     args = parser.parse_args(argv)
 
     try:
@@ -660,10 +734,14 @@ def main(argv: list[str] | None = None) -> int:
             cmd_report_failures(args)
         elif args.command == "phase1-generate":
             cmd_phase1_generate(args)
+        elif args.command == "phase1-smoke-generate":
+            cmd_phase1_smoke_generate(args)
         elif args.command == "phase1-native-repair":
             cmd_phase1_native_repair(args)
         elif args.command == "phase1-native-validate":
             cmd_phase1_native_validate(args)
+        elif args.command == "phase1-native-smoke":
+            cmd_phase1_native_smoke(args)
         else:
             parser.print_help()
     except (
@@ -672,6 +750,7 @@ def main(argv: list[str] | None = None) -> int:
         NativeRepairError,
         NativeValidationError,
         TaskSpecError,
+        TargetContractError,
         json.JSONDecodeError,
         OSError,
     ) as error:
