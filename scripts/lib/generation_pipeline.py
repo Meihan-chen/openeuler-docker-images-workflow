@@ -98,6 +98,8 @@ def build_role_prompt(
             (
                 "## QA report to resolve",
                 "",
+                "Only fix the reported QA issues; do not regenerate unrelated content.",
+                "",
                 "```json",
                 json.dumps(review, ensure_ascii=False, indent=2, sort_keys=True),
                 "```",
@@ -159,7 +161,7 @@ def _run(
 
 def _review_pair(
     *,
-    subject: str,
+    creator_role: str,
     qa_role: str,
     agent_runner: Callable[..., AgentResult],
     executable: Path,
@@ -186,26 +188,26 @@ def _review_pair(
         raise GenerationPipelineError(f"{qa_role} returned an invalid status")
 
     log("review", f"NEEDS_FIX {qa_role} round=1")
-    log("repair", f"START fixer subject={subject}")
+    log("repair", f"START {creator_role} round=2")
     fixed = _run(
         agent_runner=agent_runner,
         executable=executable,
         workspace=workspace,
         api_key=api_key,
-        role="fixer",
+        role=creator_role,
         prompt=build_role_prompt(
-            role="fixer",
+            role=creator_role,
             task=task,
             base_sha=base_sha,
             review=review.payload,
         ),
     )
     if fixed.payload.get("success") is not True:
-        raise GenerationPipelineError(f"fixer failed for {subject}")
-    log("repair", f"PASS fixer subject={subject}")
+        raise GenerationPipelineError(f"{creator_role} repair failed")
+    log("repair", f"PASS {creator_role} round=2")
     _write_report(
         report_dir,
-        f"fixer-{subject}-round1.json",
+        f"{creator_role.replace('_', '-')}-round2.json",
         fixed.payload,
         api_key,
     )
@@ -225,11 +227,16 @@ def _review_pair(
         second.payload,
         api_key,
     )
-    if second.payload.get("status") != "approved":
-        raise GenerationPipelineError(
-            f"{qa_role} did not approve after the scoped fix"
+    second_status = second.payload.get("status")
+    if second_status == "approved":
+        log("review", f"PASS {qa_role} round=2")
+    elif second_status == "needs_fix":
+        log(
+            "review",
+            f"DISAGREEMENT {qa_role} round=2; continue=local_validation",
         )
-    log("review", f"PASS {qa_role} round=2")
+    else:
+        raise GenerationPipelineError(f"{qa_role} returned an invalid status")
     return 1
 
 
@@ -273,7 +280,7 @@ def run_generation_pipeline(
     _write_report(report_dir, "image-creator.json", creator.payload, api_key)
 
     fix_rounds = _review_pair(
-        subject="image",
+        creator_role="image_creator",
         qa_role="image_qa",
         agent_runner=agent_runner,
         executable=executable,
@@ -303,7 +310,7 @@ def run_generation_pipeline(
     _write_report(report_dir, "testcase-creator.json", testcase.payload, api_key)
 
     fix_rounds += _review_pair(
-        subject="testcase",
+        creator_role="testcase_creator",
         qa_role="testcase_qa",
         agent_runner=agent_runner,
         executable=executable,

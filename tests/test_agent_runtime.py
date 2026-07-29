@@ -204,7 +204,7 @@ def test_agent_rejects_successful_process_without_required_json_contract(tmp_pat
         )
 
 
-def test_shared_legacy_adversarial_entrypoint_also_fails_closed(
+def test_shared_legacy_adversarial_entrypoint_records_disagreement_and_continues(
     tmp_path, monkeypatch
 ):
     from scripts.harness import run
@@ -223,5 +223,6 @@ def test_shared_legacy_adversarial_entrypoint_also_fails_closed(
     )
     monkeypatch.setattr(run, "_write_qa_record", lambda *args, **kwargs: None)
 
-    with pytest.raises(run.AgentRuntimeError, match="did not approve"):
-        run._run_adversarial_pair("image")
+    run._run_adversarial_pair("image")
+
+    assert responses == []

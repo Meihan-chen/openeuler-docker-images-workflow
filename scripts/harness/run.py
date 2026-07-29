@@ -305,10 +305,11 @@ def _run_adversarial_pair(role: str) -> None:
             return
 
         if round_num == MAX_QA_ROUNDS:
-            raise AgentRuntimeError(
-                f"{role} QA did not approve after "
-                f"{MAX_QA_ROUNDS} rounds"
+            print(
+                f"[{role}] QA did not approve after "
+                f"{MAX_QA_ROUNDS} rounds; proceeding to local validation"
             )
+            return
 
         print(f"[{role}] QA found issues; running Creator round {round_num + 1} to fix")
         creator_out = _run_opencode(

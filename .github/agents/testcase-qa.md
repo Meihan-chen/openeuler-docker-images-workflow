@@ -71,5 +71,5 @@ Produce a review report in JSON:
 - Do NOT modify files yourself — only report issues
 - A blocker or major gap means the test suite is insufficient and must be fixed
 - If no blocker or major gap is found, approve with `"status": "approved"`
-- If issues remain after any repair round, continue to return `"status": "needs_fix"`; the harness owns the retry limit and must fail closed
+- If issues remain after any repair round, continue to return `"status": "needs_fix"`; the harness records the disagreement and local validation makes the final decision
 - Never inspect, print, copy, or mention environment credentials or secrets

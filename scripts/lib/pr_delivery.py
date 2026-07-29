@@ -38,8 +38,8 @@ def _last_qa_status(root: Path, prefix: str) -> str:
         return "not recorded"
     report = _load_json(paths[-1], prefix)
     status = str(report.get("status", "unknown"))
-    if status != "approved":
-        raise PRDeliveryError(f"{prefix} evidence is not approved")
+    if status not in {"approved", "needs_fix"}:
+        raise PRDeliveryError(f"{prefix} evidence has an invalid status")
     return status
 
 

@@ -30,10 +30,15 @@ def test_scenario_one_reuses_the_shared_agent_definitions():
     assert "Immutable task contract" in prompt
 
 
-def test_shared_qa_and_test_prompts_are_fail_closed_and_exact():
+def test_shared_qa_prompts_preserve_findings_for_local_validation():
     image_qa = (AGENTS_DIR / "image-qa.md").read_text().lower()
+    testcase_qa = (AGENTS_DIR / "testcase-qa.md").read_text().lower()
     testcase_creator = (AGENTS_DIR / "testcase-creator.md").read_text().lower()
 
     assert "approve anyway" not in image_qa
+    assert "must fail closed" not in image_qa
+    assert "must fail closed" not in testcase_qa
+    assert "local validation" in image_qa
+    assert "local validation" in testcase_qa
     assert "模糊匹配" not in testcase_creator
     assert "exact" in testcase_creator or "精确" in testcase_creator

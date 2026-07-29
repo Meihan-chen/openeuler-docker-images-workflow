@@ -18,7 +18,7 @@ def _task():
     )
 
 
-def _candidate(tmp_path):
+def _candidate(tmp_path, *, testcase_qa_status="approved"):
     from scripts.lib.candidate_bundle import CandidateBundle
 
     root = tmp_path / "candidate"
@@ -52,13 +52,23 @@ def _candidate(tmp_path):
     (root / "reports" / "agents" / "image-qa-round1.json").write_text(
         json.dumps({"status": "approved", "issues": [], "summary": "approved"})
     )
-    (root / "reports" / "agents" / "testcase-qa-round1.json").write_text(
+    testcase_round = 1 if testcase_qa_status == "approved" else 2
+    (
+        root
+        / "reports"
+        / "agents"
+        / f"testcase-qa-round{testcase_round}.json"
+    ).write_text(
         json.dumps(
             {
-                "status": "approved",
-                "issues": [],
+                "status": testcase_qa_status,
+                "issues": (
+                    []
+                    if testcase_qa_status == "approved"
+                    else [{"severity": "major", "description": "coverage gap"}]
+                ),
                 "coverage_score": 0.95,
-                "summary": "approved",
+                "summary": testcase_qa_status,
             }
         )
     )
@@ -131,6 +141,17 @@ def test_pr_content_contains_candidate_and_dual_architecture_evidence(tmp_path):
     assert "image QA: approved" in content.body
     assert "testcase QA: approved" in content.body
     assert "https://github.com/apache/kvrocks/tree/v2.16.0" in content.body
+
+
+def test_pr_content_records_non_blocking_qa_disagreement(tmp_path):
+    from scripts.harness.compose_pr import compose_pull_request
+
+    bundle = _candidate(tmp_path, testcase_qa_status="needs_fix")
+
+    content = compose_pull_request(bundle)
+
+    assert "image QA: approved" in content.body
+    assert "testcase QA: needs_fix" in content.body
 
 
 def test_delivery_pushes_then_creates_cross_repository_pr(tmp_path):

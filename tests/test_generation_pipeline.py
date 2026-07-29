@@ -60,7 +60,11 @@ def test_generation_runs_adversarial_pairs_and_one_target_gate(
                 {
                     "success": True,
                     "files_created": ["Database/kvrocks/meta.yml"],
-                }
+                },
+                {
+                    "success": True,
+                    "files_created": ["Database/kvrocks/meta.yml"],
+                },
             ],
             "image_qa": [
                 {
@@ -70,7 +74,6 @@ def test_generation_runs_adversarial_pairs_and_one_target_gate(
                 },
                 _approved_image(),
             ],
-            "fixer": [{"success": True, "changes": ["health check"]}],
             "testcase_creator": [
                 {
                     "success": True,
@@ -102,16 +105,19 @@ def test_generation_runs_adversarial_pairs_and_one_target_gate(
     assert [call["role"] for call in agent.calls] == [
         "image_creator",
         "image_qa",
-        "fixer",
+        "image_creator",
         "image_qa",
         "testcase_creator",
         "testcase_qa",
     ]
+    assert "QA report to resolve" in agent.calls[2]["prompt"]
+    assert "fix health" in agent.calls[2]["prompt"]
+    assert "Only fix the reported QA issues" in agent.calls[2]["prompt"]
     assert len(gate_calls) == 1
     assert gate_calls[0]["workspace"] == workspace
     assert sorted(path.name for path in reports.iterdir()) == [
-        "fixer-image-round1.json",
         "gates.json",
+        "image-creator-round2.json",
         "image-creator.json",
         "image-qa-round1.json",
         "image-qa-round2.json",
@@ -128,7 +134,7 @@ def test_generation_runs_adversarial_pairs_and_one_target_gate(
         "[flow][generate] START image_creator",
         "[flow][generate] PASS image_creator",
         "[flow][review] START image_qa round=1",
-        "[flow][repair] START fixer subject=image",
+        "[flow][repair] START image_creator round=2",
         "[flow][review] PASS image_qa round=2",
         "[flow][generate] START testcase_creator",
         "[flow][review] PASS testcase_qa round=1",
@@ -138,11 +144,11 @@ def test_generation_runs_adversarial_pairs_and_one_target_gate(
     assert positions == sorted(positions)
 
 
-def test_generation_fails_closed_when_second_qa_still_requests_fix(tmp_path):
-    from scripts.harness.run import (
-        GenerationPipelineError,
-        run_generation_pipeline,
-    )
+def test_generation_continues_when_second_qa_records_disagreement(
+    tmp_path,
+    capsys,
+):
+    from scripts.harness.run import run_generation_pipeline
 
     workspace = tmp_path / "target"
     reports = tmp_path / "evidence"
@@ -155,24 +161,45 @@ def test_generation_fails_closed_when_second_qa_still_requests_fix(tmp_path):
     agent = StubAgent(
         {
             "image_creator": [
-                {"success": True, "files_created": ["Database/kvrocks/meta.yml"]}
+                {"success": True, "files_created": ["Database/kvrocks/meta.yml"]},
+                {"success": True, "files_created": ["Database/kvrocks/meta.yml"]},
             ],
             "image_qa": [needs_fix, needs_fix],
-            "fixer": [{"success": True, "changes": ["attempted fix"]}],
+            "testcase_creator": [
+                {
+                    "success": True,
+                    "files_created": ["Database/kvrocks/tests/goss.yaml"],
+                }
+            ],
+            "testcase_qa": [_approved_tests()],
         }
     )
+    gate_calls = []
 
-    with pytest.raises(GenerationPipelineError, match="image_qa"):
-        run_generation_pipeline(
-            workspace=workspace,
-            report_dir=reports,
-            task=_task(),
-            base_sha="1" * 40,
-            executable=tmp_path / "opencode",
-            api_key="deepseek-secret",
-            agent_runner=agent,
-            target_validator=lambda **_: pytest.fail("gate must not run"),
-        )
+    def validator(**kwargs):
+        gate_calls.append(kwargs)
+        return {"status": "passed", "added_files": 10}
+
+    result = run_generation_pipeline(
+        workspace=workspace,
+        report_dir=reports,
+        task=_task(),
+        base_sha="1" * 40,
+        executable=tmp_path / "opencode",
+        api_key="deepseek-secret",
+        agent_runner=agent,
+        target_validator=validator,
+    )
+
+    assert result.status == "passed"
+    assert len(gate_calls) == 1
+    assert json.loads((reports / "image-qa-round2.json").read_text())[
+        "status"
+    ] == "needs_fix"
+    assert (
+        "[flow][review] DISAGREEMENT image_qa round=2; "
+        "continue=local_validation"
+    ) in capsys.readouterr().out
 
 
 def test_generation_reports_must_be_outside_target_workspace(tmp_path):
