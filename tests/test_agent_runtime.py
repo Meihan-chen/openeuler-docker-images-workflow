@@ -37,6 +37,35 @@ def _executable(tmp_path):
     return path
 
 
+def test_default_agent_runner_streams_safe_progress(tmp_path, capsys):
+    from scripts.harness.run import run_agent
+
+    executable = tmp_path / "opencode"
+    payload = json.dumps({"success": True, "files_created": ["meta.yml"]})
+    event = json.dumps({"type": "text", "part": {"text": payload}})
+    executable.write_text(f"#!/bin/sh\nprintf '%s\\n' '{event}'\n")
+    executable.chmod(0o755)
+    workspace = tmp_path / "target"
+    workspace.mkdir()
+
+    result = run_agent(
+        executable=executable,
+        role="image_creator",
+        prompt="secret-safe prompt",
+        workspace=workspace,
+        api_key="deepseek-secret",
+        required_keys=("success", "files_created"),
+    )
+
+    output = capsys.readouterr().out
+    assert result.payload["success"] is True
+    assert "[flow][agent:image_creator] START" in output
+    assert "[flow][agent:image_creator] EVENT text" in output
+    assert "[flow][agent:image_creator] PASS" in output
+    assert "deepseek-secret" not in output
+    assert payload not in output
+
+
 def test_write_agent_uses_pinned_model_and_scoped_permissions(tmp_path):
     from scripts.harness.run import run_agent
 

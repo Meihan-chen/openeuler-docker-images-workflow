@@ -45,7 +45,10 @@ def _approved_tests():
     }
 
 
-def test_generation_runs_adversarial_pairs_and_one_target_gate(tmp_path):
+def test_generation_runs_adversarial_pairs_and_one_target_gate(
+    tmp_path,
+    capsys,
+):
     from scripts.harness.run import run_generation_pipeline
 
     workspace = tmp_path / "target"
@@ -120,6 +123,19 @@ def test_generation_runs_adversarial_pairs_and_one_target_gate(tmp_path):
     assert "deepseek-secret" not in json.dumps(
         [json.loads(path.read_text()) for path in reports.iterdir()]
     )
+    output = capsys.readouterr().out
+    markers = [
+        "[flow][generate] START image_creator",
+        "[flow][generate] PASS image_creator",
+        "[flow][review] START image_qa round=1",
+        "[flow][repair] START fixer subject=image",
+        "[flow][review] PASS image_qa round=2",
+        "[flow][generate] START testcase_creator",
+        "[flow][review] PASS testcase_qa round=1",
+        "[flow][gate] PASS target_contract",
+    ]
+    positions = [output.index(marker) for marker in markers]
+    assert positions == sorted(positions)
 
 
 def test_generation_fails_closed_when_second_qa_still_requests_fix(tmp_path):

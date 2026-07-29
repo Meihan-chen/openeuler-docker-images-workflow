@@ -14,6 +14,7 @@ from importlib import metadata
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
+from scripts.lib.progress import log, run_streaming
 from scripts.lib.task_spec import TaskSpec
 
 
@@ -41,14 +42,10 @@ def _default_runner(
 ) -> subprocess.CompletedProcess:
     process_env = os.environ.copy()
     process_env.update(env)
-    return subprocess.run(
+    return run_streaming(
         command,
         cwd=cwd,
         env=process_env,
-        check=False,
-        capture_output=True,
-        text=True,
-        errors="replace",
         timeout=timeout,
     )
 
@@ -248,8 +245,11 @@ def validate_native_image(
     start = time.monotonic()
     image_id = ""
     failure: str | None = None
+    stage = f"native:{architecture}"
+    log(stage, "START validation")
 
     try:
+        log(stage, "START build")
         _run(
             runner,
             [
@@ -286,6 +286,8 @@ def validate_native_image(
             cwd=workspace,
             timeout=3600,
         )
+        log(stage, "PASS build")
+        log(stage, "START dgoss")
         _run(
             runner,
             [
@@ -298,12 +300,14 @@ def validate_native_image(
             cwd=workspace,
             env={
                 "GOSS_PATH": str(goss),
-                "GOSS_FILE": str(tests_root / "goss.yaml"),
-                "GOSS_WAIT_FILE": str(tests_root / "goss_wait.yaml"),
+                "GOSS_FILES_PATH": str(tests_root),
+                "GOSS_FILE": "goss.yaml",
                 "EXPECTED_VERSION": task.version,
             },
             timeout=300,
         )
+        log(stage, "PASS dgoss")
+        log(stage, "START persistence")
         _run(
             runner,
             ["docker", "volume", "create", volume],
@@ -407,6 +411,7 @@ def validate_native_image(
             cwd=workspace,
         )
         image_id = str(inspected.stdout or "").strip()
+        log(stage, "PASS persistence")
     except NativeValidationError as error:
         failure = str(error)
     finally:
@@ -450,5 +455,174 @@ def validate_native_image(
         failure=failure,
     )
     if failure:
+        log(stage, f"FAIL validation: {failure}")
         raise NativeValidationError(failure)
+    log(stage, "PASS validation")
+    return report
+
+
+def validate_native_smoke(
+    *,
+    workspace: Path,
+    task: TaskSpec,
+    architecture: str,
+    run_id: str,
+    dgoss: Path,
+    goss: Path,
+    report_path: Path,
+    junit_path: Path,
+    repair_report_dir: Path,
+    runner: CommandRunner = _default_runner,
+) -> dict[str, object]:
+    if architecture not in _PLATFORMS:
+        raise NativeValidationError(
+            "architecture must be the native runner name x86_64 or aarch64"
+        )
+    if not _RUN_ID_RE.fullmatch(run_id):
+        raise NativeValidationError("run_id must be a positive integer")
+    workspace = Path(workspace)
+    if not workspace.is_dir():
+        raise NativeValidationError("target workspace does not exist")
+    dgoss = _validate_tool(dgoss, "dgoss")
+    goss = _validate_tool(goss, "goss")
+    report_path = Path(report_path)
+    junit_path = Path(junit_path)
+    repair_report_dir = Path(repair_report_dir)
+
+    context = report_path.parent / "pipeline-smoke-context"
+    context.mkdir(parents=True, exist_ok=True)
+    dockerfile = context / "Dockerfile"
+    goss_file = context / "goss.yaml"
+    dockerfile.write_text(
+        f"FROM openeuler/openeuler:{task.os_version}\n"
+        "RUN printf 'pipeline-smoke\\n' > /pipeline-smoke\n"
+        'CMD ["sleep", "30"]\n'
+    )
+    goss_file.write_text(
+        "file:\n"
+        "  /pipeline-smoke:\n"
+        "    exists: true\n"
+        "    contains:\n"
+        "      - pipeline-smoke\n"
+    )
+
+    platform = _PLATFORMS[architecture]
+    slug = architecture.replace("_", "-")
+    prefix = f"oe-smoke-{run_id}-{slug}"
+    builder = f"{prefix}-builder"
+    container = f"{prefix}-dgoss"
+    image = f"oe-autopilot/pipeline-smoke:{run_id}-{slug}"
+    stage = f"smoke:{architecture}"
+    start = time.monotonic()
+    image_id = ""
+    failure: str | None = None
+    log(stage, "START native plumbing")
+    try:
+        _run(
+            runner,
+            [
+                "docker",
+                "buildx",
+                "create",
+                "--name",
+                builder,
+                "--driver",
+                "docker-container",
+                "--use",
+            ],
+            cwd=workspace,
+        )
+        _run(
+            runner,
+            [
+                "docker",
+                "buildx",
+                "build",
+                "--builder",
+                builder,
+                "--load",
+                "--progress",
+                "plain",
+                "--platform",
+                platform,
+                "--tag",
+                image,
+                str(context),
+            ],
+            cwd=workspace,
+            timeout=1800,
+        )
+        _run(
+            runner,
+            [str(dgoss), "run", "--name", container, image],
+            cwd=workspace,
+            env={
+                "GOSS_PATH": str(goss),
+                "GOSS_FILES_PATH": str(context),
+                "GOSS_FILE": "goss.yaml",
+            },
+            timeout=300,
+        )
+        inspected = _run(
+            runner,
+            ["docker", "image", "inspect", "--format", "{{.Id}}", image],
+            cwd=workspace,
+        )
+        image_id = str(inspected.stdout or "").strip()
+    except NativeValidationError as error:
+        failure = str(error)
+    finally:
+        for command in (
+            ["docker", "rm", "--force", container],
+            ["docker", "image", "rm", "--force", image],
+            ["docker", "buildx", "rm", "--force", builder],
+        ):
+            _run(
+                runner,
+                command,
+                cwd=workspace,
+                timeout=300,
+                check=False,
+            )
+
+    report: dict[str, object] = {
+        "status": "failed" if failure else "passed",
+        "task_id": task.task_id,
+        "architecture": architecture,
+        "platform": platform,
+        "image_id": image_id,
+        "duration_seconds": round(time.monotonic() - start, 3),
+        "environment": _environment_evidence(task, architecture),
+        "checks": {
+            "native_build": failure is None,
+            "dgoss": failure is None,
+        },
+    }
+    if failure:
+        report["failure"] = failure
+    _write_evidence(
+        report_path=report_path,
+        junit_path=junit_path,
+        report=report,
+        failure=failure,
+    )
+    repair_report_dir.mkdir(parents=True, exist_ok=True)
+    (repair_report_dir / f"native-repair-{architecture}.json").write_text(
+        json.dumps(
+            {
+                "architecture": architecture,
+                "mode": "pipeline_smoke",
+                "repair_attempts": 0,
+                "status": report["status"],
+            },
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    if failure:
+        log(stage, f"FAIL native plumbing: {failure}")
+        raise NativeValidationError(failure)
+    log(stage, "PASS native plumbing")
     return report

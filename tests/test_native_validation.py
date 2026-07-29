@@ -71,7 +71,10 @@ def _tools(tmp_path):
     return dgoss, goss
 
 
-def test_native_validation_uses_dedicated_builder_and_full_runtime_checks(tmp_path):
+def test_native_validation_uses_dedicated_builder_and_full_runtime_checks(
+    tmp_path,
+    capsys,
+):
     from scripts.lib.native_validation import validate_native_image
 
     workspace = _workspace(tmp_path)
@@ -122,7 +125,15 @@ def test_native_validation_uses_dedicated_builder_and_full_runtime_checks(tmp_pa
     assert "--driver docker-container" in flattened
     assert "docker buildx build" in flattened
     assert "--platform linux/amd64" in flattened
-    assert str(dgoss) in commands[[command[0] for command in commands].index(str(dgoss))][0]
+    dgoss_call = runner.calls[
+        [command[0] for command in commands].index(str(dgoss))
+    ]
+    assert str(dgoss) in dgoss_call["command"][0]
+    assert dgoss_call["env"]["GOSS_FILES_PATH"] == str(
+        workspace / "Database" / "kvrocks" / "tests"
+    )
+    assert dgoss_call["env"]["GOSS_FILE"] == "goss.yaml"
+    assert "GOSS_WAIT_FILE" not in dgoss_call["env"]
     assert "EXPECTED_VERSION=2.16.0" in flattened
     assert " SET oe-e2e-persistence run-123456" in flattened
     assert " GET oe-e2e-persistence" in flattened
@@ -131,6 +142,19 @@ def test_native_validation_uses_dedicated_builder_and_full_runtime_checks(tmp_pa
     assert "docker image rm" in flattened
     assert "system prune" not in flattened
     assert "setup-qemu" not in flattened
+    output = capsys.readouterr().out
+    markers = [
+        "[flow][native:x86_64] START validation",
+        "[flow][native:x86_64] START build",
+        "[flow][native:x86_64] PASS build",
+        "[flow][native:x86_64] START dgoss",
+        "[flow][native:x86_64] PASS dgoss",
+        "[flow][native:x86_64] START persistence",
+        "[flow][native:x86_64] PASS persistence",
+        "[flow][native:x86_64] PASS validation",
+    ]
+    positions = [output.index(marker) for marker in markers]
+    assert positions == sorted(positions)
 
 
 def test_native_validation_failure_still_cleans_exact_resources(tmp_path):
@@ -171,6 +195,58 @@ def test_native_validation_failure_still_cleans_exact_resources(tmp_path):
     assert "docker volume rm" in flattened
     assert "docker image rm" in flattened
     assert "system prune" not in flattened
+
+
+def test_native_pipeline_smoke_builds_and_runs_dgoss_without_ai(
+    tmp_path,
+):
+    from scripts.lib.native_validation import validate_native_smoke
+
+    workspace = tmp_path / "target"
+    workspace.mkdir()
+    dgoss, goss = _tools(tmp_path)
+    runner = DockerRunner()
+    report_path = tmp_path / "reports" / "x86_64.json"
+    junit_path = tmp_path / "reports" / "x86_64.junit.xml"
+    repair_dir = tmp_path / "reports" / "agents"
+
+    report = validate_native_smoke(
+        workspace=workspace,
+        task=_task(),
+        architecture="x86_64",
+        run_id="123456",
+        dgoss=dgoss,
+        goss=goss,
+        report_path=report_path,
+        junit_path=junit_path,
+        repair_report_dir=repair_dir,
+        runner=runner,
+    )
+
+    assert report["status"] == "passed"
+    assert report["checks"] == {
+        "native_build": True,
+        "dgoss": True,
+    }
+    commands = "\n".join(
+        " ".join(call["command"]) for call in runner.calls
+    )
+    assert "docker buildx build" in commands
+    assert str(dgoss) in commands
+    assert "docker image inspect" in commands
+    assert "docker image rm" in commands
+    assert "docker buildx rm" in commands
+    assert "docker exec" not in commands
+    dgoss_call = next(
+        call for call in runner.calls if call["command"][0] == str(dgoss)
+    )
+    assert dgoss_call["env"]["GOSS_FILES_PATH"].endswith(
+        "pipeline-smoke-context"
+    )
+    assert dgoss_call["env"]["GOSS_FILE"] == "goss.yaml"
+    assert (
+        repair_dir / "native-repair-x86_64.json"
+    ).is_file()
 
 
 @pytest.mark.parametrize("architecture", ["amd64", "arm64", "../x86_64"])

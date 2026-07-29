@@ -9,6 +9,7 @@ from typing import Callable, Mapping
 
 from scripts.harness.gate_diff import validate_generated_target
 from scripts.lib.agent_runtime import AgentResult, run_agent
+from scripts.lib.progress import log
 from scripts.lib.task_spec import TaskSpec
 
 
@@ -168,6 +169,7 @@ def _review_pair(
     base_sha: str,
     api_key: str,
 ) -> int:
+    log("review", f"START {qa_role} round=1")
     review = _run(
         agent_runner=agent_runner,
         executable=executable,
@@ -178,10 +180,13 @@ def _review_pair(
     )
     _write_report(report_dir, f"{qa_role.replace('_', '-')}-round1.json", review.payload, api_key)
     if review.payload.get("status") == "approved":
+        log("review", f"PASS {qa_role} round=1")
         return 0
     if review.payload.get("status") != "needs_fix":
         raise GenerationPipelineError(f"{qa_role} returned an invalid status")
 
+    log("review", f"NEEDS_FIX {qa_role} round=1")
+    log("repair", f"START fixer subject={subject}")
     fixed = _run(
         agent_runner=agent_runner,
         executable=executable,
@@ -197,6 +202,7 @@ def _review_pair(
     )
     if fixed.payload.get("success") is not True:
         raise GenerationPipelineError(f"fixer failed for {subject}")
+    log("repair", f"PASS fixer subject={subject}")
     _write_report(
         report_dir,
         f"fixer-{subject}-round1.json",
@@ -204,6 +210,7 @@ def _review_pair(
         api_key,
     )
 
+    log("review", f"START {qa_role} round=2")
     second = _run(
         agent_runner=agent_runner,
         executable=executable,
@@ -222,6 +229,7 @@ def _review_pair(
         raise GenerationPipelineError(
             f"{qa_role} did not approve after the scoped fix"
         )
+    log("review", f"PASS {qa_role} round=2")
     return 1
 
 
@@ -246,6 +254,7 @@ def run_generation_pipeline(
         raise GenerationPipelineError("Agent evidence directory must be empty")
     report_dir.mkdir(parents=True, exist_ok=True)
 
+    log("generate", "START image_creator")
     creator = _run(
         agent_runner=agent_runner,
         executable=executable,
@@ -260,6 +269,7 @@ def run_generation_pipeline(
     )
     if creator.payload.get("success") is not True:
         raise GenerationPipelineError("image_creator did not complete successfully")
+    log("generate", "PASS image_creator")
     _write_report(report_dir, "image-creator.json", creator.payload, api_key)
 
     fix_rounds = _review_pair(
@@ -274,6 +284,7 @@ def run_generation_pipeline(
         api_key=api_key,
     )
 
+    log("generate", "START testcase_creator")
     testcase = _run(
         agent_runner=agent_runner,
         executable=executable,
@@ -288,6 +299,7 @@ def run_generation_pipeline(
     )
     if testcase.payload.get("success") is not True:
         raise GenerationPipelineError("testcase_creator did not complete successfully")
+    log("generate", "PASS testcase_creator")
     _write_report(report_dir, "testcase-creator.json", testcase.payload, api_key)
 
     fix_rounds += _review_pair(
@@ -302,6 +314,7 @@ def run_generation_pipeline(
         api_key=api_key,
     )
 
+    log("gate", "START target_contract")
     gate_report = target_validator(
         workspace=workspace,
         task=task,
@@ -309,6 +322,7 @@ def run_generation_pipeline(
     )
     if gate_report.get("status") != "passed":
         raise GenerationPipelineError("deterministic target contract did not pass")
+    log("gate", "PASS target_contract")
     _write_report(report_dir, "gates.json", gate_report, api_key)
     return GenerationResult(
         status="passed",

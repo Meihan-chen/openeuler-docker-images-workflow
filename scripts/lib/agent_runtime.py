@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterator, Mapping, Sequence
 
+from scripts.lib.progress import log, run_streaming
+
 
 class AgentRuntimeError(RuntimeError):
     """Raised when OpenCode fails or violates its output contract."""
@@ -39,15 +41,32 @@ def _default_runner(
 ) -> subprocess.CompletedProcess:
     process_env = os.environ.copy()
     process_env.update(env)
-    return subprocess.run(
+    role = env.get("OE_AGENT_ROLE", "unknown")
+    secret = env.get("DEEPSEEK_API_KEY", "")
+
+    def emit(line: str) -> None:
+        safe_line = line.replace(secret, "REDACTED") if secret else line
+        try:
+            event = json.loads(safe_line)
+        except json.JSONDecodeError:
+            detail = safe_line.strip()
+            if detail:
+                log(f"agent:{role}", detail[:500])
+            return
+        event_type = str(event.get("type", "unknown"))
+        part = event.get("part")
+        if event_type == "tool_use" and isinstance(part, dict):
+            tool = str(part.get("tool", "unknown"))
+            log(f"agent:{role}", f"EVENT tool={tool}")
+        else:
+            log(f"agent:{role}", f"EVENT {event_type}")
+
+    return run_streaming(
         command,
         cwd=cwd,
         env=process_env,
-        check=False,
-        capture_output=True,
-        text=True,
-        errors="replace",
         timeout=timeout,
+        emit=emit,
     )
 
 
@@ -153,8 +172,10 @@ def run_agent(
     ]
     env = {
         "DEEPSEEK_API_KEY": api_key,
+        "OE_AGENT_ROLE": role,
         "OPENCODE_CONFIG_CONTENT": _permission_config(role),
     }
+    log(f"agent:{role}", "START")
     result = runner(command, workspace, env, timeout)
     if result.returncode != 0:
         detail = str(result.stderr or result.stdout or "OpenCode failed")
@@ -165,4 +186,5 @@ def run_agent(
     except AgentRuntimeError as error:
         message = str(error).replace(api_key, "REDACTED")
         raise AgentRuntimeError(message) from error
+    log(f"agent:{role}", "PASS")
     return AgentResult(role=role, payload=payload)
