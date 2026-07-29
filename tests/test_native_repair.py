@@ -64,6 +64,43 @@ class Fixer:
         )
 
 
+def test_zero_repair_success_writes_nonempty_agent_artifact_directory(
+    tmp_path,
+):
+    from scripts.harness.run import validate_native_with_repairs
+
+    workspace = tmp_path / "target"
+    evidence = tmp_path / "evidence"
+    workspace.mkdir()
+
+    result = validate_native_with_repairs(
+        workspace=workspace,
+        task=_task(),
+        base_sha="1" * 40,
+        architecture="x86_64",
+        run_id="123456",
+        dgoss=tmp_path / "dgoss",
+        goss=tmp_path / "goss",
+        report_path=evidence / "x86_64.json",
+        junit_path=evidence / "x86_64.junit.xml",
+        repair_report_dir=evidence / "agents",
+        executable=tmp_path / "opencode",
+        api_key="deepseek-secret",
+        native_validator=NativeValidator(failures=0),
+        agent_runner=Fixer(),
+        target_validator=lambda **_: {"status": "passed"},
+    )
+
+    summary_path = evidence / "agents" / "native-repair-x86_64.json"
+    assert result.repair_attempts == 0
+    assert summary_path.is_file()
+    assert json.loads(summary_path.read_text()) == {
+        "architecture": "x86_64",
+        "repair_attempts": 0,
+        "status": "passed",
+    }
+
+
 def test_native_failure_is_fixed_gated_and_retried_up_to_success(tmp_path):
     from scripts.harness.run import validate_native_with_repairs
 
@@ -104,6 +141,7 @@ def test_native_failure_is_fixed_gated_and_retried_up_to_success(tmp_path):
     assert sorted(path.name for path in (evidence / "agents").iterdir()) == [
         "fixer-native-aarch64-round1.json",
         "fixer-native-aarch64-round2.json",
+        "native-repair-aarch64.json",
     ]
     reports = [
         json.loads(path.read_text())

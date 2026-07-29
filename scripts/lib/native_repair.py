@@ -175,6 +175,20 @@ def validate_native_with_repairs(
             raise NativeRepairError(
                 "native validator returned without passed status"
             )
+        summary = {
+            "architecture": architecture,
+            "repair_attempts": repair_attempts,
+            "status": "passed",
+        }
+        (repair_report_dir / f"native-repair-{architecture}.json").write_text(
+            json.dumps(
+                summary,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        )
         return NativeRepairResult(
             status="passed",
             repair_attempts=repair_attempts,
