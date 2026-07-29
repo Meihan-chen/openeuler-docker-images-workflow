@@ -138,6 +138,8 @@ def test_native_failure_is_fixed_gated_and_retried_up_to_success(tmp_path):
     assert all(call["role"] == "fixer" for call in fixer.calls)
     assert "aarch64" in fixer.calls[0]["prompt"]
     assert "compile failed attempt 1" in fixer.calls[0]["prompt"]
+    assert "documented `success` and `changes` keys" in fixer.calls[0]["prompt"]
+    assert "`files_created` keys" not in fixer.calls[0]["prompt"]
     assert sorted(path.name for path in (evidence / "agents").iterdir()) == [
         "fixer-native-aarch64-round1.json",
         "fixer-native-aarch64-round2.json",

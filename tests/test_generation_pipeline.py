@@ -139,11 +139,11 @@ def test_generation_runs_adversarial_pairs_and_one_target_gate(
     ]
     assert [call["timeout"] for call in agent.calls] == [
         1800,
-        600,
+        180,
         1800,
-        600,
+        180,
         1800,
-        600,
+        180,
     ]
     assert "QA report to resolve" in agent.calls[2]["prompt"]
     assert "fix health" in agent.calls[2]["prompt"]
@@ -152,7 +152,7 @@ def test_generation_runs_adversarial_pairs_and_one_target_gate(
         "Your final response MUST be exactly one JSON object"
         in agent.calls[2]["prompt"]
     )
-    assert len(gate_calls) == 1
+    assert len(gate_calls) == 2
     assert gate_calls[0]["workspace"] == workspace
     assert sorted(path.name for path in reports.iterdir()) == [
         "gates.json",
@@ -160,6 +160,7 @@ def test_generation_runs_adversarial_pairs_and_one_target_gate(
         "image-creator.json",
         "image-qa-round1.json",
         "image-qa-round2.json",
+        "precheck-gates.json",
         "testcase-creator.json",
         "testcase-qa-round1.json",
     ]
@@ -184,6 +185,7 @@ def test_generation_runs_adversarial_pairs_and_one_target_gate(
         "[flow][repair] START image_creator round=2",
         "[flow][review] PASS image_qa round=2",
         "[flow][generate] START testcase_creator",
+        "[flow][gate] PASS generated_precheck",
         "[flow][review] PASS testcase_qa round=1",
         "[flow][gate] PASS target_contract",
     ]
@@ -239,7 +241,7 @@ def test_generation_continues_when_second_qa_records_disagreement(
     )
 
     assert result.status == "passed"
-    assert len(gate_calls) == 1
+    assert len(gate_calls) == 2
     assert json.loads((reports / "image-qa-round2.json").read_text())[
         "status"
     ] == "needs_fix"
@@ -289,6 +291,7 @@ def test_generation_records_failed_target_gate_before_raising(tmp_path):
         "status": "failed",
         "errors": ["unexpected target path"],
     }
+    gate_results = iter(({"status": "passed"}, failed_gate))
 
     with pytest.raises(
         GenerationPipelineError,
@@ -302,10 +305,169 @@ def test_generation_records_failed_target_gate_before_raising(tmp_path):
             executable=tmp_path / "opencode",
             api_key="deepseek-secret",
             agent_runner=agent,
-            target_validator=lambda **_: failed_gate,
+            target_validator=lambda **_: next(gate_results),
         )
 
     assert json.loads((reports / "gates.json").read_text()) == failed_gate
+
+
+def test_generation_precheck_fails_before_testcase_qa(tmp_path):
+    from scripts.lib.generation_pipeline import (
+        GenerationPipelineError,
+        run_generation_pipeline,
+    )
+
+    workspace = tmp_path / "target"
+    reports = tmp_path / "evidence"
+    workspace.mkdir()
+    agent = _fully_approved_agent()
+    from scripts.lib.target_contract import TargetContractError
+
+    def failed_validator(**_):
+        raise TargetContractError(
+            "required generated file is missing: tests/test.sh"
+        )
+
+    with pytest.raises(
+        GenerationPipelineError,
+        match="deterministic target precheck",
+    ):
+        run_generation_pipeline(
+            workspace=workspace,
+            report_dir=reports,
+            task=_task(),
+            base_sha="1" * 40,
+            executable=tmp_path / "opencode",
+            api_key="deepseek-secret",
+            agent_runner=agent,
+            target_validator=failed_validator,
+        )
+
+    assert [call["role"] for call in agent.calls] == [
+        "image_creator",
+        "image_qa",
+        "testcase_creator",
+    ]
+    assert json.loads((reports / "precheck-gates.json").read_text()) == {
+        "status": "failed",
+        "errors": ["required generated file is missing: tests/test.sh"],
+    }
+
+
+def test_generation_records_agent_timeout_without_exposing_secret(tmp_path):
+    from scripts.lib.agent_runtime import AgentRuntimeError
+    from scripts.lib.generation_pipeline import (
+        GenerationPipelineError,
+        run_generation_pipeline,
+    )
+
+    workspace = tmp_path / "target"
+    reports = tmp_path / "evidence"
+    workspace.mkdir()
+
+    def timeout_agent(**kwargs):
+        raise AgentRuntimeError(
+            f"{kwargs['role']} timed out with deepseek-secret"
+        )
+
+    with pytest.raises(GenerationPipelineError, match="image_creator"):
+        run_generation_pipeline(
+            workspace=workspace,
+            report_dir=reports,
+            task=_task(),
+            base_sha="1" * 40,
+            executable=tmp_path / "opencode",
+            api_key="deepseek-secret",
+            agent_runner=timeout_agent,
+            target_validator=lambda **_: {"status": "passed"},
+        )
+
+    assert json.loads((reports / "generation-failure.json").read_text()) == {
+        "error": "image_creator timed out with REDACTED",
+        "role": "image_creator",
+        "stage": "agent",
+        "status": "failed",
+    }
+
+
+def test_generation_records_unsuccessful_creator_payload_before_raising(
+    tmp_path,
+):
+    from scripts.lib.agent_runtime import AgentResult
+    from scripts.lib.generation_pipeline import (
+        GenerationPipelineError,
+        run_generation_pipeline,
+    )
+
+    workspace = tmp_path / "target"
+    reports = tmp_path / "evidence"
+    workspace.mkdir()
+
+    def failed_creator(**kwargs):
+        return AgentResult(
+            role=kwargs["role"],
+            payload={"success": False, "files_created": [], "error": "failed"},
+        )
+
+    with pytest.raises(GenerationPipelineError, match="image_creator"):
+        run_generation_pipeline(
+            workspace=workspace,
+            report_dir=reports,
+            task=_task(),
+            base_sha="1" * 40,
+            executable=tmp_path / "opencode",
+            api_key="deepseek-secret",
+            agent_runner=failed_creator,
+            target_validator=lambda **_: {"status": "passed"},
+        )
+
+    assert json.loads((reports / "image-creator.json").read_text()) == {
+        "error": "failed",
+        "files_created": [],
+        "success": False,
+    }
+
+
+def test_qa_prompts_embed_candidate_snapshot_without_tool_reads(tmp_path):
+    from scripts.lib.generation_pipeline import run_generation_pipeline
+
+    workspace = tmp_path / "target"
+    reports = tmp_path / "evidence"
+    image = (
+        workspace
+        / "Database"
+        / "kvrocks"
+        / "2.16.0"
+        / "24.03-lts-sp4"
+    )
+    tests = workspace / "Database" / "kvrocks" / "tests"
+    image.mkdir(parents=True)
+    tests.mkdir(parents=True)
+    (image / "Dockerfile").write_text("FROM openEuler\n")
+    (image / "test.sh").write_text("exec ../../tests/test.sh\n")
+    (tests / "test.sh").write_text("redis-cli -p 6666 PING\n")
+    agent = _fully_approved_agent()
+
+    run_generation_pipeline(
+        workspace=workspace,
+        report_dir=reports,
+        task=_task(),
+        base_sha="1" * 40,
+        executable=tmp_path / "opencode",
+        api_key="deepseek-secret",
+        agent_runner=agent,
+        target_validator=lambda **_: {"status": "passed"},
+    )
+
+    image_qa_prompt = agent.calls[1]["prompt"]
+    testcase_qa_prompt = agent.calls[3]["prompt"]
+    assert "Embedded candidate snapshot" in image_qa_prompt
+    assert "Do not call tools" in image_qa_prompt
+    assert "Database/kvrocks/2.16.0/24.03-lts-sp4/Dockerfile" in image_qa_prompt
+    assert "FROM openEuler" in image_qa_prompt
+    assert "Embedded candidate snapshot" in testcase_qa_prompt
+    assert "Database/kvrocks/tests/test.sh" in testcase_qa_prompt
+    assert "redis-cli -p 6666 PING" in testcase_qa_prompt
 
 
 def test_generation_reports_must_be_outside_target_workspace(tmp_path):
@@ -328,6 +490,43 @@ def test_generation_reports_must_be_outside_target_workspace(tmp_path):
             agent_runner=StubAgent({}),
             target_validator=lambda **_: {},
         )
+
+
+def test_generation_rejects_unsupported_phase1_task_before_agent_call(
+    tmp_path,
+):
+    from scripts.lib.generation_pipeline import (
+        GenerationPipelineError,
+        run_generation_pipeline,
+    )
+    from scripts.lib.task_spec import TaskSpec
+
+    workspace = tmp_path / "target"
+    workspace.mkdir()
+    agent = _fully_approved_agent()
+    unsupported = TaskSpec.from_workflow_dispatch(
+        {
+            "app": "redis",
+            "version": "8.0.0",
+            "os_version": "24.03-lts-sp4",
+            "domain": "Database",
+            "source_url": "https://github.com/redis/redis/tree/8.0.0",
+        }
+    )
+
+    with pytest.raises(GenerationPipelineError, match="only supports"):
+        run_generation_pipeline(
+            workspace=workspace,
+            report_dir=tmp_path / "evidence",
+            task=unsupported,
+            base_sha="1" * 40,
+            executable=tmp_path / "opencode",
+            api_key="deepseek-secret",
+            agent_runner=agent,
+            target_validator=lambda **_: {"status": "passed"},
+        )
+
+    assert agent.calls == []
 
 
 def test_phase1_prompts_pin_kvrocks_paths_and_forbid_scope_escape():
@@ -359,3 +558,4 @@ def test_phase1_prompts_pin_kvrocks_paths_and_forbid_scope_escape():
     )
     assert "already-running container" in testcase_prompt
     assert "must not invoke Docker" in testcase_prompt
+    assert "Database/kvrocks/tests/test.sh" in testcase_prompt

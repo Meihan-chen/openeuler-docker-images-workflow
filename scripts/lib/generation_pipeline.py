@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,10 +10,10 @@ from typing import Callable, Mapping
 
 import yaml
 
-from scripts.lib.agent_runtime import AgentResult, run_agent
+from scripts.lib.agent_runtime import AgentResult, AgentRuntimeError, run_agent
 from scripts.lib.progress import log
 from scripts.lib.task_spec import TaskSpec
-from scripts.lib.target_contract import validate_generated_target
+from scripts.lib.target_contract import TargetContractError, validate_generated_target
 
 
 class GenerationPipelineError(RuntimeError):
@@ -34,8 +35,16 @@ _REQUIRED_KEYS = {
     "testcase_qa": ("status", "issues", "coverage_score", "summary"),
     "fixer": ("success", "changes"),
 }
-_QA_TIMEOUT_SECONDS = 600
+_QA_TIMEOUT_SECONDS = 180
 _DEFAULT_AGENT_TIMEOUT_SECONDS = 1800
+_QA_SNAPSHOT_MAX_CHARS = 64_000
+_PHASE1_TASK = (
+    "kvrocks",
+    "2.16.0",
+    "24.03-lts-sp4",
+    "Database",
+    "https://github.com/apache/kvrocks/tree/v2.16.0",
+)
 
 
 @dataclass(frozen=True)
@@ -50,6 +59,21 @@ def _tag(task: TaskSpec) -> str:
     return f"{task.version}-oe{os_tag}"
 
 
+def _require_phase1_task(task: TaskSpec) -> None:
+    actual = (
+        task.app,
+        task.version,
+        task.os_version,
+        task.domain,
+        task.source_url,
+    )
+    if actual != _PHASE1_TASK:
+        raise GenerationPipelineError(
+            "phase one only supports the confirmed Kvrocks 2.16.0 "
+            "TaskSpec"
+        )
+
+
 def _application_contract(task: TaskSpec) -> tuple[str, ...]:
     if task.app != "kvrocks":
         return ()
@@ -57,6 +81,15 @@ def _application_contract(task: TaskSpec) -> tuple[str, ...]:
         "- Kvrocks runtime contract: UID/GID 999, TCP 6666, writable "
         "`/var/lib/kvrocks`, Redis-protocol PING, restart persistence, "
         "configuration, LICENSE and NOTICE.",
+        "- Required shared test files are `goss.yaml`, `goss_wait.yaml`, "
+        "`test_helpers.sh`, and executable `test.sh`.",
+        "- The Dockerfile-level `test.sh` must set `EXPECTED_VERSION` to the "
+        "TaskSpec version and invoke `../../tests/test.sh`.",
+        "- Shared `tests/test.sh` must use injected `EXPECTED_VERSION` and "
+        "check exact `kvrocks --version`, `redis-cli` protocol behavior, "
+        "and UID 999 without hardcoding one version.",
+        "- `goss.yaml` must check TCP 6666, `{{.Env.EXPECTED_VERSION}}`, "
+        "and Redis PING/PONG.",
         "- The native harness executes shared tests inside an already-running "
         "container; test scripts must not invoke Docker or own container "
         "lifecycle.",
@@ -86,6 +119,7 @@ def build_role_prompt(
             f"- Dockerfile: `{image_root}/Dockerfile`",
             f"- Dockerfile test entrypoint: `{image_root}/test.sh`",
             f"- Shared tests: `{app_root}/tests/`",
+            f"- Shared test entrypoint: `{app_root}/tests/test.sh`",
             f"- Future result root: `{app_root}/results/{task.version}/{task.os_version}/`",
             f"- Meta tag: `{_tag(task)}`",
             f"- Source tag: `v{task.version}` from `{task.source_url}`",
@@ -98,6 +132,11 @@ def build_role_prompt(
     )
     parts = [instructions.rstrip(), context]
     if review is not None:
+        output_keys = (
+            "`success` and `changes`"
+            if role == "fixer"
+            else "`success` and `files_created`"
+        )
         parts.extend(
             (
                 "## QA report to resolve",
@@ -108,11 +147,83 @@ def build_role_prompt(
                 json.dumps(review, ensure_ascii=False, indent=2, sort_keys=True),
                 "```",
                 "Your final response MUST be exactly one JSON object containing "
-                "the documented `success` and `files_created` keys. Do not end "
+                f"the documented {output_keys} keys. Do not end "
                 "with prose, Markdown, a table, or commentary.",
             )
         )
     return "\n\n".join(parts) + "\n"
+
+
+def _qa_prompt(
+    *,
+    role: str,
+    workspace: Path,
+    task: TaskSpec,
+    base_sha: str,
+) -> str:
+    app_root = workspace / task.domain / task.app
+    image_root = app_root / task.version / task.os_version
+    if role == "image_qa":
+        paths = [
+            workspace / task.domain / "image-list.yml",
+            app_root / "meta.yml",
+            app_root / "README.md",
+            app_root / "doc" / "image-info.yml",
+            app_root / "doc" / "picture" / "logo.png",
+            image_root / "Dockerfile",
+        ]
+    else:
+        tests_root = app_root / "tests"
+        paths = [
+            image_root / "Dockerfile",
+            image_root / "test.sh",
+            tests_root / "goss.yaml",
+            tests_root / "goss_wait.yaml",
+            tests_root / "test_helpers.sh",
+            tests_root / "test.sh",
+        ]
+        if tests_root.is_dir():
+            paths.extend(
+                sorted(
+                    path
+                    for path in tests_root.iterdir()
+                    if path.is_file() and path not in paths
+                )
+            )
+
+    snapshot: dict[str, str] = {}
+    for path in paths:
+        relative = str(path.relative_to(workspace))
+        if not path.is_file():
+            snapshot[relative] = "<missing>"
+            continue
+        if path.suffix.lower() == ".png":
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            snapshot[relative] = (
+                f"<binary file: {path.stat().st_size} bytes, sha256:{digest}>"
+            )
+        else:
+            snapshot[relative] = path.read_text(errors="replace")
+
+    encoded_snapshot = json.dumps(
+        snapshot,
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+    )
+    if len(encoded_snapshot) > _QA_SNAPSHOT_MAX_CHARS:
+        raise GenerationPipelineError(
+            "candidate snapshot is too large for bounded QA"
+        )
+    return (
+        build_role_prompt(role=role, task=task, base_sha=base_sha)
+        + "\n## Embedded candidate snapshot\n\n"
+        + "Review only the file snapshot below. Do not call tools or read the "
+        "workspace; return the documented JSON review contract directly.\n\n"
+        + "```json\n"
+        + encoded_snapshot
+        + "\n```\n"
+    )
 
 
 def _redact(value: object, secret: str) -> object:
@@ -168,6 +279,26 @@ def _default_validator(
     return validate_generated_target(repo=workspace, task=task, base_sha=base_sha)
 
 
+def _target_gate_report(
+    *,
+    target_validator: Callable[..., Mapping[str, object]],
+    workspace: Path,
+    task: TaskSpec,
+    base_sha: str,
+) -> Mapping[str, object]:
+    try:
+        return target_validator(
+            workspace=workspace,
+            task=task,
+            base_sha=base_sha,
+        )
+    except TargetContractError as error:
+        return {
+            "status": "failed",
+            "errors": str(error).splitlines(),
+        }
+
+
 def _run(
     *,
     agent_runner: Callable[..., AgentResult],
@@ -176,20 +307,35 @@ def _run(
     api_key: str,
     role: str,
     prompt: str,
+    report_dir: Path,
 ) -> AgentResult:
-    return agent_runner(
-        executable=executable,
-        role=role,
-        prompt=prompt,
-        workspace=workspace,
-        api_key=api_key,
-        required_keys=_REQUIRED_KEYS[role],
-        timeout=(
-            _QA_TIMEOUT_SECONDS
-            if role in {"image_qa", "testcase_qa"}
-            else _DEFAULT_AGENT_TIMEOUT_SECONDS
-        ),
-    )
+    try:
+        return agent_runner(
+            executable=executable,
+            role=role,
+            prompt=prompt,
+            workspace=workspace,
+            api_key=api_key,
+            required_keys=_REQUIRED_KEYS[role],
+            timeout=(
+                _QA_TIMEOUT_SECONDS
+                if role in {"image_qa", "testcase_qa"}
+                else _DEFAULT_AGENT_TIMEOUT_SECONDS
+            ),
+        )
+    except AgentRuntimeError as error:
+        _write_report(
+            report_dir,
+            "generation-failure.json",
+            {
+                "status": "failed",
+                "stage": "agent",
+                "role": role,
+                "error": str(error),
+            },
+            api_key,
+        )
+        raise GenerationPipelineError(f"{role} Agent failed: {error}") from error
 
 
 def _review_pair(
@@ -211,7 +357,13 @@ def _review_pair(
         workspace=workspace,
         api_key=api_key,
         role=qa_role,
-        prompt=build_role_prompt(role=qa_role, task=task, base_sha=base_sha),
+        report_dir=report_dir,
+        prompt=_qa_prompt(
+            role=qa_role,
+            workspace=workspace,
+            task=task,
+            base_sha=base_sha,
+        ),
     )
     _write_report(report_dir, f"{qa_role.replace('_', '-')}-round1.json", review.payload, api_key)
     _log_review_result(
@@ -234,6 +386,7 @@ def _review_pair(
         workspace=workspace,
         api_key=api_key,
         role=creator_role,
+        report_dir=report_dir,
         prompt=build_role_prompt(
             role=creator_role,
             task=task,
@@ -241,15 +394,15 @@ def _review_pair(
             review=review.payload,
         ),
     )
-    if fixed.payload.get("success") is not True:
-        raise GenerationPipelineError(f"{creator_role} repair failed")
-    log("repair", f"PASS {creator_role} round=2")
     _write_report(
         report_dir,
         f"{creator_role.replace('_', '-')}-round2.json",
         fixed.payload,
         api_key,
     )
+    if fixed.payload.get("success") is not True:
+        raise GenerationPipelineError(f"{creator_role} repair failed")
+    log("repair", f"PASS {creator_role} round=2")
 
     log("review", f"START {qa_role} round=2")
     second = _run(
@@ -258,7 +411,13 @@ def _review_pair(
         workspace=workspace,
         api_key=api_key,
         role=qa_role,
-        prompt=build_role_prompt(role=qa_role, task=task, base_sha=base_sha),
+        report_dir=report_dir,
+        prompt=_qa_prompt(
+            role=qa_role,
+            workspace=workspace,
+            task=task,
+            base_sha=base_sha,
+        ),
     )
     _write_report(
         report_dir,
@@ -298,6 +457,7 @@ def run_generation_pipeline(
 ) -> GenerationResult:
     workspace = Path(workspace).resolve()
     report_dir = Path(report_dir).resolve()
+    _require_phase1_task(task)
     if report_dir == workspace or workspace in report_dir.parents:
         raise GenerationPipelineError(
             "Agent evidence directory must remain outside the target workspace"
@@ -313,16 +473,17 @@ def run_generation_pipeline(
         workspace=workspace,
         api_key=api_key,
         role="image_creator",
+        report_dir=report_dir,
         prompt=build_role_prompt(
             role="image_creator",
             task=task,
             base_sha=base_sha,
         ),
     )
+    _write_report(report_dir, "image-creator.json", creator.payload, api_key)
     if creator.payload.get("success") is not True:
         raise GenerationPipelineError("image_creator did not complete successfully")
     log("generate", "PASS image_creator")
-    _write_report(report_dir, "image-creator.json", creator.payload, api_key)
 
     fix_rounds = _review_pair(
         creator_role="image_creator",
@@ -343,16 +504,36 @@ def run_generation_pipeline(
         workspace=workspace,
         api_key=api_key,
         role="testcase_creator",
+        report_dir=report_dir,
         prompt=build_role_prompt(
             role="testcase_creator",
             task=task,
             base_sha=base_sha,
         ),
     )
+    _write_report(report_dir, "testcase-creator.json", testcase.payload, api_key)
     if testcase.payload.get("success") is not True:
         raise GenerationPipelineError("testcase_creator did not complete successfully")
     log("generate", "PASS testcase_creator")
-    _write_report(report_dir, "testcase-creator.json", testcase.payload, api_key)
+
+    log("gate", "START generated_precheck")
+    precheck_report = _target_gate_report(
+        target_validator=target_validator,
+        workspace=workspace,
+        task=task,
+        base_sha=base_sha,
+    )
+    _write_report(
+        report_dir,
+        "precheck-gates.json",
+        precheck_report,
+        api_key,
+    )
+    if precheck_report.get("status") != "passed":
+        raise GenerationPipelineError(
+            "deterministic target precheck did not pass"
+        )
+    log("gate", "PASS generated_precheck")
 
     fix_rounds += _review_pair(
         creator_role="testcase_creator",
@@ -367,7 +548,8 @@ def run_generation_pipeline(
     )
 
     log("gate", "START target_contract")
-    gate_report = target_validator(
+    gate_report = _target_gate_report(
+        target_validator=target_validator,
         workspace=workspace,
         task=task,
         base_sha=base_sha,
@@ -389,6 +571,7 @@ def write_smoke_candidate(
     task: TaskSpec,
 ) -> dict[str, str]:
     """Create the deterministic candidate used by the zero-AI pipeline check."""
+    _require_phase1_task(task)
     workspace = Path(workspace)
     app = workspace / task.domain / task.app
     image = app / task.version / task.os_version

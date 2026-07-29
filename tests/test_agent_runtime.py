@@ -236,6 +236,7 @@ def test_write_agent_uses_pinned_model_and_scoped_permissions(tmp_path):
     config = json.loads(call["env"]["OPENCODE_CONFIG_CONTENT"])
     assert config["permission"]["edit"] == "allow"
     assert config["permission"]["bash"] == "allow"
+    assert config["permission"]["task"] == "deny"
     assert config["permission"]["external_directory"] == "deny"
 
 
@@ -276,8 +277,10 @@ def test_qa_agent_is_read_only_and_parses_multiline_json_from_event(tmp_path):
         runner.calls[0]["env"]["OPENCODE_CONFIG_CONTENT"]
     )
     assert config["permission"]["edit"] == "deny"
+    assert config["permission"]["read"] == "deny"
     assert config["permission"]["bash"] == "deny"
     assert config["permission"]["webfetch"] == "deny"
+    assert config["permission"]["task"] == "deny"
 
 
 def test_agent_failure_and_parse_errors_never_expose_api_key(tmp_path):
@@ -324,6 +327,80 @@ def test_agent_rejects_successful_process_without_required_json_contract(tmp_pat
             workspace=workspace,
             api_key="deepseek-secret",
             required_keys=("status", "issues", "summary"),
+            runner=runner,
+        )
+
+
+def test_agent_ignores_contract_shaped_json_from_tool_output(tmp_path):
+    from scripts.lib.agent_runtime import AgentRuntimeError, run_agent
+
+    executable = _executable(tmp_path)
+    workspace = tmp_path / "target"
+    workspace.mkdir()
+    tool_event = {
+        "type": "tool_use",
+        "part": {
+            "tool": "read",
+            "state": {
+                "status": "completed",
+                "output": json.dumps(
+                    {"status": "approved", "issues": [], "summary": "not final"}
+                ),
+            },
+        },
+    }
+    text_event = {
+        "type": "text",
+        "part": {"text": "I inspected the files but have no final report."},
+    }
+    runner = RecordingRunner(
+        _completed(
+            stdout=json.dumps(tool_event)
+            + "\n"
+            + json.dumps(text_event)
+            + "\n"
+        )
+    )
+
+    with pytest.raises(AgentRuntimeError, match="JSON contract"):
+        run_agent(
+            executable=executable,
+            role="image_qa",
+            prompt="Review.",
+            workspace=workspace,
+            api_key="deepseek-secret",
+            required_keys=("status", "issues", "summary"),
+            runner=runner,
+        )
+
+
+def test_agent_rejects_invalid_contract_value_types(tmp_path):
+    from scripts.lib.agent_runtime import AgentRuntimeError, run_agent
+
+    executable = _executable(tmp_path)
+    workspace = tmp_path / "target"
+    workspace.mkdir()
+    event = {
+        "type": "text",
+        "part": {
+            "text": json.dumps(
+                {
+                    "success": "yes",
+                    "files_created": ["Database/kvrocks/meta.yml"],
+                }
+            )
+        },
+    }
+    runner = RecordingRunner(_completed(stdout=json.dumps(event) + "\n"))
+
+    with pytest.raises(AgentRuntimeError, match="success.*boolean"):
+        run_agent(
+            executable=executable,
+            role="image_creator",
+            prompt="Create.",
+            workspace=workspace,
+            api_key="deepseek-secret",
+            required_keys=("success", "files_created"),
             runner=runner,
         )
 

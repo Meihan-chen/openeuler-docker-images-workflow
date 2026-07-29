@@ -236,7 +236,6 @@ def _validate_dockerfile(
         f"ARG BASE=openeuler/openeuler:{task.os_version}": "locked openEuler base",
         "FROM ${BASE} AS builder": "multi-stage builder",
         f"ARG VERSION={task.version}": "locked application version",
-        '--branch "v${VERSION}"': "locked upstream source tag",
         "./x.py build": "official Kvrocks build command",
         "-j 4": "bounded Kvrocks build parallelism (-j 4)",
         "FROM ${BASE}": "openEuler runtime stage",
@@ -249,6 +248,17 @@ def _validate_dockerfile(
     for fragment, label in required_fragments.items():
         if fragment not in text:
             errors.append(f"Dockerfile is missing {label}: {fragment}")
+    if not any(
+        fragment in text
+        for fragment in (
+            '--branch "v${VERSION}"',
+            "--branch v${VERSION}",
+            "refs/tags/v${VERSION}.tar.gz",
+        )
+    ):
+        errors.append(
+            "Dockerfile must lock the upstream source to v${VERSION}"
+        )
     if "latest" in text.lower():
         errors.append("Dockerfile must not use an unpinned latest source or image")
     if "$(nproc)" in text or "-j$(nproc)" in text:
@@ -268,9 +278,16 @@ def _validate_tests(
     entry_text = entry.read_text()
     shared_text = (shared / "test.sh").read_text()
     goss_text = (shared / "goss.yaml").read_text()
-    if f"EXPECTED_VERSION={task.version}" not in entry_text:
+    version_assignment = re.compile(
+        rf"EXPECTED_VERSION=(?:\"{re.escape(task.version)}\"|"
+        rf"'{re.escape(task.version)}'|{re.escape(task.version)})"
+    )
+    if not version_assignment.search(entry_text):
         errors.append("Dockerfile-level test.sh must inject the expected version")
-    if "../../tests/test.sh" not in entry_text:
+    if not any(
+        fragment in entry_text
+        for fragment in ("../../tests/test.sh", "$SHARED_DIR/test.sh")
+    ):
         errors.append("Dockerfile-level test.sh must call the app-level shared tests")
     if task.version in shared_text:
         errors.append("app-level shared tests must not hardcode one application version")
@@ -294,13 +311,20 @@ def _validate_docs(
     readme = (repo / app_root / "README.md").read_text()
     for heading in (
         "# Quick reference",
-        f"# {task.app.capitalize()} | openEuler",
         "# Supported tags and respective Dockerfile links",
         "# Usage",
         "# Question and answering",
     ):
         if heading not in readme:
             errors.append(f"README.md is missing section: {heading}")
+    title = re.compile(
+        rf"^# .*{re.escape(task.app)}.* \| openEuler\s*$",
+        re.IGNORECASE | re.MULTILINE,
+    )
+    if not title.search(readme):
+        errors.append(
+            f"README.md is missing the {task.app} openEuler title"
+        )
     if f"{task.version}-oe2403sp4" not in readme:
         errors.append("README.md is missing the generated image tag")
 

@@ -65,7 +65,7 @@ def _write_valid_generated_candidate(repo):
     )
     (app / "README.md").write_text(
         "# Quick reference\n\n"
-        "# Kvrocks | openEuler\n\n"
+        "# Apache Kvrocks | openEuler\n\n"
         "# Supported tags and respective Dockerfile links\n\n"
         "2.16.0-oe2403sp4\n\n"
         "# Usage\n\n"
@@ -97,8 +97,10 @@ def _write_valid_generated_candidate(repo):
         "ARG BASE=openeuler/openeuler:24.03-lts-sp4\n"
         "FROM ${BASE} AS builder\n"
         "ARG VERSION=2.16.0\n"
-        "RUN git clone --branch \"v${VERSION}\" "
-        "https://github.com/apache/kvrocks.git /src/kvrocks && "
+        "RUN curl -fSL -o source.tar.gz "
+        "https://github.com/apache/kvrocks/archive/refs/tags/"
+        "v${VERSION}.tar.gz && mkdir -p /src/kvrocks && "
+        "tar -zxf source.tar.gz -C /src/kvrocks --strip-components=1 && "
         "cd /src/kvrocks && ./x.py build -j 4\n"
         "FROM ${BASE}\n"
         "RUN groupadd --gid 999 kvrocks && "
@@ -112,8 +114,9 @@ def _write_valid_generated_candidate(repo):
     (image / "test.sh").write_text(
         "#!/bin/bash\n"
         "set -euo pipefail\n"
-        "export EXPECTED_VERSION=2.16.0\n"
-        "exec ../../tests/test.sh \"$@\"\n"
+        'export EXPECTED_VERSION="2.16.0"\n'
+        'SHARED_DIR="$(cd "$(dirname "$0")/../../tests" && pwd)"\n'
+        'exec "$SHARED_DIR/test.sh" "$@"\n'
     )
     (tests / "goss.yaml").write_text(
         "port:\n"

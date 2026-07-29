@@ -229,28 +229,22 @@ def _scan_json(text: str) -> Iterator[object]:
         yield value
 
 
-def _nested_candidates(value: object) -> Iterator[dict[str, object]]:
-    if isinstance(value, dict):
-        yield value
-        for nested in value.values():
-            yield from _nested_candidates(nested)
-    elif isinstance(value, list):
-        for nested in value:
-            yield from _nested_candidates(nested)
-    elif isinstance(value, str):
-        for decoded in _scan_json(value):
-            yield from _nested_candidates(decoded)
-
-
 def _parse_contract(
     stdout: str,
     required_keys: tuple[str, ...],
 ) -> dict[str, object]:
     matches = []
-    decoded_values = list(_scan_json(stdout))
-    for value in decoded_values:
-        for candidate in _nested_candidates(value):
-            if all(key in candidate for key in required_keys):
+    for event in _scan_json(stdout):
+        if not isinstance(event, dict) or event.get("type") != "text":
+            continue
+        part = event.get("part")
+        if not isinstance(part, dict) or not isinstance(part.get("text"), str):
+            continue
+        for candidate in _scan_json(part["text"]):
+            if (
+                isinstance(candidate, dict)
+                and all(key in candidate for key in required_keys)
+            ):
                 matches.append(candidate)
     if not matches:
         raise AgentRuntimeError(
@@ -260,13 +254,41 @@ def _parse_contract(
     return matches[-1]
 
 
+def _validate_contract(payload: Mapping[str, object]) -> None:
+    if "success" in payload and not isinstance(payload["success"], bool):
+        raise AgentRuntimeError("Agent contract success must be a boolean")
+    for key in ("files_created", "changes", "issues"):
+        if key in payload and not isinstance(payload[key], list):
+            raise AgentRuntimeError(f"Agent contract {key} must be a list")
+    if "status" in payload and payload["status"] not in {
+        "approved",
+        "needs_fix",
+    }:
+        raise AgentRuntimeError(
+            "Agent contract status must be approved or needs_fix"
+        )
+    if "summary" in payload and not isinstance(payload["summary"], str):
+        raise AgentRuntimeError("Agent contract summary must be a string")
+    if "coverage_score" in payload:
+        score = payload["coverage_score"]
+        if (
+            isinstance(score, bool)
+            or not isinstance(score, (int, float))
+            or not 0 <= score <= 1
+        ):
+            raise AgentRuntimeError(
+                "Agent contract coverage_score must be between 0 and 1"
+            )
+
+
 def _permission_config(role: str) -> str:
     writable = role in _WRITE_ROLES
     permission = {
-        "read": "allow",
+        "read": "allow" if writable else "deny",
         "edit": "allow" if writable else "deny",
         "bash": "allow" if writable else "deny",
         "webfetch": "allow" if writable else "deny",
+        "task": "deny",
         "external_directory": "deny",
     }
     return json.dumps(
@@ -348,6 +370,7 @@ def run_agent(
         raise AgentRuntimeError(f"OpenCode {role} failed: {detail}")
     try:
         payload = _parse_contract(str(result.stdout or ""), required_keys)
+        _validate_contract(payload)
     except AgentRuntimeError as error:
         message = str(error).replace(api_key, "REDACTED")
         raise AgentRuntimeError(message) from error
