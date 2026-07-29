@@ -13,9 +13,8 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Sequence
 
 from scripts.lib.candidate_bundle import CandidateBundle, promote_candidate
-from scripts.lib.delivery_config import DeliveryConfig
 from scripts.lib.git_workspace import TargetWorkspace
-from scripts.lib.gitcode_client import GitCodeClient
+from scripts.lib.gitcode_client import DeliveryConfig, GitCodeClient
 
 
 TARGET_SOURCE = "https://gitcode.com/openeuler/openeuler-docker-images.git"

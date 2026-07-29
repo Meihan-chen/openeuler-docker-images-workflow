@@ -16,7 +16,7 @@ class RecordingTransport:
 
 
 def _delivery_config(environment="test"):
-    from scripts.lib.delivery_config import DeliveryConfig
+    from scripts.lib.gitcode_client import DeliveryConfig
 
     if environment == "test":
         return DeliveryConfig.from_mapping(
@@ -222,7 +222,7 @@ def test_api_error_and_request_repr_redact_access_token():
 
 
 def test_validate_only_cannot_create_pr_even_with_a_client():
-    from scripts.lib.delivery_config import DeliveryConfig
+    from scripts.lib.gitcode_client import DeliveryConfig
     from scripts.utils.gitcode import GitCodeClient, GitCodeWriteForbiddenError
 
     config = DeliveryConfig.from_mapping(

@@ -21,14 +21,18 @@ from scripts.lib.candidate_bundle import (
     CandidateBundleError,
     CandidatePromotionError,
 )
-from scripts.lib.delivery_config import DeliveryConfig, DeliveryConfigError
 from scripts.lib.generation_pipeline import (
     GenerationPipelineError,
     run_generation_pipeline,
     write_smoke_candidate,
 )
 from scripts.lib.git_workspace import GitWorkspaceError, TargetWorkspace
-from scripts.lib.gitcode_client import GitCodeClient, GitCodeClientError
+from scripts.lib.gitcode_client import (
+    DeliveryConfig,
+    DeliveryConfigError,
+    GitCodeClient,
+    GitCodeClientError,
+)
 from scripts.lib.issue_lifecycle import (
     IssueLifecycleError,
     run_controlled_issue_probe,

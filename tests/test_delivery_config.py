@@ -12,7 +12,7 @@ def _test_mapping(mode="validate_only"):
 
 
 def test_validate_only_forbids_gitcode_writes():
-    from scripts.lib.delivery_config import DeliveryConfig
+    from scripts.lib.gitcode_client import DeliveryConfig
 
     config = DeliveryConfig.from_mapping(_test_mapping())
 
@@ -22,7 +22,7 @@ def test_validate_only_forbids_gitcode_writes():
 
 
 def test_test_fork_pr_uses_cross_repository_head():
-    from scripts.lib.delivery_config import DeliveryConfig
+    from scripts.lib.gitcode_client import DeliveryConfig
 
     config = DeliveryConfig.from_mapping(_test_mapping("fork_pr"))
 
@@ -35,7 +35,7 @@ def test_test_fork_pr_uses_cross_repository_head():
 
 
 def test_production_direct_mode_requires_target_repository_push():
-    from scripts.lib.delivery_config import DeliveryConfig
+    from scripts.lib.gitcode_client import DeliveryConfig
 
     config = DeliveryConfig.from_mapping(
         {
@@ -64,7 +64,7 @@ def test_production_direct_mode_requires_target_repository_push():
     ],
 )
 def test_test_configuration_fails_closed(overrides):
-    from scripts.lib.delivery_config import DeliveryConfig, DeliveryConfigError
+    from scripts.lib.gitcode_client import DeliveryConfig, DeliveryConfigError
 
     raw = _test_mapping("fork_pr")
     raw.update(overrides)
@@ -74,7 +74,7 @@ def test_test_configuration_fails_closed(overrides):
 
 
 def test_production_rejects_disabled_duplicate_pr_guard():
-    from scripts.lib.delivery_config import DeliveryConfig, DeliveryConfigError
+    from scripts.lib.gitcode_client import DeliveryConfig, DeliveryConfigError
 
     raw = {
         "environment": "production",

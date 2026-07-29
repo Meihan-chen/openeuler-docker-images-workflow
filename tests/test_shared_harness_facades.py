@@ -35,12 +35,15 @@ def test_phase_one_candidate_and_delivery_modules_are_consolidated():
 
     for obsolete in (
         "candidate_promotion.py",
+        "delivery_config.py",
         "fork_pr_pipeline.py",
         "git_delivery.py",
     ):
         assert not (lib / obsolete).exists()
 
+    gitcode = (lib / "gitcode_client.py").read_text()
     assert "def promote_candidate(" in candidate
+    assert "class DeliveryConfig:" in gitcode
     assert "def deliver_validated_candidate(" in delivery
     assert "def push_working_branch(" in delivery
     assert "scripts.harness" not in delivery

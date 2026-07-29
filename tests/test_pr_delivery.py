@@ -81,7 +81,7 @@ def _candidate(tmp_path, *, testcase_qa_status="approved"):
 
 
 def _config(mode="fork_pr"):
-    from scripts.lib.delivery_config import DeliveryConfig
+    from scripts.lib.gitcode_client import DeliveryConfig
 
     return DeliveryConfig.from_mapping(
         {

@@ -8,7 +8,7 @@ BRANCH = "auto/new-image/kvrocks/2.16.0-oe2403sp4"
 
 
 def _config(mode="fork_pr"):
-    from scripts.lib.delivery_config import DeliveryConfig
+    from scripts.lib.gitcode_client import DeliveryConfig
 
     return DeliveryConfig.from_mapping(
         {
