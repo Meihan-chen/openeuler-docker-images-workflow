@@ -1,9 +1,8 @@
-"""GitCode API client (Gitea-style /api/v5).
+"""GitCode API CLI and shared safe client.
 
-Differences from GitHub API v3:
-- Auth header: `PRIVATE-TOKEN: <token>` (not `Authorization: Bearer`)
-- Git push URL: `https://oauth2:<TOKEN>@gitcode.com/...` (not `x-access-token`)
-- Default branch on openeuler/openeuler-docker-images is `master`
+The legacy CLI commands below delegate to :class:`GitCodeClient`, so all
+callers use the same access-token encoding, retry, redaction, and write-policy
+boundary.  The target repository default branch is ``master``.
 
 Usage:
     python gitcode.py pr create --title "..." --body-file /tmp/pr-body.md --head "branch"
@@ -17,11 +16,26 @@ import json
 import os
 import sys
 import urllib.parse
-import urllib.request
-import urllib.error
+from pathlib import Path
 
 
-BASE_URL = "https://api.gitcode.com/api/v5"
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+# Safe delivery code and legacy CLI users share one GitCode API boundary.
+from scripts.lib.gitcode_client import (  # noqa: E402
+    DuplicatePullRequestError,
+    GitCodeAPIError,
+    GitCodeClient,
+    GitCodeClientError,
+    GitCodeRequest,
+    GitCodeResource,
+    GitCodeResponse,
+    GitCodeWriteForbiddenError,
+)
+
+
 DEFAULT_REPO = "openeuler/openeuler-docker-images"
 
 
@@ -39,29 +53,20 @@ def _repo() -> str:
 
 
 def _api_request(method: str, path: str, body: dict | None = None) -> dict | list:
-    """Make an authenticated API request to GitCode.
-
-    Uses PRIVATE-TOKEN header (Gitea/GitCode style), not Bearer.
-    """
-    url = f"{BASE_URL}{path}"
-    headers = {
-        "PRIVATE-TOKEN": _token(),
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-    }
-
-    data = json.dumps(body).encode() if body else None
-    req = urllib.request.Request(url, data=data, headers=headers, method=method)
-
+    """Route a legacy CLI request through the shared safe client."""
+    parsed = urllib.parse.urlsplit(path)
+    params = dict(
+        urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+    )
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            payload = resp.read()
-            if not payload:
-                return {}
-            return json.loads(payload)
-    except urllib.error.HTTPError as e:
-        error_body = e.read().decode()
-        print(f"::error::GitCode API error ({e.code}): {error_body}", file=sys.stderr)
+        return GitCodeClient(token=_token())._request(
+            method,
+            parsed.path,
+            params=params,
+            json_body=body,
+        )
+    except GitCodeClientError as error:
+        print(f"::error::{error}", file=sys.stderr)
         sys.exit(1)
 
 

@@ -20,7 +20,17 @@ import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "scripts" / "utils"))
+
+# Candidate-backed PR delivery extends the existing PR composition boundary.
+from scripts.lib.pr_delivery import (  # noqa: E402
+    PRDeliveryError,
+    PullRequestContent,
+    compose_pull_request,
+    deliver_promoted_candidate,
+)
 
 
 def _target_dir() -> Path:
