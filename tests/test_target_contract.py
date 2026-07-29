@@ -254,7 +254,7 @@ def test_generated_contract_accepts_equivalent_shell_and_docker_syntax(tmp_path)
     shared_test.write_text(
         shared_test.read_text().replace(
             "kvrocks --version",
-            'BINARY=kvrocks\n"${BINARY}" --version',
+            'BINARY="${BINARY:-kvrocks}"\n"${BINARY}" --version',
         )
     )
     entry_test = app / "2.16.0" / "24.03-lts-sp4" / "test.sh"

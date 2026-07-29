@@ -338,7 +338,8 @@ def _validate_tests(
     version_command = re.search(r"\bkvrocks\s+--version\b", shared_text)
     variable_version_command = (
         re.search(
-            r"^\s*BINARY\s*=\s*(?:[\"']kvrocks[\"']|kvrocks)\s*$",
+            r"^\s*BINARY\s*=\s*(?:[\"']?kvrocks[\"']?"
+            r"|[\"']?\$\{BINARY:-kvrocks\}[\"']?)\s*$",
             shared_text,
             re.MULTILINE,
         )
