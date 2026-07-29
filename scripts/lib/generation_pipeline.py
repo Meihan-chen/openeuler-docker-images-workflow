@@ -177,6 +177,7 @@ def _qa_prompt(
     workspace: Path,
     task: TaskSpec,
     base_sha: str,
+    previous_review: Mapping[str, object] | None = None,
 ) -> str:
     app_root = workspace / task.domain / task.app
     image_root = app_root / task.version / task.os_version
@@ -232,8 +233,25 @@ def _qa_prompt(
         raise GenerationPipelineError(
             "candidate snapshot is too large for bounded QA"
         )
+    previous_findings = ""
+    if previous_review is not None:
+        previous_findings = (
+            "\n## Previous QA findings to verify\n\n"
+            "This is a new independent QA session. Verify every previous "
+            "finding against the latest candidate, then perform a complete "
+            "review for new issues.\n\n"
+            "```json\n"
+            + json.dumps(
+                {"issues": previous_review.get("issues", [])},
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n```\n"
+        )
     return (
         build_role_prompt(role=role, task=task, base_sha=base_sha)
+        + previous_findings
         + "\n## Embedded candidate snapshot\n\n"
         + "Review only the file snapshot below. Do not call tools or read the "
         "workspace; return the documented JSON review contract directly.\n\n"
@@ -434,6 +452,7 @@ def _review_pair(
             workspace=workspace,
             task=task,
             base_sha=base_sha,
+            previous_review=review.payload,
         ),
     )
     _write_report(

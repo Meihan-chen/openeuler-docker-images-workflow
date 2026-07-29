@@ -230,6 +230,8 @@ def test_write_agent_uses_pinned_model_and_scoped_permissions(tmp_path):
         "--",
         "Create the task-scoped image files.",
     ]
+    assert "--continue" not in call["command"]
+    assert "--session" not in call["command"]
     assert call["command"][-1] == "Create the task-scoped image files."
     assert call["cwd"] == workspace
     assert call["env"]["DEEPSEEK_API_KEY"] == "deepseek-secret"

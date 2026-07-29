@@ -152,6 +152,11 @@ def test_generation_runs_adversarial_pairs_and_one_target_gate(
         "Your final response MUST be exactly one JSON object"
         in agent.calls[2]["prompt"]
     )
+    assert "Previous QA findings to verify" not in agent.calls[1]["prompt"]
+    assert "Previous QA findings to verify" in agent.calls[3]["prompt"]
+    assert "fix health" in agent.calls[3]["prompt"]
+    assert "independent QA session" in agent.calls[3]["prompt"]
+    assert "complete review" in agent.calls[3]["prompt"]
     assert len(gate_calls) == 2
     assert gate_calls[0]["workspace"] == workspace
     assert sorted(path.name for path in reports.iterdir()) == [
