@@ -64,6 +64,21 @@ class Fixer:
         )
 
 
+class UnsuccessfulFixer:
+    def __call__(self, **kwargs):
+        from scripts.lib.agent_runtime import AgentResult
+
+        return AgentResult(
+            role="fixer",
+            payload={
+                "success": False,
+                "status": "insufficient_evidence",
+                "changes": [],
+                "summary": "missing root cause",
+            },
+        )
+
+
 def test_zero_repair_success_writes_nonempty_agent_artifact_directory(
     tmp_path,
 ):
@@ -218,3 +233,38 @@ def test_failed_scope_gate_stops_before_native_retry(tmp_path):
 
     assert len(validator.calls) == 1
     assert len(fixer.calls) == 1
+
+
+def test_unsuccessful_fixer_report_is_retained_before_failure(tmp_path):
+    from scripts.lib.native_repair import (
+        NativeRepairError,
+        validate_native_with_repairs,
+    )
+
+    workspace = tmp_path / "target"
+    workspace.mkdir()
+    repair_dir = tmp_path / "agents"
+
+    with pytest.raises(NativeRepairError, match="fixer failed"):
+        validate_native_with_repairs(
+            workspace=workspace,
+            task=_task(),
+            base_sha="1" * 40,
+            architecture="x86_64",
+            run_id="123456",
+            dgoss=tmp_path / "dgoss",
+            goss=tmp_path / "goss",
+            report_path=tmp_path / "x86_64.json",
+            junit_path=tmp_path / "x86_64.junit.xml",
+            repair_report_dir=repair_dir,
+            executable=tmp_path / "opencode",
+            api_key="deepseek-secret",
+            native_validator=NativeValidator(failures=1),
+            agent_runner=UnsuccessfulFixer(),
+            target_validator=lambda **_: {"status": "passed"},
+        )
+
+    report = json.loads(
+        (repair_dir / "fixer-native-x86_64-round1.json").read_text()
+    )
+    assert report["status"] == "insufficient_evidence"

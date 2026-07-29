@@ -407,6 +407,34 @@ def test_agent_rejects_invalid_contract_value_types(tmp_path):
         )
 
 
+def test_fixer_contract_allows_role_specific_status_value(tmp_path):
+    from scripts.lib.agent_runtime import run_agent
+
+    executable = _executable(tmp_path)
+    workspace = tmp_path / "target"
+    workspace.mkdir()
+    payload = {
+        "success": False,
+        "status": "insufficient_evidence",
+        "changes": [],
+        "summary": "The failure excerpt has no root cause.",
+    }
+    event = {"type": "text", "part": {"text": json.dumps(payload)}}
+    runner = RecordingRunner(_completed(stdout=json.dumps(event) + "\n"))
+
+    result = run_agent(
+        executable=executable,
+        role="fixer",
+        prompt="Diagnose the native failure.",
+        workspace=workspace,
+        api_key="deepseek-secret",
+        required_keys=("success", "changes"),
+        runner=runner,
+    )
+
+    assert result.payload == payload
+
+
 def test_shared_legacy_adversarial_entrypoint_records_disagreement_and_continues(
     tmp_path, monkeypatch
 ):

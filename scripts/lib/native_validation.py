@@ -62,7 +62,7 @@ def _run(
     result = runner(command, cwd, env or {}, timeout)
     if check and result.returncode != 0:
         detail = str(result.stderr or result.stdout or "command failed").strip()
-        raise NativeValidationError(detail[:4000])
+        raise NativeValidationError(detail[-4000:])
     return result
 
 

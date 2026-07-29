@@ -148,11 +148,6 @@ def validate_native_with_repairs(
                 api_key=api_key,
                 required_keys=("success", "changes"),
             )
-            if fixed.payload.get("success") is not True:
-                raise NativeRepairError(
-                    f"fixer failed for {architecture} round "
-                    f"{repair_attempts}"
-                )
             _write_fixer_report(
                 directory=repair_report_dir,
                 architecture=architecture,
@@ -160,6 +155,11 @@ def validate_native_with_repairs(
                 payload=fixed.payload,
                 api_key=api_key,
             )
+            if fixed.payload.get("success") is not True:
+                raise NativeRepairError(
+                    f"fixer failed for {architecture} round "
+                    f"{repair_attempts}"
+                )
             gate = target_validator(
                 workspace=workspace,
                 task=task,

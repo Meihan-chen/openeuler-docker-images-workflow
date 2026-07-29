@@ -254,13 +254,16 @@ def _parse_contract(
     return matches[-1]
 
 
-def _validate_contract(payload: Mapping[str, object]) -> None:
+def _validate_contract(
+    payload: Mapping[str, object],
+    required_keys: tuple[str, ...],
+) -> None:
     if "success" in payload and not isinstance(payload["success"], bool):
         raise AgentRuntimeError("Agent contract success must be a boolean")
     for key in ("files_created", "changes", "issues"):
         if key in payload and not isinstance(payload[key], list):
             raise AgentRuntimeError(f"Agent contract {key} must be a list")
-    if "status" in payload and payload["status"] not in {
+    if "status" in required_keys and payload["status"] not in {
         "approved",
         "needs_fix",
     }:
@@ -370,7 +373,7 @@ def run_agent(
         raise AgentRuntimeError(f"OpenCode {role} failed: {detail}")
     try:
         payload = _parse_contract(str(result.stdout or ""), required_keys)
-        _validate_contract(payload)
+        _validate_contract(payload, required_keys)
     except AgentRuntimeError as error:
         message = str(error).replace(api_key, "REDACTED")
         raise AgentRuntimeError(message) from error

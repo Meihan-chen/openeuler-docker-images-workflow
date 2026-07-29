@@ -6,8 +6,14 @@ import pytest
 
 
 class DockerRunner:
-    def __init__(self, *, fail_build=False):
+    def __init__(
+        self,
+        *,
+        fail_build=False,
+        failure_text="source compilation failed",
+    ):
         self.fail_build = fail_build
+        self.failure_text = failure_text
         self.calls = []
 
     def __call__(self, command, cwd, env, timeout):
@@ -22,7 +28,7 @@ class DockerRunner:
         )
         if self.fail_build and "build" in command:
             return subprocess.CompletedProcess(
-                command, 1, "", "source compilation failed"
+                command, 1, "", self.failure_text
             )
         if command[:3] == ["docker", "image", "inspect"]:
             return subprocess.CompletedProcess(command, 0, "sha256:image-id\n", "")
@@ -199,6 +205,40 @@ def test_native_validation_failure_still_cleans_exact_resources(tmp_path):
     assert "docker volume rm" in flattened
     assert "docker image rm" in flattened
     assert "system prune" not in flattened
+
+
+def test_native_validation_failure_keeps_root_cause_at_end_of_long_log(tmp_path):
+    from scripts.lib.native_validation import (
+        NativeValidationError,
+        validate_native_image,
+    )
+
+    workspace = _workspace(tmp_path)
+    dgoss, goss = _tools(tmp_path)
+    report_path = tmp_path / "reports" / "x86_64.json"
+    root_cause = "groupadd: GID '999' already exists"
+    runner = DockerRunner(
+        fail_build=True,
+        failure_text=("package progress\n" * 500) + root_cause,
+    )
+
+    with pytest.raises(NativeValidationError, match="GID '999'"):
+        validate_native_image(
+            workspace=workspace,
+            task=_task(),
+            architecture="x86_64",
+            run_id="123456",
+            dgoss=dgoss,
+            goss=goss,
+            report_path=report_path,
+            junit_path=tmp_path / "reports" / "x86_64.junit.xml",
+            runner=runner,
+            sleep=lambda _: None,
+        )
+
+    failure = json.loads(report_path.read_text())["failure"]
+    assert root_cause in failure
+    assert len(failure) <= 4000
 
 
 def test_native_pipeline_smoke_builds_and_runs_dgoss_without_ai(
