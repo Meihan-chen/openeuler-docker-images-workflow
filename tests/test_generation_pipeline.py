@@ -465,6 +465,8 @@ def test_qa_prompts_embed_candidate_snapshot_without_tool_reads(tmp_path):
     assert "Do not call tools" in image_qa_prompt
     assert "Database/kvrocks/2.16.0/24.03-lts-sp4/Dockerfile" in image_qa_prompt
     assert "FROM openEuler" in image_qa_prompt
+    assert "Database/kvrocks/tests/test.sh" not in image_qa_prompt
+    assert "Required shared test files" not in image_qa_prompt
     assert "Embedded candidate snapshot" in testcase_qa_prompt
     assert "Database/kvrocks/tests/test.sh" in testcase_qa_prompt
     assert "redis-cli -p 6666 PING" in testcase_qa_prompt
@@ -559,3 +561,4 @@ def test_phase1_prompts_pin_kvrocks_paths_and_forbid_scope_escape():
     assert "already-running container" in testcase_prompt
     assert "must not invoke Docker" in testcase_prompt
     assert "Database/kvrocks/tests/test.sh" in testcase_prompt
+    assert "stdout` must be a YAML list" in testcase_prompt

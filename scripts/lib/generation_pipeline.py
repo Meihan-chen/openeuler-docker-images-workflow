@@ -74,26 +74,37 @@ def _require_phase1_task(task: TaskSpec) -> None:
         )
 
 
-def _application_contract(task: TaskSpec) -> tuple[str, ...]:
+def _application_contract(task: TaskSpec, role: str) -> tuple[str, ...]:
     if task.app != "kvrocks":
         return ()
-    return (
+    contract = [
         "- Kvrocks runtime contract: UID/GID 999, TCP 6666, writable "
         "`/var/lib/kvrocks`, Redis-protocol PING, restart persistence, "
         "configuration, LICENSE and NOTICE.",
-        "- Required shared test files are `goss.yaml`, `goss_wait.yaml`, "
-        "`test_helpers.sh`, and executable `test.sh`.",
-        "- The Dockerfile-level `test.sh` must set `EXPECTED_VERSION` to the "
-        "TaskSpec version and invoke `../../tests/test.sh`.",
-        "- Shared `tests/test.sh` must use injected `EXPECTED_VERSION` and "
-        "check exact `kvrocks --version`, `redis-cli` protocol behavior, "
-        "and UID 999 without hardcoding one version.",
-        "- `goss.yaml` must check TCP 6666, `{{.Env.EXPECTED_VERSION}}`, "
-        "and Redis PING/PONG.",
-        "- The native harness executes shared tests inside an already-running "
-        "container; test scripts must not invoke Docker or own container "
-        "lifecycle.",
-    )
+    ]
+    if role in {"testcase_creator", "testcase_qa", "fixer"}:
+        contract.extend(
+            (
+                "- Required shared test files are `goss.yaml`, "
+                "`goss_wait.yaml`, `test_helpers.sh`, and executable "
+                "`test.sh`.",
+                "- The Dockerfile-level `test.sh` must set "
+                "`EXPECTED_VERSION` to the TaskSpec version and invoke "
+                "`../../tests/test.sh`.",
+                "- Shared `tests/test.sh` must use injected "
+                "`EXPECTED_VERSION` and check exact `kvrocks --version`, "
+                "`redis-cli` protocol behavior, and UID 999 without "
+                "hardcoding one version.",
+                "- `goss.yaml` must check TCP 6666, "
+                "`{{.Env.EXPECTED_VERSION}}`, and Redis PING/PONG; each "
+                "`stdout` must be a YAML list of expected output patterns, "
+                "not a `contains` mapping.",
+                "- The native harness executes shared tests inside an "
+                "already-running container; test scripts must not invoke "
+                "Docker or own container lifecycle.",
+            )
+        )
+    return tuple(contract)
 
 
 def build_role_prompt(
@@ -109,27 +120,33 @@ def build_role_prompt(
         raise GenerationPipelineError(f"prompt is unavailable for role {role}") from error
     app_root = f"{task.domain}/{task.app}"
     image_root = f"{app_root}/{task.version}/{task.os_version}"
-    context = "\n".join(
-        (
-            "## Immutable task contract",
-            "",
-            f"- Target base SHA: `{base_sha}`",
-            f"- TaskSpec: `{task.to_json()}`",
-            f"- New MDU root: `{app_root}/`",
-            f"- Dockerfile: `{image_root}/Dockerfile`",
-            f"- Dockerfile test entrypoint: `{image_root}/test.sh`",
-            f"- Shared tests: `{app_root}/tests/`",
-            f"- Shared test entrypoint: `{app_root}/tests/test.sh`",
-            f"- Future result root: `{app_root}/results/{task.version}/{task.os_version}/`",
-            f"- Meta tag: `{_tag(task)}`",
-            f"- Source tag: `v{task.version}` from `{task.source_url}`",
-            f"- Existing list allowed to change: `{task.domain}/image-list.yml`",
-            "- Do not modify any other path.",
-            "- Use the official `./x.py build` command with `-j 4`.",
-            *_application_contract(task),
-            "- Do not run git commit, git push, or any GitCode API write.",
+    contract_lines = [
+        "## Immutable task contract",
+        "",
+        f"- Target base SHA: `{base_sha}`",
+        f"- TaskSpec: `{task.to_json()}`",
+        f"- New MDU root: `{app_root}/`",
+        f"- Dockerfile: `{image_root}/Dockerfile`",
+        f"- Future result root: `{app_root}/results/{task.version}/{task.os_version}/`",
+        f"- Meta tag: `{_tag(task)}`",
+        f"- Source tag: `v{task.version}` from `{task.source_url}`",
+        f"- Existing list allowed to change: `{task.domain}/image-list.yml`",
+        "- Do not modify any other path.",
+        "- Use the official `./x.py build` command with `-j 4`.",
+    ]
+    if role in {"testcase_creator", "testcase_qa", "fixer"}:
+        contract_lines.extend(
+            (
+                f"- Dockerfile test entrypoint: `{image_root}/test.sh`",
+                f"- Shared tests: `{app_root}/tests/`",
+                f"- Shared test entrypoint: `{app_root}/tests/test.sh`",
+            )
         )
+    contract_lines.extend(_application_contract(task, role))
+    contract_lines.append(
+        "- Do not run git commit, git push, or any GitCode API write."
     )
+    context = "\n".join(contract_lines)
     parts = [instructions.rstrip(), context]
     if review is not None:
         output_keys = (

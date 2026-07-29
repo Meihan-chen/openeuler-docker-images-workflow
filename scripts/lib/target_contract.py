@@ -278,6 +278,22 @@ def _validate_tests(
     entry_text = entry.read_text()
     shared_text = (shared / "test.sh").read_text()
     goss_text = (shared / "goss.yaml").read_text()
+    try:
+        goss_data = yaml.safe_load(goss_text)
+    except yaml.YAMLError:
+        goss_data = None
+        errors.append("goss.yaml must be valid YAML")
+    if isinstance(goss_data, dict):
+        commands = goss_data.get("command", {})
+        if isinstance(commands, dict):
+            for name, assertion in commands.items():
+                if not isinstance(assertion, dict) or "stdout" not in assertion:
+                    continue
+                if not isinstance(assertion["stdout"], (str, list)):
+                    errors.append(
+                        f"goss command {name} stdout must be a string or "
+                        "YAML list"
+                    )
     version_assignment = re.compile(
         rf"EXPECTED_VERSION=(?:\"{re.escape(task.version)}\"|"
         rf"'{re.escape(task.version)}'|{re.escape(task.version)})"
@@ -297,7 +313,7 @@ def _validate_tests(
     for fragment in ("tcp:6666", ".Env.EXPECTED_VERSION", "PING", "PONG"):
         if fragment not in goss_text:
             errors.append(f"goss.yaml is missing assertion: {fragment}")
-    for script in (entry, shared / "test.sh", shared / "test_helpers.sh"):
+    for script in (entry, shared / "test.sh"):
         if not script.stat().st_mode & 0o111:
             errors.append(f"{script.relative_to(repo)} must be executable")
 

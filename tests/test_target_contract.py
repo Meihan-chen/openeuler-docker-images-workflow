@@ -147,7 +147,6 @@ def _write_valid_generated_candidate(repo):
         "test \"$(id -u)\" = 999\n"
     )
     (image / "test.sh").chmod(0o755)
-    (tests / "test_helpers.sh").chmod(0o755)
     (tests / "test.sh").chmod(0o755)
 
 
@@ -282,6 +281,38 @@ def test_contract_rejects_single_arch_meta_and_unbounded_build_parallelism(tmp_p
     message = str(error.value)
     assert "dual-architecture" in message
     assert "-j 4" in message
+
+
+def test_contract_rejects_non_list_goss_stdout_matcher(tmp_path):
+    from scripts.harness.gate_diff import (
+        TargetContractError,
+        validate_generated_target,
+    )
+
+    repo, base_sha = _repo(tmp_path)
+    _write_valid_generated_candidate(repo)
+    goss = repo / "Database" / "kvrocks" / "tests" / "goss.yaml"
+    goss.write_text(
+        "port:\n"
+        "  tcp:6666:\n"
+        "    listening: true\n"
+        "command:\n"
+        "  version:\n"
+        "    exec: kvrocks --version\n"
+        "    stdout:\n"
+        "      contains: \"{{.Env.EXPECTED_VERSION}}\"\n"
+        "  ping:\n"
+        "    exec: redis-cli -p 6666 PING\n"
+        "    stdout:\n"
+        "      contains: PONG\n"
+    )
+
+    with pytest.raises(TargetContractError, match="stdout.*YAML list"):
+        validate_generated_target(
+            repo=repo,
+            task=_task(),
+            base_sha=base_sha,
+        )
 
 
 def test_final_contract_requires_and_accepts_bounded_dual_arch_results(tmp_path):
