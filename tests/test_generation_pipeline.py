@@ -556,6 +556,9 @@ def test_phase1_prompts_pin_kvrocks_paths_and_forbid_scope_escape():
     assert "Redis-protocol PING" in prompt
     assert "restart persistence" in prompt
     assert "LICENSE and NOTICE" in prompt
+    assert "Your final response MUST be exactly one JSON object" in prompt
+    assert "documented `success` and `files_created` keys" in prompt
+    assert "tool output is not the final response" in prompt
     assert "deepseek-secret" not in prompt
 
     testcase_prompt = build_role_prompt(

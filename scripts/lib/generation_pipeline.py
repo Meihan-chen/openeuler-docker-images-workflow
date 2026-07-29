@@ -149,11 +149,6 @@ def build_role_prompt(
     context = "\n".join(contract_lines)
     parts = [instructions.rstrip(), context]
     if review is not None:
-        output_keys = (
-            "`success` and `changes`"
-            if role == "fixer"
-            else "`success` and `files_created`"
-        )
         parts.extend(
             (
                 "## QA report to resolve",
@@ -163,11 +158,24 @@ def build_role_prompt(
                 "```json",
                 json.dumps(review, ensure_ascii=False, indent=2, sort_keys=True),
                 "```",
-                "Your final response MUST be exactly one JSON object containing "
-                f"the documented {output_keys} keys. Do not end "
-                "with prose, Markdown, a table, or commentary.",
             )
         )
+    quoted_keys = [f"`{key}`" for key in _REQUIRED_KEYS[role]]
+    if len(quoted_keys) == 2:
+        output_keys = " and ".join(quoted_keys)
+    else:
+        output_keys = ", ".join(quoted_keys[:-1]) + f", and {quoted_keys[-1]}"
+    parts.extend(
+        (
+            "## Final response contract",
+            "",
+            "Do not use a shell command, `echo`, or another tool to print the "
+            "final JSON; tool output is not the final response.",
+            "Your final response MUST be exactly one JSON object containing "
+            f"the documented {output_keys} keys. Do not end with prose, "
+            "Markdown, a table, or commentary.",
+        )
+    )
     return "\n\n".join(parts) + "\n"
 
 
