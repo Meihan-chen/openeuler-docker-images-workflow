@@ -234,11 +234,9 @@ def _validate_dockerfile(
     text = path.read_text()
     required_fragments = {
         f"ARG BASE=openeuler/openeuler:{task.os_version}": "locked openEuler base",
-        "FROM ${BASE} AS builder": "multi-stage builder",
         f"ARG VERSION={task.version}": "locked application version",
         "./x.py build": "official Kvrocks build command",
         "-j 4": "bounded Kvrocks build parallelism (-j 4)",
-        "FROM ${BASE}": "openEuler runtime stage",
         "USER 999": "non-root runtime user",
         "EXPOSE 6666": "Kvrocks port",
         "HEALTHCHECK": "runtime health check",
@@ -248,13 +246,24 @@ def _validate_dockerfile(
     for fragment, label in required_fragments.items():
         if fragment not in text:
             errors.append(f"Dockerfile is missing {label}: {fragment}")
-    if not any(
-        fragment in text
-        for fragment in (
-            '--branch "v${VERSION}"',
-            "--branch v${VERSION}",
-            "refs/tags/v${VERSION}.tar.gz",
-        )
+    base_reference = r"(?:\$\{BASE\}|\$BASE)"
+    if not re.search(
+        rf"^\s*FROM\s+{base_reference}\s+AS\s+builder\s*$",
+        text,
+        re.IGNORECASE | re.MULTILINE,
+    ):
+        errors.append("Dockerfile is missing multi-stage builder using BASE")
+    if not re.search(
+        rf"^\s*FROM\s+{base_reference}\s*$",
+        text,
+        re.IGNORECASE | re.MULTILINE,
+    ):
+        errors.append("Dockerfile is missing openEuler runtime stage using BASE")
+    version_reference = r"v\$(?:\{VERSION\}|VERSION)"
+    if not re.search(
+        rf"(?:--branch|-b)\s+[\"']?{version_reference}[\"']?"
+        rf"|refs/tags/{version_reference}\.tar\.gz",
+        text,
     ):
         errors.append(
             "Dockerfile must lock the upstream source to v${VERSION}"
@@ -307,7 +316,21 @@ def _validate_tests(
         errors.append("Dockerfile-level test.sh must call the app-level shared tests")
     if task.version in shared_text:
         errors.append("app-level shared tests must not hardcode one application version")
-    for fragment in ("${EXPECTED_VERSION", "kvrocks --version", "redis-cli", "id -u"):
+    version_command = re.search(r"\bkvrocks\s+--version\b", shared_text)
+    variable_version_command = (
+        re.search(
+            r"^\s*BINARY\s*=\s*(?:[\"']kvrocks[\"']|kvrocks)\s*$",
+            shared_text,
+            re.MULTILINE,
+        )
+        and re.search(
+            r"[\"']?\$(?:\{BINARY\}|BINARY)[\"']?\s+--version\b",
+            shared_text,
+        )
+    )
+    if not (version_command or variable_version_command):
+        errors.append("shared test.sh is missing assertion: kvrocks --version")
+    for fragment in ("${EXPECTED_VERSION", "redis-cli", "id -u"):
         if fragment not in shared_text:
             errors.append(f"shared test.sh is missing assertion: {fragment}")
     for fragment in ("tcp:6666", ".Env.EXPECTED_VERSION", "PING", "PONG"):

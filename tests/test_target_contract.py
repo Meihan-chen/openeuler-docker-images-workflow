@@ -222,6 +222,44 @@ def test_valid_generated_kvrocks_candidate_passes_contract(tmp_path):
     assert report["modified_files"] == ["Database/image-list.yml"]
 
 
+def test_generated_contract_accepts_equivalent_shell_and_docker_syntax(tmp_path):
+    from scripts.harness.gate_diff import validate_generated_target
+
+    repo, base_sha = _repo(tmp_path)
+    _write_valid_generated_candidate(repo)
+    app = repo / "Database" / "kvrocks"
+    dockerfile = app / "2.16.0" / "24.03-lts-sp4" / "Dockerfile"
+    dockerfile.write_text(
+        dockerfile.read_text()
+        .replace("FROM ${BASE}", "FROM $BASE")
+        .replace(
+            "RUN curl -fSL -o source.tar.gz "
+            "https://github.com/apache/kvrocks/archive/refs/tags/"
+            "v${VERSION}.tar.gz && mkdir -p /src/kvrocks && "
+            "tar -zxf source.tar.gz -C /src/kvrocks --strip-components=1 && "
+            "cd /src/kvrocks && ./x.py build -j 4",
+            "RUN git clone --depth 1 -b v${VERSION} "
+            "https://github.com/apache/kvrocks.git /src/kvrocks && "
+            "cd /src/kvrocks && ./x.py build -j 4",
+        )
+    )
+    shared_test = app / "tests" / "test.sh"
+    shared_test.write_text(
+        shared_test.read_text().replace(
+            "kvrocks --version",
+            'BINARY=kvrocks\n"${BINARY}" --version',
+        )
+    )
+
+    report = validate_generated_target(
+        repo=repo,
+        task=_task(),
+        base_sha=base_sha,
+    )
+
+    assert report["status"] == "passed"
+
+
 def test_contract_rejects_change_outside_task_scope(tmp_path):
     from scripts.harness.gate_diff import TargetContractError, validate_generated_target
 
