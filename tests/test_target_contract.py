@@ -232,6 +232,8 @@ def test_generated_contract_accepts_equivalent_shell_and_docker_syntax(tmp_path)
     dockerfile.write_text(
         dockerfile.read_text()
         .replace("FROM ${BASE}", "FROM $BASE")
+        .replace("AS builder", "AS build")
+        .replace("--from=builder", "--from=build")
         .replace(
             "RUN curl -fSL -o source.tar.gz "
             "https://github.com/apache/kvrocks/archive/refs/tags/"

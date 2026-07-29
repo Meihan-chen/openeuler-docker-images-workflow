@@ -248,11 +248,11 @@ def _validate_dockerfile(
             errors.append(f"Dockerfile is missing {label}: {fragment}")
     base_reference = r"(?:\$\{BASE\}|\$BASE)"
     if not re.search(
-        rf"^\s*FROM\s+{base_reference}\s+AS\s+builder\s*$",
+        rf"^\s*FROM\s+{base_reference}\s+AS\s+[A-Za-z0-9_.-]+\s*$",
         text,
         re.IGNORECASE | re.MULTILINE,
     ):
-        errors.append("Dockerfile is missing multi-stage builder using BASE")
+        errors.append("Dockerfile is missing a named build stage using BASE")
     if not re.search(
         rf"^\s*FROM\s+{base_reference}\s*$",
         text,
