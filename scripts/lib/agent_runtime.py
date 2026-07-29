@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterator, Mapping, Sequence
@@ -17,6 +19,8 @@ class AgentRuntimeError(RuntimeError):
 
 
 MODEL = "deepseek/deepseek-v4-flash"
+_AGENT_HEARTBEAT_SECONDS = 60.0
+_EVENT_DETAIL_LIMIT = 1000
 _WRITE_ROLES = {"image_creator", "testcase_creator", "fixer"}
 _READ_ONLY_ROLES = {"image_qa", "testcase_qa"}
 _ROLES = _WRITE_ROLES | _READ_ONLY_ROLES
@@ -43,8 +47,21 @@ def _default_runner(
     process_env.update(env)
     role = env.get("OE_AGENT_ROLE", "unknown")
     secret = env.get("DEEPSEEK_API_KEY", "")
+    started = time.monotonic()
+    last_output = [started]
+    completed = threading.Event()
+
+    def safe_detail(value: object) -> str:
+        if isinstance(value, str):
+            detail = value
+        else:
+            detail = json.dumps(value, ensure_ascii=False, sort_keys=True)
+        if secret:
+            detail = detail.replace(secret, "REDACTED")
+        return " ".join(detail.split())[:_EVENT_DETAIL_LIMIT]
 
     def emit(line: str) -> None:
+        last_output[0] = time.monotonic()
         safe_line = line.replace(secret, "REDACTED") if secret else line
         try:
             event = json.loads(safe_line)
@@ -55,19 +72,46 @@ def _default_runner(
             return
         event_type = str(event.get("type", "unknown"))
         part = event.get("part")
-        if event_type == "tool_use" and isinstance(part, dict):
+        if event_type == "text" and isinstance(part, dict):
+            log(f"agent:{role}", f"TEXT {safe_detail(part.get('text', ''))}")
+        elif event_type == "tool_use" and isinstance(part, dict):
             tool = str(part.get("tool", "unknown"))
-            log(f"agent:{role}", f"EVENT tool={tool}")
+            log(
+                f"agent:{role}",
+                f"TOOL tool={tool} detail={safe_detail(part.get('state', part))}",
+            )
         else:
-            log(f"agent:{role}", f"EVENT {event_type}")
+            detail = safe_detail(part) if part is not None else ""
+            suffix = f" detail={detail}" if detail else ""
+            log(f"agent:{role}", f"EVENT type={event_type}{suffix}")
 
-    return run_streaming(
-        command,
-        cwd=cwd,
-        env=process_env,
-        timeout=timeout,
-        emit=emit,
+    def heartbeat() -> None:
+        while not completed.wait(_AGENT_HEARTBEAT_SECONDS):
+            now = time.monotonic()
+            log(
+                f"agent:{role}",
+                f"WAIT elapsed={now - started:.1f}s "
+                f"silence={now - last_output[0]:.1f}s "
+                f"timeout={float(timeout):g}s",
+            )
+
+    heartbeat_thread = threading.Thread(
+        target=heartbeat,
+        name=f"agent-heartbeat-{role}",
+        daemon=True,
     )
+    heartbeat_thread.start()
+    try:
+        return run_streaming(
+            command,
+            cwd=cwd,
+            env=process_env,
+            timeout=timeout,
+            emit=emit,
+        )
+    finally:
+        completed.set()
+        heartbeat_thread.join(timeout=1)
 
 
 def _scan_json(text: str) -> Iterator[object]:
@@ -175,9 +219,24 @@ def run_agent(
         "OE_AGENT_ROLE": role,
         "OPENCODE_CONFIG_CONTENT": _permission_config(role),
     }
-    log(f"agent:{role}", "START")
+    started = time.monotonic()
+    log(
+        f"agent:{role}",
+        f"START model={MODEL} timeout={float(timeout):g}s "
+        f"prompt_chars={len(prompt)}",
+    )
     result = runner(command, workspace, env, timeout)
+    elapsed = time.monotonic() - started
     if result.returncode != 0:
+        if result.returncode == 124:
+            log(f"agent:{role}", f"TIMEOUT elapsed={elapsed:.1f}s")
+            raise AgentRuntimeError(
+                f"OpenCode {role} timed out after {elapsed:.1f}s"
+            )
+        log(
+            f"agent:{role}",
+            f"FAIL exit_code={result.returncode} elapsed={elapsed:.1f}s",
+        )
         detail = str(result.stderr or result.stdout or "OpenCode failed")
         detail = detail.replace(api_key, "REDACTED").strip()[:2000]
         raise AgentRuntimeError(f"OpenCode {role} failed: {detail}")
@@ -186,5 +245,5 @@ def run_agent(
     except AgentRuntimeError as error:
         message = str(error).replace(api_key, "REDACTED")
         raise AgentRuntimeError(message) from error
-    log(f"agent:{role}", "PASS")
+    log(f"agent:{role}", f"PASS elapsed={elapsed:.1f}s")
     return AgentResult(role=role, payload=payload)

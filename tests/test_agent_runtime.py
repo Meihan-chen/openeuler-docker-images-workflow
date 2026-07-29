@@ -1,4 +1,5 @@
 import json
+import re
 import subprocess
 
 import pytest
@@ -59,11 +60,67 @@ def test_default_agent_runner_streams_safe_progress(tmp_path, capsys):
 
     output = capsys.readouterr().out
     assert result.payload["success"] is True
-    assert "[flow][agent:image_creator] START" in output
-    assert "[flow][agent:image_creator] EVENT text" in output
-    assert "[flow][agent:image_creator] PASS" in output
+    assert (
+        "[flow][agent:image_creator] START "
+        "model=deepseek/deepseek-v4-flash timeout=1800s"
+    ) in output
+    assert "[flow][agent:image_creator] TEXT " in output
+    assert '"files_created": ["meta.yml"]' in output
+    assert re.search(
+        r"\[flow\]\[agent:image_creator\] PASS elapsed=\d+\.\d+s",
+        output,
+    )
     assert "deepseek-secret" not in output
-    assert payload not in output
+
+
+def test_default_agent_runner_logs_heartbeat_before_timeout(
+    tmp_path,
+    capsys,
+    monkeypatch,
+):
+    from scripts.lib import agent_runtime
+
+    executable = tmp_path / "opencode"
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import time\n"
+        "time.sleep(1)\n"
+    )
+    executable.chmod(0o755)
+    workspace = tmp_path / "target"
+    workspace.mkdir()
+    monkeypatch.setattr(
+        agent_runtime,
+        "_AGENT_HEARTBEAT_SECONDS",
+        0.02,
+        raising=False,
+    )
+
+    with pytest.raises(
+        agent_runtime.AgentRuntimeError,
+        match="timed out",
+    ):
+        agent_runtime.run_agent(
+            executable=executable,
+            role="image_qa",
+            prompt="Review without exposing deepseek-secret.",
+            workspace=workspace,
+            api_key="deepseek-secret",
+            required_keys=("status", "issues", "summary"),
+            timeout=0.08,
+        )
+
+    output = capsys.readouterr().out
+    assert re.search(
+        r"\[flow\]\[agent:image_qa\] WAIT "
+        r"elapsed=\d+\.\d+s silence=\d+\.\d+s timeout=0.08s",
+        output,
+    )
+    assert re.search(
+        r"\[flow\]\[agent:image_qa\] TIMEOUT elapsed=\d+\.\d+s",
+        output,
+    )
+    assert "deepseek-secret" not in output
 
 
 def test_write_agent_uses_pinned_model_and_scoped_permissions(tmp_path):
