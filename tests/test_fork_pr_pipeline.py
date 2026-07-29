@@ -92,7 +92,7 @@ class Resource:
 
 
 def test_replays_exact_validated_base_then_promotes_and_delivers(tmp_path):
-    from scripts.lib.fork_pr_pipeline import deliver_validated_candidate
+    from scripts.lib.pr_delivery import deliver_validated_candidate
 
     bundle = _candidate(tmp_path)
     events = []
@@ -138,7 +138,7 @@ def test_replays_exact_validated_base_then_promotes_and_delivers(tmp_path):
 
 def test_wrong_validated_run_stops_before_clone_or_delivery(tmp_path):
     from scripts.lib.candidate_bundle import CandidateBundleError
-    from scripts.lib.fork_pr_pipeline import deliver_validated_candidate
+    from scripts.lib.pr_delivery import deliver_validated_candidate
 
     bundle = _candidate(tmp_path)
     events = []
@@ -162,7 +162,7 @@ def test_wrong_validated_run_stops_before_clone_or_delivery(tmp_path):
 
 
 def test_changed_target_master_stops_before_promotion_or_delivery(tmp_path):
-    from scripts.lib.fork_pr_pipeline import (
+    from scripts.lib.pr_delivery import (
         ForkPRPipelineError,
         deliver_validated_candidate,
     )
@@ -192,7 +192,7 @@ def test_changed_target_master_stops_before_promotion_or_delivery(tmp_path):
 
 
 def test_validate_only_and_missing_token_stop_before_clone(tmp_path):
-    from scripts.lib.fork_pr_pipeline import (
+    from scripts.lib.pr_delivery import (
         ForkPRPipelineError,
         deliver_validated_candidate,
     )

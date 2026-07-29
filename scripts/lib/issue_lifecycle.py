@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from scripts.lib.task_spec import TaskSpec
-from scripts.utils.gitcode import GitCodeResource
+from scripts.lib.gitcode_client import GitCodeResource
 
 
 class IssueLifecycleError(RuntimeError):

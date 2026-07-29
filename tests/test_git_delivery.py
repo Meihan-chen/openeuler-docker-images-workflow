@@ -51,7 +51,7 @@ def _result(returncode=0, stdout="", stderr=""):
 
 
 def test_push_uses_credential_free_url_askpass_and_empty_branch_lease(tmp_path):
-    from scripts.lib.git_delivery import push_working_branch
+    from scripts.lib.pr_delivery import push_working_branch
 
     token = "token-must-not-enter-command"
     runner = RecordingGitRunner([_result(), _result()])
@@ -92,7 +92,7 @@ def test_push_uses_credential_free_url_askpass_and_empty_branch_lease(tmp_path):
 
 
 def test_push_uses_exact_observed_sha_as_force_with_lease(tmp_path):
-    from scripts.lib.git_delivery import push_working_branch
+    from scripts.lib.pr_delivery import push_working_branch
 
     old_sha = "1" * 40
     runner = RecordingGitRunner(
@@ -119,7 +119,7 @@ def test_push_uses_exact_observed_sha_as_force_with_lease(tmp_path):
 
 
 def test_validate_only_and_unsafe_branch_refuse_before_git_runs(tmp_path):
-    from scripts.lib.git_delivery import GitDeliveryError, push_working_branch
+    from scripts.lib.pr_delivery import GitDeliveryError, push_working_branch
 
     runner = RecordingGitRunner([])
 
@@ -146,7 +146,7 @@ def test_validate_only_and_unsafe_branch_refuse_before_git_runs(tmp_path):
 
 
 def test_cleanup_deletes_only_exact_observed_auto_branch(tmp_path):
-    from scripts.lib.git_delivery import delete_working_branch
+    from scripts.lib.pr_delivery import delete_working_branch
 
     old_sha = "a" * 40
     runner = RecordingGitRunner(
@@ -175,7 +175,7 @@ def test_cleanup_deletes_only_exact_observed_auto_branch(tmp_path):
 
 
 def test_cleanup_is_noop_when_exact_branch_does_not_exist(tmp_path):
-    from scripts.lib.git_delivery import delete_working_branch
+    from scripts.lib.pr_delivery import delete_working_branch
 
     runner = RecordingGitRunner([_result(stdout="")])
 
@@ -193,7 +193,7 @@ def test_cleanup_is_noop_when_exact_branch_does_not_exist(tmp_path):
 
 
 def test_git_failure_redacts_token_from_error(tmp_path):
-    from scripts.lib.git_delivery import GitDeliveryError, push_working_branch
+    from scripts.lib.pr_delivery import GitDeliveryError, push_working_branch
 
     token = "never-show-this-token"
     runner = RecordingGitRunner(

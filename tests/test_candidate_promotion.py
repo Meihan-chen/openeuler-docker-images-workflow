@@ -79,7 +79,7 @@ def _candidate(tmp_path, upstream):
 def test_promotes_exact_candidate_to_one_bot_commit_on_deterministic_branch(
     tmp_path,
 ):
-    from scripts.lib.candidate_promotion import promote_candidate
+    from scripts.lib.candidate_bundle import promote_candidate
     from scripts.lib.git_workspace import TargetWorkspace
 
     upstream = _upstream(tmp_path)
@@ -121,7 +121,7 @@ def test_promotes_exact_candidate_to_one_bot_commit_on_deterministic_branch(
 
 def test_run_id_mismatch_fails_before_patch_is_applied(tmp_path):
     from scripts.lib.candidate_bundle import CandidateBundleError
-    from scripts.lib.candidate_promotion import promote_candidate
+    from scripts.lib.candidate_bundle import promote_candidate
     from scripts.lib.git_workspace import TargetWorkspace
 
     upstream = _upstream(tmp_path)
@@ -144,7 +144,7 @@ def test_run_id_mismatch_fails_before_patch_is_applied(tmp_path):
 
 
 def test_changed_target_base_requires_new_validation_run(tmp_path):
-    from scripts.lib.candidate_promotion import (
+    from scripts.lib.candidate_bundle import (
         CandidatePromotionError,
         promote_candidate,
     )

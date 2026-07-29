@@ -26,9 +26,13 @@ sys.path.insert(0, str(PROJECT_ROOT / "scripts" / "utils"))
 
 # Candidate-backed PR delivery extends the existing PR composition boundary.
 from scripts.lib.pr_delivery import (  # noqa: E402
+    ForkPRPipelineError,
+    GitDeliveryError,
     PRDeliveryError,
     PullRequestContent,
+    TARGET_SOURCE,
     compose_pull_request,
+    deliver_validated_candidate,
     deliver_promoted_candidate,
 )
 

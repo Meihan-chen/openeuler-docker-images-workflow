@@ -28,6 +28,25 @@ def test_phase_one_has_one_public_cli_without_legacy_delegation():
     assert "phase1-generate" not in run
 
 
+def test_phase_one_candidate_and_delivery_modules_are_consolidated():
+    lib = ROOT / "scripts" / "lib"
+    candidate = (lib / "candidate_bundle.py").read_text()
+    delivery = (lib / "pr_delivery.py").read_text()
+
+    for obsolete in (
+        "candidate_promotion.py",
+        "fork_pr_pipeline.py",
+        "git_delivery.py",
+    ):
+        assert not (lib / obsolete).exists()
+
+    assert "def promote_candidate(" in candidate
+    assert "def deliver_validated_candidate(" in delivery
+    assert "def push_working_branch(" in delivery
+    assert "scripts.harness" not in delivery
+    assert "scripts.utils" not in delivery
+
+
 def test_agent_execution_is_exposed_through_flow_orchestrator():
     workflow = (
         ROOT / ".github" / "workflows" / "new-image.yml"
