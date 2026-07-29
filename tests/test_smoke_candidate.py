@@ -60,11 +60,15 @@ def test_deterministic_smoke_candidate_passes_the_real_target_contract(
     assert result["status"] == "passed"
     assert result["mode"] == "pipeline_smoke"
     assert gate["status"] == "passed"
-    assert (
+    dockerfile = (
         repo
         / "Database"
         / "kvrocks"
         / "2.16.0"
         / "24.03-lts-sp4"
         / "Dockerfile"
-    ).is_file()
+    )
+    assert dockerfile.is_file()
+    dockerfile_text = dockerfile.read_text()
+    assert "dnf install -y redis" in dockerfile_text
+    assert "dnf clean all" in dockerfile_text

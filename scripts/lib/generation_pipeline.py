@@ -662,6 +662,7 @@ def write_smoke_candidate(
         'RUN git clone --depth 1 --branch "v${VERSION}" '
         "https://github.com/apache/kvrocks.git . && ./x.py build -j 4\n"
         "FROM ${BASE}\n"
+        "RUN dnf install -y redis && dnf clean all\n"
         "RUN groupadd --gid 999 kvrocks && "
         "useradd --uid 999 --gid kvrocks kvrocks && "
         "mkdir -p /var/lib/kvrocks && "

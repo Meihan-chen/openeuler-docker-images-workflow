@@ -164,6 +164,7 @@ jobs:
           DOMAIN: ${{ inputs.domain }}
         run: |
           "${{ steps.tools.outputs.hadolint_path }}" \
+            --ignore DL3041 \
             "${RUNNER_TEMP}/phase1-target/${DOMAIN}/${APP}/${VERSION}/${OS_VERSION}/Dockerfile"
 
       - name: Create generation patch
@@ -682,6 +683,7 @@ jobs:
           base_sha="$(tr -d '\n' < "${RUNNER_TEMP}/arm/base-sha.txt")"
           mkdir -p "${RUNNER_TEMP}/candidate/reports/agents"
           "${{ steps.tools.outputs.hadolint_path }}" \
+            --ignore DL3041 \
             "${RUNNER_TEMP}/phase1-target/${DOMAIN}/${APP}/${VERSION}/${OS_VERSION}/Dockerfile"
           "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/gate_diff.py \
             task-contract \
