@@ -34,6 +34,8 @@ _REQUIRED_KEYS = {
     "testcase_qa": ("status", "issues", "coverage_score", "summary"),
     "fixer": ("success", "changes"),
 }
+_QA_TIMEOUT_SECONDS = 600
+_DEFAULT_AGENT_TIMEOUT_SECONDS = 1800
 
 
 @dataclass(frozen=True)
@@ -179,6 +181,11 @@ def _run(
         workspace=workspace,
         api_key=api_key,
         required_keys=_REQUIRED_KEYS[role],
+        timeout=(
+            _QA_TIMEOUT_SECONDS
+            if role in {"image_qa", "testcase_qa"}
+            else _DEFAULT_AGENT_TIMEOUT_SECONDS
+        ),
     )
 
 

@@ -44,7 +44,12 @@ def test_default_agent_runner_streams_safe_progress(tmp_path, capsys):
     executable = tmp_path / "opencode"
     payload = json.dumps({"success": True, "files_created": ["meta.yml"]})
     event = json.dumps({"type": "text", "part": {"text": payload}})
-    executable.write_text(f"#!/bin/sh\nprintf '%s\\n' '{event}'\n")
+    step = json.dumps({"type": "step_start", "part": {"id": "step-1"}})
+    executable.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' '{step}'\n"
+        f"printf '%s\\n' '{event}'\n"
+    )
     executable.chmod(0o755)
     workspace = tmp_path / "target"
     workspace.mkdir()
@@ -70,6 +75,7 @@ def test_default_agent_runner_streams_safe_progress(tmp_path, capsys):
         r"\[flow\]\[agent:image_creator\] PASS elapsed=\d+\.\d+s",
         output,
     )
+    assert "EVENT" not in output
     assert "deepseek-secret" not in output
 
 

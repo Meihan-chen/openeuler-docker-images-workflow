@@ -80,10 +80,6 @@ def _default_runner(
                 f"agent:{role}",
                 f"TOOL tool={tool} detail={safe_detail(part.get('state', part))}",
             )
-        else:
-            detail = safe_detail(part) if part is not None else ""
-            suffix = f" detail={detail}" if detail else ""
-            log(f"agent:{role}", f"EVENT type={event_type}{suffix}")
 
     def heartbeat() -> None:
         while not completed.wait(_AGENT_HEARTBEAT_SECONDS):

@@ -137,6 +137,14 @@ def test_generation_runs_adversarial_pairs_and_one_target_gate(
         "testcase_creator",
         "testcase_qa",
     ]
+    assert [call["timeout"] for call in agent.calls] == [
+        1800,
+        600,
+        1800,
+        600,
+        1800,
+        600,
+    ]
     assert "QA report to resolve" in agent.calls[2]["prompt"]
     assert "fix health" in agent.calls[2]["prompt"]
     assert "Only fix the reported QA issues" in agent.calls[2]["prompt"]
