@@ -8,7 +8,7 @@ GIB = 1024**3
 
 
 def _snapshot(tmp_path):
-    from scripts.lib.runner_preflight import RunnerSnapshot
+    from scripts.lib.toolchain import RunnerSnapshot
 
     tools = {}
     for name in ("dgoss", "goss", "hadolint", "jq", "opencode"):
@@ -28,7 +28,7 @@ def _snapshot(tmp_path):
 
 
 def test_preflight_accepts_ready_native_runner(tmp_path):
-    from scripts.lib.runner_preflight import evaluate_preflight
+    from scripts.lib.toolchain import evaluate_preflight
 
     report = evaluate_preflight(_snapshot(tmp_path), expected_arch="x86_64")
 
@@ -38,7 +38,7 @@ def test_preflight_accepts_ready_native_runner(tmp_path):
 
 
 def test_preflight_rejects_cross_architecture_runner(tmp_path):
-    from scripts.lib.runner_preflight import PreflightError, evaluate_preflight
+    from scripts.lib.toolchain import PreflightError, evaluate_preflight
 
     snapshot = _snapshot(tmp_path)
 
@@ -47,7 +47,7 @@ def test_preflight_rejects_cross_architecture_runner(tmp_path):
 
 
 def test_preflight_reports_all_missing_capabilities(tmp_path):
-    from scripts.lib.runner_preflight import (
+    from scripts.lib.toolchain import (
         PreflightError,
         RunnerSnapshot,
         evaluate_preflight,
@@ -83,7 +83,7 @@ def test_preflight_reports_all_missing_capabilities(tmp_path):
 
 
 def test_preflight_rejects_non_executable_tool(tmp_path):
-    from scripts.lib.runner_preflight import PreflightError, evaluate_preflight
+    from scripts.lib.toolchain import PreflightError, evaluate_preflight
 
     snapshot = _snapshot(tmp_path)
     snapshot.tools["goss"].chmod(0o644)
@@ -93,7 +93,7 @@ def test_preflight_rejects_non_executable_tool(tmp_path):
 
 
 def test_parse_meminfo_uses_memavailable():
-    from scripts.lib.runner_preflight import parse_meminfo
+    from scripts.lib.toolchain import parse_meminfo
 
     value = parse_meminfo(
         """MemTotal:       16384000 kB
@@ -106,7 +106,7 @@ MemAvailable:   14680064 kB
 
 
 def test_load_tool_paths_reads_bootstrap_output(tmp_path):
-    from scripts.lib.runner_preflight import load_tool_paths
+    from scripts.lib.toolchain import load_tool_paths
 
     tool = tmp_path / "goss"
     payload = tmp_path / "toolchain.json"

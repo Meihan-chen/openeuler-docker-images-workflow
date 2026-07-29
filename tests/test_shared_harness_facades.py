@@ -47,6 +47,17 @@ def test_phase_one_candidate_and_delivery_modules_are_consolidated():
     assert "scripts.utils" not in delivery
 
 
+def test_runner_and_smoke_helpers_live_with_their_owning_pipeline():
+    lib = ROOT / "scripts" / "lib"
+    toolchain = (lib / "toolchain.py").read_text()
+    generation = (lib / "generation_pipeline.py").read_text()
+
+    assert not (lib / "runner_preflight.py").exists()
+    assert not (lib / "smoke_candidate.py").exists()
+    assert "def evaluate_preflight(" in toolchain
+    assert "def write_smoke_candidate(" in generation
+
+
 def test_agent_execution_is_exposed_through_flow_orchestrator():
     workflow = (
         ROOT / ".github" / "workflows" / "new-image.yml"

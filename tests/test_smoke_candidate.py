@@ -45,7 +45,7 @@ def _target(tmp_path):
 def test_deterministic_smoke_candidate_passes_the_real_target_contract(
     tmp_path,
 ):
-    from scripts.lib.smoke_candidate import write_smoke_candidate
+    from scripts.lib.generation_pipeline import write_smoke_candidate
     from scripts.lib.target_contract import validate_generated_target
 
     repo, base_sha = _target(tmp_path)

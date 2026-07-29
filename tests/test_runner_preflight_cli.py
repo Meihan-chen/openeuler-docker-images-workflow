@@ -49,7 +49,7 @@ def test_collect_snapshot_reads_linux_runner_capabilities(tmp_path):
 
 def test_preflight_cli_writes_passed_report(tmp_path, monkeypatch):
     from scripts import runner_preflight
-    from scripts.lib.runner_preflight import RunnerSnapshot
+    from scripts.lib.toolchain import RunnerSnapshot
 
     tools = {}
     for name in ("dgoss", "goss", "hadolint", "jq", "opencode"):

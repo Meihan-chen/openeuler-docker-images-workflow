@@ -25,6 +25,7 @@ from scripts.lib.delivery_config import DeliveryConfig, DeliveryConfigError
 from scripts.lib.generation_pipeline import (
     GenerationPipelineError,
     run_generation_pipeline,
+    write_smoke_candidate,
 )
 from scripts.lib.git_workspace import GitWorkspaceError, TargetWorkspace
 from scripts.lib.gitcode_client import GitCodeClient, GitCodeClientError
@@ -48,7 +49,6 @@ from scripts.lib.pr_delivery import (
     TARGET_SOURCE,
     deliver_validated_candidate,
 )
-from scripts.lib.smoke_candidate import write_smoke_candidate
 from scripts.lib.task_spec import TaskSpec, TaskSpecError
 from scripts.lib.target_contract import (
     TargetContractError,
