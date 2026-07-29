@@ -81,6 +81,10 @@ def _application_contract(task: TaskSpec, role: str) -> tuple[str, ...]:
         "- Kvrocks runtime contract: UID/GID 999, TCP 6666, writable "
         "`/var/lib/kvrocks`, Redis-protocol PING, restart persistence, "
         "configuration, LICENSE and NOTICE.",
+        "- The runtime image must install the openEuler `redis` package, "
+        "start Kvrocks with `ENTRYPOINT`, and run "
+        "`redis-cli -p 6666 PING` in `HEALTHCHECK`; `/dev/tcp` probes or "
+        "CMD-only startup do not satisfy this phase-one contract.",
     ]
     if role in {"testcase_creator", "testcase_qa", "fixer"}:
         contract.extend(
@@ -93,7 +97,7 @@ def _application_contract(task: TaskSpec, role: str) -> tuple[str, ...]:
                 "`../../tests/test.sh`.",
                 "- Shared `tests/test.sh` must use injected "
                 "`EXPECTED_VERSION` and check exact `kvrocks --version`, "
-                "`redis-cli` protocol behavior, and UID 999 without "
+                "`redis-cli -p 6666 PING` behavior, and UID 999 without "
                 "hardcoding one version.",
                 "- `goss.yaml` must check TCP 6666, "
                 "`{{.Env.EXPECTED_VERSION}}`, and Redis PING/PONG; each "

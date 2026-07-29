@@ -554,6 +554,9 @@ def test_phase1_prompts_pin_kvrocks_paths_and_forbid_scope_escape():
     assert "UID/GID 999" in prompt
     assert "TCP 6666" in prompt
     assert "Redis-protocol PING" in prompt
+    assert "ENTRYPOINT" in prompt
+    assert "redis-cli -p 6666 PING" in prompt
+    assert "/dev/tcp" in prompt
     assert "restart persistence" in prompt
     assert "LICENSE and NOTICE" in prompt
     assert "Your final response MUST be exactly one JSON object" in prompt
@@ -570,3 +573,4 @@ def test_phase1_prompts_pin_kvrocks_paths_and_forbid_scope_escape():
     assert "must not invoke Docker" in testcase_prompt
     assert "Database/kvrocks/tests/test.sh" in testcase_prompt
     assert "stdout` must be a YAML list" in testcase_prompt
+    assert "redis-cli -p 6666 PING" in testcase_prompt
