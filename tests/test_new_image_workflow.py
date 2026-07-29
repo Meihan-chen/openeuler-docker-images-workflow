@@ -137,10 +137,24 @@ def test_resume_operations_reuse_failed_stage_artifacts():
     assert "inputs.source_run_id" in package
     assert "phase1-resume-candidate-" in package
     assert WORKFLOW_PATH.read_text().count(
+        "phase1-native-repair"
+    ) == 2
+    assert WORKFLOW_PATH.read_text().count(
+        "phase1-native-validate"
+    ) == 1
+    assert WORKFLOW_PATH.read_text().count(
         "Enforce resumed candidate gate"
-    ) == 3
+    ) == 1
     assert "steps.tools.outputs.jq_path" in package
     assert "aarch64.json" in revalidate
+    assert ".checks == {" in revalidate
+    for check in (
+        "native_build",
+        "dgoss",
+        "shared_tests",
+        "restart_persistence",
+    ):
+        assert f'"{check}": true' in WORKFLOW_PATH.read_text()
     assert '.status == "passed"' in WORKFLOW_PATH.read_text()
     assert "resume-provenance.json" in package
     assert '"promotable": false' in WORKFLOW_PATH.read_text()

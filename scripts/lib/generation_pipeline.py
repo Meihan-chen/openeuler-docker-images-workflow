@@ -142,6 +142,10 @@ def _application_contract(task: TaskSpec, role: str) -> tuple[str, ...]:
                 "`{{.Env.EXPECTED_VERSION}}`, and Redis PING/PONG; each "
                 "`stdout` must be a YAML list of expected output patterns, "
                 "not a `contains` mapping.",
+                "- `goss_wait.yaml` must use the Goss `port` resource for "
+                "`tcp:6666` with `listening: true`; do not put a `timeout` "
+                "field on the port resource because dGoss owns the retry "
+                "timeout.",
                 "- The native harness executes shared tests inside an "
                 "already-running container; test scripts must not invoke "
                 "Docker or own container lifecycle.",

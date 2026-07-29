@@ -139,6 +139,7 @@ def test_native_validation_uses_dedicated_builder_and_full_runtime_checks(
         workspace / "Database" / "kvrocks" / "tests"
     )
     assert dgoss_call["env"]["GOSS_FILE"] == "goss.yaml"
+    assert dgoss_call["env"]["GOSS_WAIT_OPTS"] == "-r 30s -s 1s"
     assert "GOSS_WAIT_FILE" not in dgoss_call["env"]
     assert dgoss_call["command"][-3:] == [
         "--env",

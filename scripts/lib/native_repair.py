@@ -13,8 +13,12 @@ from scripts.lib.native_validation import (
     NativeValidationError,
     validate_native_image,
 )
+from scripts.lib.progress import log
 from scripts.lib.task_spec import TaskSpec
-from scripts.lib.target_contract import validate_generated_target
+from scripts.lib.target_contract import (
+    TargetContractError,
+    validate_generated_target,
+)
 
 
 class NativeRepairError(RuntimeError):
@@ -54,9 +58,12 @@ def _write_fixer_report(
     architecture: str,
     round_number: int,
     payload: Mapping[str, object],
+    review: Mapping[str, object],
     api_key: str,
 ) -> None:
-    safe_payload = _redact(dict(payload), api_key)
+    safe_payload = dict(payload)
+    safe_payload["_input_review"] = dict(review)
+    safe_payload = _redact(safe_payload, api_key)
     path = directory / (
         f"fixer-native-{architecture}-round{round_number}.json"
     )
@@ -64,6 +71,26 @@ def _write_fixer_report(
         json.dumps(safe_payload, ensure_ascii=False, indent=2, sort_keys=True)
         + "\n"
     )
+
+
+def _target_gate_report(
+    *,
+    target_validator: Callable[..., Mapping[str, object]],
+    workspace: Path,
+    task: TaskSpec,
+    base_sha: str,
+) -> Mapping[str, object]:
+    try:
+        return target_validator(
+            repo=workspace,
+            task=task,
+            base_sha=base_sha,
+        )
+    except (TargetContractError, UnicodeError) as error:
+        return {
+            "status": "failed",
+            "errors": str(error).splitlines(),
+        }
 
 
 def validate_native_with_repairs(
@@ -106,35 +133,86 @@ def validate_native_with_repairs(
     repair_report_dir.mkdir(parents=True, exist_ok=True)
 
     repair_attempts = 0
+    initial_gate = _target_gate_report(
+        target_validator=target_validator,
+        workspace=workspace,
+        task=task,
+        base_sha=base_sha,
+    )
+    pending_review: Mapping[str, object] | None = None
+    if initial_gate.get("status") != "passed":
+        pending_review = {
+            "kind": "deterministic_target_contract",
+            "architecture": architecture,
+            "gate": initial_gate,
+        }
+    native_failure: object = None
     while True:
-        try:
-            report = native_validator(
-                workspace=workspace,
-                task=task,
-                architecture=architecture,
-                run_id=run_id,
-                dgoss=dgoss,
-                goss=goss,
-                report_path=report_path,
-                junit_path=junit_path,
-            )
-        except NativeValidationError as error:
+        if pending_review is None:
+            try:
+                report = native_validator(
+                    workspace=workspace,
+                    task=task,
+                    architecture=architecture,
+                    run_id=run_id,
+                    dgoss=dgoss,
+                    goss=goss,
+                    report_path=report_path,
+                    junit_path=junit_path,
+                )
+            except NativeValidationError as error:
+                native_failure = _redact(
+                    _load_failure_report(report_path, error),
+                    api_key,
+                )
+                pending_review = {
+                    "kind": "native_validation_failure",
+                    "architecture": architecture,
+                    "report": native_failure,
+                }
+            else:
+                if report.get("status") != "passed":
+                    raise NativeRepairError(
+                        "native validator returned without passed status"
+                    )
+                summary = {
+                    "architecture": architecture,
+                    "repair_attempts": repair_attempts,
+                    "status": "passed",
+                }
+                (
+                    repair_report_dir
+                    / f"native-repair-{architecture}.json"
+                ).write_text(
+                    json.dumps(
+                        summary,
+                        ensure_ascii=False,
+                        indent=2,
+                        sort_keys=True,
+                    )
+                    + "\n"
+                )
+                return NativeRepairResult(
+                    status="passed",
+                    repair_attempts=repair_attempts,
+                    report=report,
+                )
+
+        if pending_review is not None:
             if repair_attempts == max_repairs:
+                kind = str(pending_review.get("kind", "native validation"))
                 raise NativeRepairError(
-                    f"native validation failed after {max_repairs} "
-                    "repair attempts"
-                ) from error
+                    f"{kind.replace('_', ' ')} failed after "
+                    f"{max_repairs} repair attempts"
+                )
             repair_attempts += 1
-            failure = _redact(
-                _load_failure_report(report_path, error),
-                api_key,
+            review = dict(pending_review)
+            review["repair_round"] = repair_attempts
+            log(
+                f"native:{architecture}",
+                f"START fixer round={repair_attempts} "
+                f"reason={review['kind']}",
             )
-            review = {
-                "kind": "native_validation_failure",
-                "architecture": architecture,
-                "repair_round": repair_attempts,
-                "report": failure,
-            }
             fixed = agent_runner(
                 executable=executable,
                 role="fixer",
@@ -153,6 +231,7 @@ def validate_native_with_repairs(
                 architecture=architecture,
                 round_number=repair_attempts,
                 payload=fixed.payload,
+                review=review,
                 api_key=api_key,
             )
             if fixed.payload.get("success") is not True:
@@ -160,37 +239,27 @@ def validate_native_with_repairs(
                     f"fixer failed for {architecture} round "
                     f"{repair_attempts}"
                 )
-            gate = target_validator(
-                repo=workspace,
+            gate = _target_gate_report(
+                target_validator=target_validator,
+                workspace=workspace,
                 task=task,
                 base_sha=base_sha,
             )
             if gate.get("status") != "passed":
-                raise NativeRepairError(
-                    "fixer changes failed the deterministic target contract"
+                log(
+                    f"native:{architecture}",
+                    f"NEEDS_FIX target_contract round={repair_attempts}",
                 )
+                pending_review = {
+                    "kind": "deterministic_target_contract",
+                    "architecture": architecture,
+                    "native_failure": native_failure,
+                    "gate": gate,
+                }
+                continue
+            log(
+                f"native:{architecture}",
+                f"PASS fixer round={repair_attempts}",
+            )
+            pending_review = None
             continue
-
-        if report.get("status") != "passed":
-            raise NativeRepairError(
-                "native validator returned without passed status"
-            )
-        summary = {
-            "architecture": architecture,
-            "repair_attempts": repair_attempts,
-            "status": "passed",
-        }
-        (repair_report_dir / f"native-repair-{architecture}.json").write_text(
-            json.dumps(
-                summary,
-                ensure_ascii=False,
-                indent=2,
-                sort_keys=True,
-            )
-            + "\n"
-        )
-        return NativeRepairResult(
-            status="passed",
-            repair_attempts=repair_attempts,
-            report=report,
-        )

@@ -304,6 +304,7 @@ def validate_native_image(
                 "GOSS_PATH": str(goss),
                 "GOSS_FILES_PATH": str(tests_root),
                 "GOSS_FILE": "goss.yaml",
+                "GOSS_WAIT_OPTS": "-r 30s -s 1s",
                 "EXPECTED_VERSION": task.version,
             },
             timeout=300,

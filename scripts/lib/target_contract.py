@@ -314,6 +314,7 @@ def _validate_tests(
     entry_text = entry.read_text()
     shared_text = (shared / "test.sh").read_text()
     goss_text = (shared / "goss.yaml").read_text()
+    goss_wait_text = (shared / "goss_wait.yaml").read_text()
     try:
         goss_data = yaml.safe_load(goss_text)
     except yaml.YAMLError:
@@ -330,6 +331,25 @@ def _validate_tests(
                         f"goss command {name} stdout must be a string or "
                         "YAML list"
                     )
+    try:
+        goss_wait_data = yaml.safe_load(goss_wait_text)
+    except yaml.YAMLError:
+        goss_wait_data = None
+        errors.append("goss_wait.yaml must be valid YAML")
+    if isinstance(goss_wait_data, dict):
+        port = goss_wait_data.get("port", {})
+        assertion = port.get("tcp:6666", {}) if isinstance(port, dict) else {}
+        if not isinstance(assertion, dict) or assertion.get("listening") is not True:
+            errors.append(
+                "goss_wait.yaml must check tcp:6666 with listening: true"
+            )
+        elif "timeout" in assertion:
+            errors.append(
+                "goss_wait.yaml port tcp:6666 does not support timeout; "
+                "the native harness controls the readiness retry"
+            )
+    elif goss_wait_data is not None:
+        errors.append("goss_wait.yaml must contain a YAML mapping")
     version_assignment = re.compile(
         rf"EXPECTED_VERSION=(?:\"{re.escape(task.version)}\"|"
         rf"'{re.escape(task.version)}'|{re.escape(task.version)})"

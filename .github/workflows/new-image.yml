@@ -291,19 +291,6 @@ jobs:
             --base-sha "${base_sha}" \
             --patch "${RUNNER_TEMP}/phase1-input/changes.patch"
 
-      - name: Enforce resumed candidate gate
-        if: ${{ inputs.operation == 'resume_x86' }}
-        run: |
-          base_sha="$(tr -d '\n' \
-            < "${RUNNER_TEMP}/phase1-input/base-sha.txt")"
-          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/gate_diff.py \
-            task-contract \
-            --phase generated \
-            --workspace "${RUNNER_TEMP}/phase1-target" \
-            --task-spec "${RUNNER_TEMP}/phase1-input/task-spec.json" \
-            --base-sha "${base_sha}" \
-            > "${RUNNER_TEMP}/resume-x86-gates.json"
-
       - name: Build, test, and repair on x86_64 (max 3)
         if: ${{ inputs.operation != 'pipeline_smoke' }}
         env:
@@ -472,19 +459,6 @@ jobs:
             --base-sha "${base_sha}" \
             --patch "${RUNNER_TEMP}/phase1-input/changes.patch"
 
-      - name: Enforce resumed candidate gate
-        if: ${{ inputs.operation == 'resume_arm' }}
-        run: |
-          base_sha="$(tr -d '\n' \
-            < "${RUNNER_TEMP}/phase1-input/base-sha.txt")"
-          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/gate_diff.py \
-            task-contract \
-            --phase generated \
-            --workspace "${RUNNER_TEMP}/phase1-target" \
-            --task-spec "${RUNNER_TEMP}/phase1-input/task-spec.json" \
-            --base-sha "${base_sha}" \
-            > "${RUNNER_TEMP}/resume-arm-gates.json"
-
       - name: Build, test, and repair on aarch64 (max 3)
         if: ${{ inputs.operation != 'pipeline_smoke' }}
         env:
@@ -641,9 +615,12 @@ jobs:
           "${{ steps.tools.outputs.jq_path }}" -e \
             '.status == "passed" and
              .architecture == "aarch64" and
-             (.checks | type == "object") and
-             (.checks | length > 0) and
-             ([.checks[]] | all)' \
+             .checks == {
+               "native_build": true,
+               "dgoss": true,
+               "shared_tests": true,
+               "restart_persistence": true
+             }' \
             "${RUNNER_TEMP}/phase1-input/aarch64.json" > /dev/null
 
       - name: Replay final patch

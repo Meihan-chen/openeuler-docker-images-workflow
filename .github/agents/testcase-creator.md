@@ -59,7 +59,6 @@ file:
 port:
   tcp:{port}:
     listening: true
-    timeout: 30000
 ```
 
 **test_helpers.sh** — 辅助函数：

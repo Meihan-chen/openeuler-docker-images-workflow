@@ -42,3 +42,4 @@ def test_shared_qa_prompts_preserve_findings_for_local_validation():
     assert "local validation" in testcase_qa
     assert "模糊匹配" not in testcase_creator
     assert "exact" in testcase_creator or "精确" in testcase_creator
+    assert "timeout: 30000" not in testcase_creator

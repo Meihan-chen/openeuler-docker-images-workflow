@@ -455,6 +455,63 @@ def test_contract_rejects_non_list_goss_stdout_matcher(tmp_path):
         )
 
 
+def test_contract_rejects_command_timeout_on_goss_port_resource(tmp_path):
+    from scripts.harness.gate_diff import (
+        TargetContractError,
+        validate_generated_target,
+    )
+
+    repo, base_sha = _repo(tmp_path)
+    _write_valid_generated_candidate(repo)
+    goss_wait = (
+        repo / "Database" / "kvrocks" / "tests" / "goss_wait.yaml"
+    )
+    goss_wait.write_text(
+        "port:\n"
+        "  tcp:6666:\n"
+        "    listening: true\n"
+        "    timeout: 30000\n"
+    )
+
+    with pytest.raises(
+        TargetContractError,
+        match="goss_wait.yaml.*timeout.*retry",
+    ):
+        validate_generated_target(
+            repo=repo,
+            task=_task(),
+            base_sha=base_sha,
+        )
+
+
+def test_contract_requires_goss_wait_tcp_port_resource(tmp_path):
+    from scripts.harness.gate_diff import (
+        TargetContractError,
+        validate_generated_target,
+    )
+
+    repo, base_sha = _repo(tmp_path)
+    _write_valid_generated_candidate(repo)
+    goss_wait = (
+        repo / "Database" / "kvrocks" / "tests" / "goss_wait.yaml"
+    )
+    goss_wait.write_text(
+        "command:\n"
+        "  redis-cli -p 6666 PING:\n"
+        "    exit-status: 0\n"
+    )
+
+    with pytest.raises(
+        TargetContractError,
+        match="goss_wait.yaml.*tcp:6666.*listening",
+    ):
+        validate_generated_target(
+            repo=repo,
+            task=_task(),
+            base_sha=base_sha,
+        )
+
+
 def test_final_contract_requires_and_accepts_bounded_dual_arch_results(tmp_path):
     from scripts.harness.gate_diff import validate_final_target
 
