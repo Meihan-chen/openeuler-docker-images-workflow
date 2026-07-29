@@ -14,8 +14,16 @@ on:
         options:
           - pipeline_smoke
           - validate_only
+          - resume_x86
+          - resume_arm
+          - resume_revalidate_x86
+          - resume_package
           - fork_pr
           - failure_issue_contract_test
+      source_run_id:
+        description: "Failed validation run ID required by resume operations"
+        required: false
+        type: string
       validated_run_id:
         description: "Successful validate_only run ID required by fork_pr"
         required: false
@@ -201,12 +209,25 @@ jobs:
   validate_x86:
     name: Build, test, and repair on x86_64
     if: >-
-      ${{ inputs.operation == 'pipeline_smoke' ||
-          inputs.operation == 'validate_only' }}
+      ${{ always() &&
+          (inputs.operation == 'pipeline_smoke' ||
+           inputs.operation == 'validate_only' ||
+           inputs.operation == 'resume_x86') &&
+          (needs.prepare.result == 'success' ||
+           inputs.operation == 'resume_x86') }}
     needs: prepare
     runs-on: [self-hosted, Linux, X64, oe-image-x86]
     timeout-minutes: 180
     steps:
+      - name: Require the source run ID
+        if: ${{ inputs.operation == 'resume_x86' }}
+        env:
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+        run: |
+          case "${SOURCE_RUN_ID}" in
+            ''|*[!0-9]*|0) echo "source_run_id must be a positive integer" >&2; exit 2 ;;
+          esac
+
       - name: Check out workflow source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
@@ -234,10 +255,23 @@ jobs:
             --toolchain-json "${RUNNER_TEMP}/toolchain.json"
 
       - name: Download generation artifact
+        if: >-
+          ${{ inputs.operation == 'pipeline_smoke' ||
+              inputs.operation == 'validate_only' }}
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: phase1-generation-${{ github.run_id }}
           path: ${{ runner.temp }}/phase1-input
+
+      - name: Download prior x86 diagnostic artifact
+        if: ${{ inputs.operation == 'resume_x86' }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: phase1-x86-${{ inputs.source_run_id }}
+          path: ${{ runner.temp }}/phase1-input
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.source_run_id }}
 
       - name: Replay exact generation candidate
         run: |
@@ -257,8 +291,21 @@ jobs:
             --base-sha "${base_sha}" \
             --patch "${RUNNER_TEMP}/phase1-input/changes.patch"
 
+      - name: Enforce resumed candidate gate
+        if: ${{ inputs.operation == 'resume_x86' }}
+        run: |
+          base_sha="$(tr -d '\n' \
+            < "${RUNNER_TEMP}/phase1-input/base-sha.txt")"
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/gate_diff.py \
+            task-contract \
+            --phase generated \
+            --workspace "${RUNNER_TEMP}/phase1-target" \
+            --task-spec "${RUNNER_TEMP}/phase1-input/task-spec.json" \
+            --base-sha "${base_sha}" \
+            > "${RUNNER_TEMP}/resume-x86-gates.json"
+
       - name: Build, test, and repair on x86_64 (max 3)
-        if: ${{ inputs.operation == 'validate_only' }}
+        if: ${{ inputs.operation != 'pipeline_smoke' }}
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
         run: |
@@ -344,12 +391,26 @@ jobs:
   validate_arm:
     name: Build, test, and repair on aarch64
     if: >-
-      ${{ inputs.operation == 'pipeline_smoke' ||
-          inputs.operation == 'validate_only' }}
+      ${{ always() &&
+          (inputs.operation == 'pipeline_smoke' ||
+           inputs.operation == 'validate_only' ||
+           inputs.operation == 'resume_x86' ||
+           inputs.operation == 'resume_arm') &&
+          (needs.validate_x86.result == 'success' ||
+           inputs.operation == 'resume_arm') }}
     needs: validate_x86
     runs-on: [self-hosted, Linux, ARM64, oe-image-arm64]
     timeout-minutes: 180
     steps:
+      - name: Require the source run ID
+        if: ${{ inputs.operation == 'resume_arm' }}
+        env:
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+        run: |
+          case "${SOURCE_RUN_ID}" in
+            ''|*[!0-9]*|0) echo "source_run_id must be a positive integer" >&2; exit 2 ;;
+          esac
+
       - name: Check out workflow source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
@@ -377,10 +438,21 @@ jobs:
             --toolchain-json "${RUNNER_TEMP}/toolchain.json"
 
       - name: Download x86-converged artifact
+        if: ${{ inputs.operation != 'resume_arm' }}
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: phase1-x86-${{ github.run_id }}
           path: ${{ runner.temp }}/phase1-input
+
+      - name: Download prior ARM diagnostic artifact
+        if: ${{ inputs.operation == 'resume_arm' }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: phase1-arm-${{ inputs.source_run_id }}
+          path: ${{ runner.temp }}/phase1-input
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.source_run_id }}
 
       - name: Replay exact x86-converged candidate
         run: |
@@ -400,8 +472,21 @@ jobs:
             --base-sha "${base_sha}" \
             --patch "${RUNNER_TEMP}/phase1-input/changes.patch"
 
+      - name: Enforce resumed candidate gate
+        if: ${{ inputs.operation == 'resume_arm' }}
+        run: |
+          base_sha="$(tr -d '\n' \
+            < "${RUNNER_TEMP}/phase1-input/base-sha.txt")"
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/gate_diff.py \
+            task-contract \
+            --phase generated \
+            --workspace "${RUNNER_TEMP}/phase1-target" \
+            --task-spec "${RUNNER_TEMP}/phase1-input/task-spec.json" \
+            --base-sha "${base_sha}" \
+            > "${RUNNER_TEMP}/resume-arm-gates.json"
+
       - name: Build, test, and repair on aarch64 (max 3)
-        if: ${{ inputs.operation == 'validate_only' }}
+        if: ${{ inputs.operation != 'pipeline_smoke' }}
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
         run: |
@@ -487,12 +572,26 @@ jobs:
   revalidate_x86:
     name: Revalidate final candidate on x86_64
     if: >-
-      ${{ inputs.operation == 'pipeline_smoke' ||
-          inputs.operation == 'validate_only' }}
+      ${{ always() &&
+          (((inputs.operation == 'pipeline_smoke' ||
+             inputs.operation == 'validate_only' ||
+             inputs.operation == 'resume_x86' ||
+             inputs.operation == 'resume_arm') &&
+            needs.validate_arm.result == 'success') ||
+           inputs.operation == 'resume_revalidate_x86') }}
     needs: validate_arm
     runs-on: [self-hosted, Linux, X64, oe-image-x86]
     timeout-minutes: 180
     steps:
+      - name: Require the source run ID
+        if: ${{ inputs.operation == 'resume_revalidate_x86' }}
+        env:
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+        run: |
+          case "${SOURCE_RUN_ID}" in
+            ''|*[!0-9]*|0) echo "source_run_id must be a positive integer" >&2; exit 2 ;;
+          esac
+
       - name: Check out workflow source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
@@ -520,10 +619,32 @@ jobs:
             --toolchain-json "${RUNNER_TEMP}/toolchain.json"
 
       - name: Download ARM-converged artifact
+        if: ${{ inputs.operation != 'resume_revalidate_x86' }}
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: phase1-arm-${{ github.run_id }}
           path: ${{ runner.temp }}/phase1-input
+
+      - name: Download prior ARM-converged artifact
+        if: ${{ inputs.operation == 'resume_revalidate_x86' }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: phase1-arm-${{ inputs.source_run_id }}
+          path: ${{ runner.temp }}/phase1-input
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.source_run_id }}
+
+      - name: Verify prior ARM validation passed
+        if: ${{ inputs.operation == 'resume_revalidate_x86' }}
+        run: |
+          "${{ steps.tools.outputs.jq_path }}" -e \
+            '.status == "passed" and
+             .architecture == "aarch64" and
+             (.checks | type == "object") and
+             (.checks | length > 0) and
+             ([.checks[]] | all)' \
+            "${RUNNER_TEMP}/phase1-input/aarch64.json" > /dev/null
 
       - name: Replay final patch
         run: |
@@ -543,8 +664,21 @@ jobs:
             --base-sha "${base_sha}" \
             --patch "${RUNNER_TEMP}/phase1-input/changes.patch"
 
+      - name: Enforce resumed candidate gate
+        if: ${{ inputs.operation == 'resume_revalidate_x86' }}
+        run: |
+          base_sha="$(tr -d '\n' \
+            < "${RUNNER_TEMP}/phase1-input/base-sha.txt")"
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/gate_diff.py \
+            task-contract \
+            --phase generated \
+            --workspace "${RUNNER_TEMP}/phase1-target" \
+            --task-spec "${RUNNER_TEMP}/phase1-input/task-spec.json" \
+            --base-sha "${base_sha}" \
+            > "${RUNNER_TEMP}/resume-final-x86-gates.json"
+
       - name: Revalidate final patch natively on x86
-        if: ${{ inputs.operation == 'validate_only' }}
+        if: ${{ inputs.operation != 'pipeline_smoke' }}
         run: |
           mkdir -p "${RUNNER_TEMP}/phase1-final-x86"
           "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
@@ -586,15 +720,39 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      - name: Publish resume validation result
+        if: >-
+          ${{ inputs.operation == 'resume_x86' ||
+              inputs.operation == 'resume_arm' ||
+              inputs.operation == 'resume_revalidate_x86' }}
+        run: |
+          {
+            printf '## Resume validation passed\n\n'
+            printf -- '- This cross-run result is diagnostic only.\n'
+            printf -- '- Run a fresh validate_only before fork_pr.\n'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
   package_candidate:
     name: Verify and seal validated candidate
     if: >-
-      ${{ inputs.operation == 'pipeline_smoke' ||
-          inputs.operation == 'validate_only' }}
+      ${{ always() &&
+          (((inputs.operation == 'pipeline_smoke' ||
+             inputs.operation == 'validate_only') &&
+            needs.revalidate_x86.result == 'success') ||
+           inputs.operation == 'resume_package') }}
     needs: revalidate_x86
     runs-on: [self-hosted, Linux, X64, oe-image-x86]
     timeout-minutes: 60
     steps:
+      - name: Require the source run ID
+        if: ${{ inputs.operation == 'resume_package' }}
+        env:
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+        run: |
+          case "${SOURCE_RUN_ID}" in
+            ''|*[!0-9]*|0) echo "source_run_id must be a positive integer" >&2; exit 2 ;;
+          esac
+
       - name: Check out workflow source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
@@ -617,26 +775,58 @@ jobs:
       - name: Download generation evidence
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: phase1-generation-${{ github.run_id }}
+          name: >-
+            phase1-generation-${{
+            inputs.operation == 'resume_package' &&
+            inputs.source_run_id || github.run_id }}
           path: ${{ runner.temp }}/generation
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: >-
+            ${{ inputs.operation == 'resume_package' &&
+            inputs.source_run_id || github.run_id }}
 
       - name: Download x86 repair evidence
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: phase1-x86-${{ github.run_id }}
+          name: >-
+            phase1-x86-${{
+            inputs.operation == 'resume_package' &&
+            inputs.source_run_id || github.run_id }}
           path: ${{ runner.temp }}/x86
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: >-
+            ${{ inputs.operation == 'resume_package' &&
+            inputs.source_run_id || github.run_id }}
 
       - name: Download ARM final patch and evidence
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: phase1-arm-${{ github.run_id }}
+          name: >-
+            phase1-arm-${{
+            inputs.operation == 'resume_package' &&
+            inputs.source_run_id || github.run_id }}
           path: ${{ runner.temp }}/arm
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: >-
+            ${{ inputs.operation == 'resume_package' &&
+            inputs.source_run_id || github.run_id }}
 
       - name: Download final x86 evidence
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: phase1-final-x86-${{ github.run_id }}
+          name: >-
+            phase1-final-x86-${{
+            inputs.operation == 'resume_package' &&
+            inputs.source_run_id || github.run_id }}
           path: ${{ runner.temp }}/final-x86
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: >-
+            ${{ inputs.operation == 'resume_package' &&
+            inputs.source_run_id || github.run_id }}
 
       - name: Replay final validated patch
         run: |
@@ -676,17 +866,20 @@ jobs:
             --report-dir "${RUNNER_TEMP}/native-reports"
 
       - name: Enforce final target gates and lint
-        env:
-          APP: ${{ inputs.app }}
-          VERSION: ${{ inputs.version }}
-          OS_VERSION: ${{ inputs.os_version }}
-          DOMAIN: ${{ inputs.domain }}
         run: |
+          app="$("${{ steps.tools.outputs.jq_path }}" \
+            -r .app "${RUNNER_TEMP}/arm/task-spec.json")"
+          version="$("${{ steps.tools.outputs.jq_path }}" \
+            -r .version "${RUNNER_TEMP}/arm/task-spec.json")"
+          os_version="$("${{ steps.tools.outputs.jq_path }}" \
+            -r .os_version "${RUNNER_TEMP}/arm/task-spec.json")"
+          domain="$("${{ steps.tools.outputs.jq_path }}" \
+            -r .domain "${RUNNER_TEMP}/arm/task-spec.json")"
           base_sha="$(tr -d '\n' < "${RUNNER_TEMP}/arm/base-sha.txt")"
           mkdir -p "${RUNNER_TEMP}/candidate/reports/agents"
           "${{ steps.tools.outputs.hadolint_path }}" \
             --ignore DL3041 \
-            "${RUNNER_TEMP}/phase1-target/${DOMAIN}/${APP}/${VERSION}/${OS_VERSION}/Dockerfile"
+            "${RUNNER_TEMP}/phase1-target/${domain}/${app}/${version}/${os_version}/Dockerfile"
           "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/gate_diff.py \
             task-contract \
             --phase final \
@@ -709,6 +902,13 @@ jobs:
             "${RUNNER_TEMP}/candidate/reports/agents/"
           cp -a "${RUNNER_TEMP}/arm/arm-repair-agents/." \
             "${RUNNER_TEMP}/candidate/reports/agents/"
+          if [ "${{ inputs.operation }}" = "resume_package" ]; then
+            printf \
+              '{"mode":"resume_package","source_run_id":"%s","verification_run_id":"%s","promotable": false}\n' \
+              "${{ inputs.source_run_id }}" \
+              "${{ github.run_id }}" \
+              > "${RUNNER_TEMP}/candidate/reports/resume-provenance.json"
+          fi
           "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
             target-create-patch \
             --workspace "${RUNNER_TEMP}/phase1-target" \
@@ -728,11 +928,21 @@ jobs:
             --current-base-sha "${base_sha}"
 
       - name: Upload immutable candidate
+        if: ${{ inputs.operation != 'resume_package' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: >-
             phase1-${{ inputs.operation == 'pipeline_smoke' &&
             'smoke-' || '' }}candidate-${{ github.run_id }}
+          path: ${{ runner.temp }}/candidate/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload resume-package diagnostic candidate
+        if: ${{ inputs.operation == 'resume_package' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: phase1-resume-candidate-${{ github.run_id }}
           path: ${{ runner.temp }}/candidate/
           if-no-files-found: error
           retention-days: 30
@@ -758,6 +968,16 @@ jobs:
               "${{ github.run_id }}"
             printf -- '- This synthetic candidate is not promotable.\n'
             printf -- '- No AI or GitCode write API was used.\n'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Publish resume-package result
+        if: ${{ inputs.operation == 'resume_package' }}
+        run: |
+          {
+            printf '## Resume package diagnostic passed\n\n'
+            printf -- '- The source run must contain all four phase artifacts.\n'
+            printf -- '- This cross-run candidate is diagnostic only.\n'
+            printf -- '- Run a fresh validate_only before fork_pr.\n'
           } >> "${GITHUB_STEP_SUMMARY}"
 
   deliver_fork_pr:

@@ -33,10 +33,15 @@ def test_phase1_is_manual_only_with_explicit_operations():
     assert operation["options"] == [
         "pipeline_smoke",
         "validate_only",
+        "resume_x86",
+        "resume_arm",
+        "resume_revalidate_x86",
+        "resume_package",
         "fork_pr",
         "failure_issue_contract_test",
     ]
     assert "validated_run_id" in trigger["workflow_dispatch"]["inputs"]
+    assert "source_run_id" in trigger["workflow_dispatch"]["inputs"]
 
 
 def test_phase1_task_defaults_are_the_confirmed_kvrocks_contract():
@@ -95,6 +100,65 @@ def test_candidate_patch_converges_x86_then_arm_then_final_x86():
     assert "phase1-native-repair" in _job_text(jobs["validate_x86"])
     assert "phase1-native-repair" in _job_text(jobs["validate_arm"])
     assert "phase1-native-validate" in _job_text(jobs["revalidate_x86"])
+
+
+def test_resume_operations_reuse_failed_stage_artifacts():
+    jobs = _workflow()["jobs"]
+    x86 = _job_text(jobs["validate_x86"])
+    arm = _job_text(jobs["validate_arm"])
+    revalidate = _job_text(jobs["revalidate_x86"])
+    package = _job_text(jobs["package_candidate"])
+
+    assert "resume_x86" in x86
+    assert "phase1-x86-${{ inputs.source_run_id }}" in x86
+    assert "run-id: ${{ inputs.source_run_id }}" in x86
+    assert "github-token: ${{ github.token }}" in x86
+
+    assert "resume_arm" in arm
+    assert "phase1-arm-${{ inputs.source_run_id }}" in arm
+    assert "run-id: ${{ inputs.source_run_id }}" in arm
+    assert "github-token: ${{ github.token }}" in arm
+
+    assert "resume_x86" in arm
+    assert "resume_x86" in revalidate
+    assert "resume_arm" in revalidate
+    assert "resume_revalidate_x86" in revalidate
+    assert "phase1-arm-${{ inputs.source_run_id }}" in revalidate
+    assert "run-id: ${{ inputs.source_run_id }}" in revalidate
+
+    assert "resume_package" in package
+    for artifact in (
+        "phase1-generation-",
+        "phase1-x86-",
+        "phase1-arm-",
+        "phase1-final-x86-",
+    ):
+        assert artifact in package
+    assert "inputs.source_run_id" in package
+    assert "phase1-resume-candidate-" in package
+    assert WORKFLOW_PATH.read_text().count(
+        "Enforce resumed candidate gate"
+    ) == 3
+    assert "steps.tools.outputs.jq_path" in package
+    assert "aarch64.json" in revalidate
+    assert '.status == "passed"' in WORKFLOW_PATH.read_text()
+    assert "resume-provenance.json" in package
+    assert '"promotable": false' in WORKFLOW_PATH.read_text()
+
+    assert "always()" in jobs["validate_x86"]["if"]
+    assert "needs.prepare.result == 'success'" in jobs["validate_x86"]["if"]
+    assert "always()" in jobs["validate_arm"]["if"]
+    assert (
+        "needs.validate_x86.result == 'success'"
+        in jobs["validate_arm"]["if"]
+    )
+    assert "always()" in jobs["revalidate_x86"]["if"]
+    assert (
+        "needs.validate_arm.result == 'success'"
+        in jobs["revalidate_x86"]["if"]
+    )
+    assert "always()" in jobs["package_candidate"]["if"]
+    assert "resume-candidate" not in _job_text(jobs["deliver_fork_pr"])
 
 
 def test_validate_only_jobs_have_no_gitcode_credential_or_write_command():
