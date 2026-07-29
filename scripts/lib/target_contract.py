@@ -237,7 +237,6 @@ def _validate_dockerfile(
         f"ARG VERSION={task.version}": "locked application version",
         "./x.py build": "official Kvrocks build command",
         "-j 4": "bounded Kvrocks build parallelism (-j 4)",
-        "USER 999": "non-root runtime user",
         "EXPOSE 6666": "Kvrocks port",
         "HEALTHCHECK": "runtime health check",
         "redis-cli -p 6666 PING": "Redis protocol health probe",
@@ -253,12 +252,32 @@ def _validate_dockerfile(
         re.IGNORECASE | re.MULTILINE,
     ):
         errors.append("Dockerfile is missing a named build stage using BASE")
+    runtime_reference = (
+        rf"(?:{base_reference}|"
+        rf"openeuler/openeuler:{re.escape(task.os_version)})"
+    )
     if not re.search(
-        rf"^\s*FROM\s+{base_reference}\s*$",
+        rf"^\s*FROM\s+{runtime_reference}\s*$",
         text,
         re.IGNORECASE | re.MULTILINE,
     ):
-        errors.append("Dockerfile is missing openEuler runtime stage using BASE")
+        errors.append("Dockerfile is missing the locked openEuler runtime stage")
+    runtime_user = re.search(
+        r"^\s*USER\s+(?:999|([A-Za-z_][A-Za-z0-9_-]*))\s*$",
+        text,
+        re.MULTILINE,
+    )
+    if runtime_user and runtime_user.group(1):
+        name = re.escape(runtime_user.group(1))
+        uid_999_user = re.search(
+            rf"\buseradd\b[^\n]*"
+            rf"(?:--uid(?:=|\s+)|-u\s*)999\b[^\n]*\b{name}\b",
+            text,
+        )
+        if not uid_999_user:
+            runtime_user = None
+    if not runtime_user:
+        errors.append("Dockerfile is missing a runtime user with UID 999")
     version_reference = r"v\$(?:\{VERSION\}|VERSION)"
     if not re.search(
         rf"(?:--branch|-b)\s+[\"']?{version_reference}[\"']?"

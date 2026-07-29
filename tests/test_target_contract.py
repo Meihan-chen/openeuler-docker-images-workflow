@@ -235,6 +235,11 @@ def test_generated_contract_accepts_equivalent_shell_and_docker_syntax(tmp_path)
         .replace("AS builder", "AS build")
         .replace("--from=builder", "--from=build")
         .replace(
+            "FROM $BASE\nRUN groupadd",
+            "FROM openeuler/openeuler:24.03-lts-sp4\nRUN groupadd",
+        )
+        .replace("USER 999", "USER kvrocks")
+        .replace(
             "RUN curl -fSL -o source.tar.gz "
             "https://github.com/apache/kvrocks/archive/refs/tags/"
             "v${VERSION}.tar.gz && mkdir -p /src/kvrocks && "
@@ -260,6 +265,29 @@ def test_generated_contract_accepts_equivalent_shell_and_docker_syntax(tmp_path)
     )
 
     assert report["status"] == "passed"
+
+
+def test_contract_rejects_named_runtime_user_without_uid_999(tmp_path):
+    from scripts.harness.gate_diff import TargetContractError, validate_generated_target
+
+    repo, base_sha = _repo(tmp_path)
+    _write_valid_generated_candidate(repo)
+    dockerfile = (
+        repo
+        / "Database"
+        / "kvrocks"
+        / "2.16.0"
+        / "24.03-lts-sp4"
+        / "Dockerfile"
+    )
+    dockerfile.write_text(
+        dockerfile.read_text()
+        .replace("--uid 999", "--uid 1000")
+        .replace("USER 999", "USER kvrocks")
+    )
+
+    with pytest.raises(TargetContractError, match="UID 999"):
+        validate_generated_target(repo=repo, task=_task(), base_sha=base_sha)
 
 
 def test_contract_rejects_change_outside_task_scope(tmp_path):
