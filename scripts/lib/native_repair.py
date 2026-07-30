@@ -60,12 +60,14 @@ def _write_fixer_report(
     payload: Mapping[str, object],
     review: Mapping[str, object],
     api_key: str,
+    attempt: int | None = None,
 ) -> None:
     safe_payload = dict(payload)
     safe_payload["_input_review"] = dict(review)
     safe_payload = _redact(safe_payload, api_key)
+    suffix = "" if attempt is None else f"-attempt{attempt}"
     path = directory / (
-        f"fixer-native-{architecture}-round{round_number}.json"
+        f"fixer-native-{architecture}-round{round_number}{suffix}.json"
     )
     path.write_text(
         json.dumps(safe_payload, ensure_ascii=False, indent=2, sort_keys=True)
@@ -91,6 +93,154 @@ def _target_gate_report(
             "status": "failed",
             "errors": str(error).splitlines(),
         }
+
+
+@dataclass(frozen=True)
+class RoundDecision:
+    converged: bool
+    round_number: int
+    repair_attempts: int
+    validated_patch_sha256: str
+
+
+_ARCHITECTURES = ("x86_64", "aarch64")
+# The gate is deterministic and free; a Docker round is neither. When the
+# Fixer's edit violates the target contract, re-asking it here is far cheaper
+# than spending another dual-architecture build to discover the same thing.
+_GATE_REPAIR_ATTEMPTS = 3
+
+
+def _passed(report: Mapping[str, object]) -> bool:
+    return report.get("status") == "passed"
+
+
+def decide_round(
+    *,
+    workspace: Path,
+    task: TaskSpec,
+    base_sha: str,
+    round_number: int,
+    max_rounds: int,
+    reports: Mapping[str, Mapping[str, object]],
+    report_dir: Path,
+    executable: Path,
+    api_key: str,
+    agent_runner: Callable[..., AgentResult] = run_agent,
+    target_validator: Callable[..., Mapping[str, object]] = (
+        validate_generated_target
+    ),
+) -> RoundDecision:
+    """Converge one parallel round, or repair once for the next one.
+
+    Both architectures validate the same candidate in every round, so the
+    round that passes on both is itself the proof that one candidate builds
+    and runs everywhere. That is why no separate final revalidation is needed.
+    """
+    workspace = Path(workspace).resolve()
+    report_dir = Path(report_dir).resolve()
+    if report_dir == workspace or workspace in report_dir.parents:
+        raise NativeRepairError(
+            "native repair evidence must remain outside target workspace"
+        )
+    if not api_key:
+        raise NativeRepairError("DEEPSEEK_API_KEY is required")
+    missing = [name for name in _ARCHITECTURES if name not in reports]
+    if missing:
+        raise NativeRepairError(
+            "round decision needs both architectures: missing "
+            + ", ".join(missing)
+        )
+    report_dir.mkdir(parents=True, exist_ok=True)
+    stage = f"round:{round_number}"
+
+    if all(_passed(reports[name]) for name in _ARCHITECTURES):
+        digests = {
+            str(reports[name].get("validated_patch_sha256", ""))
+            for name in _ARCHITECTURES
+        }
+        if len(digests) != 1 or not digests.pop():
+            raise NativeRepairError(
+                "both architectures passed but did not record the same "
+                "validated candidate"
+            )
+        log(stage, "PASS converged")
+        return RoundDecision(
+            converged=True,
+            round_number=round_number,
+            repair_attempts=0,
+            validated_patch_sha256=str(
+                reports["x86_64"]["validated_patch_sha256"]
+            ),
+        )
+
+    if round_number > max_rounds:
+        failed = [
+            name for name in _ARCHITECTURES if not _passed(reports[name])
+        ]
+        raise NativeRepairError(
+            f"native validation failed on {', '.join(failed)} after "
+            f"{max_rounds} repair attempts"
+        )
+
+    review: dict[str, object] = {
+        "kind": "native_validation_failure",
+        "repair_round": round_number,
+        # One Fixer sees both architectures, so a fix for one cannot silently
+        # regress the other.
+        "architectures": {
+            name: _redact(dict(reports[name]), api_key)
+            for name in _ARCHITECTURES
+        },
+    }
+    for attempt in range(1, _GATE_REPAIR_ATTEMPTS + 1):
+        log(stage, f"START fixer attempt={attempt}")
+        fixed = agent_runner(
+            executable=executable,
+            role="fixer",
+            prompt=build_role_prompt(
+                role="fixer",
+                task=task,
+                base_sha=base_sha,
+                review=review,
+            ),
+            workspace=workspace,
+            api_key=api_key,
+            required_keys=("success", "changes"),
+        )
+        _write_fixer_report(
+            directory=report_dir,
+            architecture="dual",
+            round_number=round_number,
+            payload=fixed.payload,
+            review=review,
+            api_key=api_key,
+            attempt=attempt,
+        )
+        if fixed.payload.get("success") is not True:
+            raise NativeRepairError(
+                f"fixer failed in round {round_number} attempt {attempt}"
+            )
+        gate = _target_gate_report(
+            target_validator=target_validator,
+            workspace=workspace,
+            task=task,
+            base_sha=base_sha,
+        )
+        if gate.get("status") == "passed":
+            log(stage, f"PASS fixer attempt={attempt}")
+            return RoundDecision(
+                converged=False,
+                round_number=round_number,
+                repair_attempts=attempt,
+                validated_patch_sha256="",
+            )
+        log(stage, f"NEEDS_FIX target_contract attempt={attempt}")
+        review = {**review, "gate": gate}
+
+    raise NativeRepairError(
+        f"repaired candidate still fails the target contract in round "
+        f"{round_number}"
+    )
 
 
 def validate_native_with_repairs(

@@ -39,6 +39,7 @@ from scripts.lib.issue_lifecycle import (
 )
 from scripts.lib.native_repair import (
     NativeRepairError,
+    decide_round,
     validate_native_with_repairs,
 )
 from scripts.lib.native_validation import (
@@ -367,6 +368,39 @@ def cmd_phase1_native_smoke(args: argparse.Namespace) -> None:
     _print_json(report)
 
 
+def cmd_phase1_decide(args: argparse.Namespace) -> None:
+    api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+    if not api_key:
+        raise NativeRepairError("DEEPSEEK_API_KEY is required")
+    reports = {
+        "x86_64": json.loads(args.x86_report.read_text()),
+        "aarch64": json.loads(args.arm_report.read_text()),
+    }
+    decision = decide_round(
+        workspace=args.workspace,
+        task=_load_task(args.task_spec),
+        base_sha=args.base_sha,
+        round_number=args.round,
+        max_rounds=args.max_rounds,
+        reports=reports,
+        report_dir=args.report_dir,
+        executable=args.opencode,
+        api_key=api_key,
+    )
+    summary = {
+        "converged": decision.converged,
+        "round": decision.round_number,
+        "repair_attempts": decision.repair_attempts,
+        "validated_patch_sha256": decision.validated_patch_sha256,
+    }
+    if args.github_output:
+        with args.github_output.open("a", encoding="utf-8") as stream:
+            stream.write(
+                f"converged={'true' if decision.converged else 'false'}\n"
+            )
+    _print_json(summary)
+
+
 def cmd_phase1_native_release(args: argparse.Namespace) -> None:
     _print_json(
         release_run_builders(
@@ -541,6 +575,22 @@ def _add_native_commands(commands: argparse._SubParsersAction) -> None:
     _add_native_arguments(smoke)
     smoke.add_argument("--repair-report-dir", required=True, type=Path)
     smoke.set_defaults(handler=cmd_phase1_native_smoke)
+
+    decide = commands.add_parser(
+        "phase1-decide",
+        help="Converge one parallel round, or repair once for the next",
+    )
+    decide.add_argument("--workspace", required=True, type=Path)
+    decide.add_argument("--task-spec", required=True, type=Path)
+    decide.add_argument("--base-sha", required=True)
+    decide.add_argument("--round", required=True, type=int)
+    decide.add_argument("--max-rounds", required=True, type=int)
+    decide.add_argument("--x86-report", required=True, type=Path)
+    decide.add_argument("--arm-report", required=True, type=Path)
+    decide.add_argument("--report-dir", required=True, type=Path)
+    decide.add_argument("--opencode", required=True, type=Path)
+    decide.add_argument("--github-output", type=Path)
+    decide.set_defaults(handler=cmd_phase1_decide)
 
     release = commands.add_parser(
         "phase1-native-release",

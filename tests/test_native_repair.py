@@ -417,3 +417,135 @@ def test_unsuccessful_fixer_report_is_retained_before_failure(tmp_path):
         (repair_dir / "fixer-native-x86_64-round1.json").read_text()
     )
     assert report["status"] == "insufficient_evidence"
+
+
+DIGEST = "c" * 64
+
+
+def _report(architecture, *, status="passed", digest=DIGEST):
+    report = {"status": status, "architecture": architecture}
+    if status == "passed":
+        report["validated_patch_sha256"] = digest
+    else:
+        report["failure"] = f"{architecture} build failed"
+    return report
+
+
+def _decide(tmp_path, reports, **kwargs):
+    from scripts.lib.native_repair import decide_round
+
+    defaults = dict(
+        workspace=tmp_path / "target",
+        task=_task(),
+        base_sha="1" * 40,
+        round_number=1,
+        max_rounds=3,
+        reports=reports,
+        report_dir=tmp_path / "evidence",
+        executable=tmp_path / "opencode",
+        api_key="deepseek-secret",
+        agent_runner=Fixer(),
+        target_validator=lambda **_: {"status": "passed"},
+    )
+    (tmp_path / "target").mkdir(exist_ok=True)
+    return decide_round(**{**defaults, **kwargs})
+
+
+def test_a_round_that_passes_on_both_architectures_is_itself_the_proof(
+    tmp_path,
+):
+    fixer = Fixer()
+
+    decision = _decide(
+        tmp_path,
+        {"x86_64": _report("x86_64"), "aarch64": _report("aarch64")},
+        agent_runner=fixer,
+    )
+
+    assert decision.converged is True
+    assert decision.validated_patch_sha256 == DIGEST
+    # Convergence is proof on its own; no separate revalidation, no Fixer.
+    assert fixer.calls == []
+
+
+def test_both_passing_on_different_candidates_is_never_convergence(tmp_path):
+    from scripts.lib.native_repair import NativeRepairError
+
+    with pytest.raises(NativeRepairError, match="same validated candidate"):
+        _decide(
+            tmp_path,
+            {
+                "x86_64": _report("x86_64"),
+                "aarch64": _report("aarch64", digest="d" * 64),
+            },
+        )
+
+
+def test_one_failing_architecture_repairs_once_with_both_reports(tmp_path):
+    fixer = Fixer()
+
+    decision = _decide(
+        tmp_path,
+        {
+            "x86_64": _report("x86_64"),
+            "aarch64": _report("aarch64", status="failed"),
+        },
+        agent_runner=fixer,
+    )
+
+    assert decision.converged is False
+    assert decision.repair_attempts == 1
+    review = fixer.calls[0]["prompt"]
+    # A fix driven by one architecture alone can silently regress the other.
+    assert "x86_64" in review
+    assert "aarch64" in review
+    assert "deepseek-secret" not in review
+
+
+def test_a_repair_breaking_the_target_contract_is_re_asked_not_rebuilt(
+    tmp_path,
+):
+    fixer = Fixer()
+    gates = iter(
+        [
+            {"status": "failed", "errors": ["USER must map to UID 999"]},
+            {"status": "passed"},
+        ]
+    )
+
+    decision = _decide(
+        tmp_path,
+        {
+            "x86_64": _report("x86_64", status="failed"),
+            "aarch64": _report("aarch64"),
+        },
+        agent_runner=fixer,
+        target_validator=lambda **_: next(gates),
+    )
+
+    # The gate is free and a dual-architecture build is not, so the contract
+    # violation is resolved here rather than by spending another round.
+    assert decision.repair_attempts == 2
+    assert "USER must map to UID 999" in fixer.calls[1]["prompt"]
+
+
+def test_exhausting_the_repair_budget_fails_the_round(tmp_path):
+    from scripts.lib.native_repair import NativeRepairError
+
+    with pytest.raises(NativeRepairError, match="after 3 repair attempts"):
+        _decide(
+            tmp_path,
+            {
+                "x86_64": _report("x86_64", status="failed"),
+                "aarch64": _report("aarch64"),
+            },
+            round_number=4,
+            max_rounds=3,
+        )
+
+
+def test_a_round_decision_needs_both_architectures(tmp_path):
+    from scripts.lib.native_repair import NativeRepairError
+
+    with pytest.raises(NativeRepairError, match="aarch64"):
+        _decide(tmp_path, {"x86_64": _report("x86_64")})
