@@ -1,0 +1,148 @@
+name: Phase 1 - Round decision
+
+# Reads both architectures' reports and rules on the round: either the
+# candidate converged, or the Fixer repairs it once for the next round.
+# Only this stage needs a model key; the round jobs deliberately get none.
+
+on:
+  workflow_call:
+    inputs:
+      round:
+        description: "Round being decided"
+        required: true
+        type: string
+      max_rounds:
+        description: "Maximum repair rounds"
+        required: true
+        type: string
+      next_round:
+        description: >-
+          Round that consumes the repaired candidate. Passed explicitly
+          because GitHub expressions have no arithmetic operators.
+        required: true
+        type: string
+    secrets:
+      DEEPSEEK_API_KEY:
+        required: true
+    outputs:
+      converged:
+        description: "true when both architectures passed on one candidate"
+        value: ${{ jobs.decide.outputs.converged }}
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  PYTHONUNBUFFERED: "1"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  decide:
+    name: Decide round ${{ inputs.round }}
+    runs-on: [self-hosted, Linux, X64, oe-image-x86]
+    timeout-minutes: 60
+    outputs:
+      converged: ${{ steps.judge.outputs.converged }}
+    steps:
+      - name: Check out workflow source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Provision phase-one tooling
+        id: tools
+        uses: ./.github/actions/phase1-setup
+        with:
+          arch: x86_64
+
+      - name: Download round candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: phase1-patch${{ inputs.round }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/phase1-input
+
+      - name: Download x86_64 round evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: phase1-round${{ inputs.round }}-x86_64-${{ github.run_id }}
+          path: ${{ runner.temp }}/phase1-x86
+
+      - name: Download aarch64 round evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: phase1-round${{ inputs.round }}-aarch64-${{ github.run_id }}
+          path: ${{ runner.temp }}/phase1-arm
+
+      - name: Replay round candidate
+        uses: ./.github/actions/phase1-replay
+        with:
+          input-dir: ${{ runner.temp }}/phase1-input
+          workspace: ${{ runner.temp }}/phase1-target
+
+      - name: Converge or repair
+        id: judge
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          base_sha="$(tr -d '\n' \
+            < "${RUNNER_TEMP}/phase1-input/base-sha.txt")"
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
+            phase1-decide \
+            --workspace "${RUNNER_TEMP}/phase1-target" \
+            --task-spec "${RUNNER_TEMP}/phase1-input/task-spec.json" \
+            --base-sha "${base_sha}" \
+            --round "${{ inputs.round }}" \
+            --max-rounds "${{ inputs.max_rounds }}" \
+            --x86-report "${RUNNER_TEMP}/phase1-x86/x86_64.json" \
+            --arm-report "${RUNNER_TEMP}/phase1-arm/aarch64.json" \
+            --report-dir "${RUNNER_TEMP}/phase1-decide/agents" \
+            --opencode "${{ steps.tools.outputs.opencode_path }}" \
+            --github-output "${GITHUB_OUTPUT}"
+
+      - name: Collect converged candidate
+        if: ${{ steps.judge.outputs.converged == 'true' }}
+        run: |
+          mkdir -p "${RUNNER_TEMP}/phase1-converged"
+          cp "${RUNNER_TEMP}/phase1-input/task-spec.json" \
+            "${RUNNER_TEMP}/phase1-input/base-sha.txt" \
+            "${RUNNER_TEMP}/phase1-input/changes.patch" \
+            "${RUNNER_TEMP}/phase1-converged/"
+          cp "${RUNNER_TEMP}/phase1-x86/x86_64.json" \
+            "${RUNNER_TEMP}/phase1-x86/x86_64.junit.xml" \
+            "${RUNNER_TEMP}/phase1-arm/aarch64.json" \
+            "${RUNNER_TEMP}/phase1-arm/aarch64.junit.xml" \
+            "${RUNNER_TEMP}/phase1-converged/"
+
+      - name: Emit next round candidate
+        if: ${{ steps.judge.outputs.converged != 'true' }}
+        uses: ./.github/actions/phase1-emit-patch
+        with:
+          workspace: ${{ runner.temp }}/phase1-target
+          input-dir: ${{ runner.temp }}/phase1-input
+          output-dir: ${{ runner.temp }}/phase1-next
+
+      - name: Upload converged candidate
+        if: ${{ steps.judge.outputs.converged == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: phase1-converged-${{ github.run_id }}
+          path: ${{ runner.temp }}/phase1-converged/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload next round candidate
+        if: ${{ steps.judge.outputs.converged != 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: phase1-patch${{ inputs.next_round }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/phase1-next/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload round decision evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: phase1-decide${{ inputs.round }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/phase1-decide/
+          if-no-files-found: ignore
+          retention-days: 30

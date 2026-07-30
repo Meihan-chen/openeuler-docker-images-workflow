@@ -6,13 +6,17 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_PATH = ROOT / ".github" / "workflows" / "new-image.yml"
+ROUND_PATH = ROOT / ".github" / "workflows" / "phase1-round.yml"
+DECIDE_PATH = ROOT / ".github" / "workflows" / "phase1-decide.yml"
+ROUNDS = ("round1", "round2", "round3", "round4")
+DECISIONS = ("decide1", "decide2", "decide3", "decide4")
 ACTIONLINT_CONFIG = ROOT / ".github" / "actionlint.yaml"
 ACTIONS_DIR = ROOT / ".github" / "actions"
 PHASE1_ACTIONS = ("phase1-setup", "phase1-replay", "phase1-emit-patch")
 
 
-def _workflow():
-    data = yaml.safe_load(WORKFLOW_PATH.read_text())
+def _workflow(path=None):
+    data = yaml.safe_load((path or WORKFLOW_PATH).read_text())
     assert isinstance(data, dict)
     return data
 
@@ -50,9 +54,7 @@ def test_phase1_is_manual_only_with_explicit_operations():
         "pipeline_smoke",
         "validate_only",
         "scenario_one",
-        "resume_x86",
-        "resume_arm",
-        "resume_revalidate_x86",
+        "resume_round",
         "resume_package",
         "recover_package",
         "fork_pr",
@@ -61,19 +63,16 @@ def test_phase1_is_manual_only_with_explicit_operations():
     assert "validated_run_id" in trigger["workflow_dispatch"]["inputs"]
     assert "source_run_id" in trigger["workflow_dispatch"]["inputs"]
     assert "generation_run_id" in trigger["workflow_dispatch"]["inputs"]
+    assert "resume_from_round" in trigger["workflow_dispatch"]["inputs"]
+
 
 
 def test_scenario_one_runs_full_validation_chain_and_delivers_same_run():
     jobs = _workflow()["jobs"]
 
-    for job_name in (
-        "prepare",
-        "validate_x86",
-        "validate_arm",
-        "revalidate_x86",
-        "package_candidate",
-    ):
-        assert "scenario_one" in jobs[job_name]["if"]
+    assert "scenario_one" in jobs["prepare"]["if"]
+    # Sealing is gated on convergence, not on which operation asked for it.
+    assert "converged == 'true'" in jobs["package_candidate"]["if"]
 
     delivery = jobs["deliver_fork_pr"]
     delivery_text = _job_text(delivery)
@@ -82,24 +81,15 @@ def test_scenario_one_runs_full_validation_chain_and_delivers_same_run():
     assert "inputs.operation == 'scenario_one'" in delivery["if"]
     assert "needs.package_candidate.result == 'success'" in delivery["if"]
     assert "inputs.operation == 'fork_pr'" in delivery["if"]
-    assert "inputs.operation == 'fork_pr'" in delivery_text
     assert "github.run_id" in delivery_text
 
-    prepare_steps = {
-        step["name"]: step for step in jobs["prepare"]["steps"]
-    }
+    prepare_steps = {step["name"]: step for step in jobs["prepare"]["steps"]}
     assert (
         "scenario_one"
         in prepare_steps["Generate and review candidate content"]["if"]
     )
-
-    x86_steps = {
-        step["name"]: step for step in jobs["validate_x86"]["steps"]
-    }
-    assert (
-        "scenario_one"
-        in x86_steps["Download generation artifact"]["if"]
-    )
+    # Rounds are operation-agnostic: they validate whatever prepare staged.
+    assert jobs["round1"]["with"]["operation"] == "${{ inputs.operation }}"
 
 
 def test_phase1_task_defaults_are_the_confirmed_kvrocks_contract():
@@ -114,15 +104,16 @@ def test_phase1_task_defaults_are_the_confirmed_kvrocks_contract():
     )
 
 
+
 def test_native_jobs_use_exact_self_hosted_labels_and_no_emulation_actions():
-    data = _workflow()
-    jobs = data["jobs"]
+    jobs = _workflow()["jobs"]
+    round_jobs = _workflow(ROUND_PATH)["jobs"]
 
     for name in (
         "prepare",
-        "validate_x86",
-        "revalidate_x86",
+        "seed_resume",
         "package_candidate",
+        "release_x86_builders",
         "deliver_fork_pr",
         "issue_contract_test",
     ):
@@ -132,105 +123,97 @@ def test_native_jobs_use_exact_self_hosted_labels_and_no_emulation_actions():
             "X64",
             "oe-image-x86",
         ]
-    assert jobs["validate_arm"]["runs-on"] == [
+    assert jobs["release_arm_builders"]["runs-on"] == [
         "self-hosted",
         "Linux",
         "ARM64",
         "oe-image-arm64",
     ]
+    # Each round pins both native runners; emulation would hide the very
+    # architecture differences the round exists to find.
+    assert round_jobs["x86_64"]["runs-on"] == [
+        "self-hosted",
+        "Linux",
+        "X64",
+        "oe-image-x86",
+    ]
+    assert round_jobs["aarch64"]["runs-on"] == [
+        "self-hosted",
+        "Linux",
+        "ARM64",
+        "oe-image-arm64",
+    ]
+    assert _workflow(DECIDE_PATH)["jobs"]["decide"]["runs-on"] == [
+        "self-hosted",
+        "Linux",
+        "X64",
+        "oe-image-x86",
+    ]
 
-    text = WORKFLOW_PATH.read_text()
-    assert "docker/setup-qemu-action" not in text
-    assert "docker/setup-buildx-action" not in text
+    for path in (WORKFLOW_PATH, ROUND_PATH, DECIDE_PATH):
+        text = path.read_text()
+        assert "docker/setup-qemu-action" not in text
+        assert "docker/setup-buildx-action" not in text
 
 
-def test_candidate_patch_converges_x86_then_arm_then_final_x86():
+
+def test_every_round_validates_one_candidate_on_both_architectures():
     jobs = _workflow()["jobs"]
 
-    assert jobs["validate_x86"]["needs"] == "prepare"
-    assert jobs["validate_arm"]["needs"] == "validate_x86"
-    assert jobs["revalidate_x86"]["needs"] == "validate_arm"
-    assert jobs["package_candidate"]["needs"] == "revalidate_x86"
-    assert "scripts/harness/flow.py" in _job_text(jobs["validate_x86"])
-    assert "scripts/harness/flow.py" in _job_text(jobs["validate_arm"])
-    assert "scripts/harness/flow.py" in _job_text(jobs["revalidate_x86"])
-    assert "scripts/harness/run.py" not in WORKFLOW_PATH.read_text()
-    assert "phase1-native-repair" in _job_text(jobs["validate_x86"])
-    assert "phase1-native-repair" in _job_text(jobs["validate_arm"])
-    assert "phase1-native-validate" in _job_text(jobs["revalidate_x86"])
+    assert jobs["round1"]["needs"] == ["prepare", "seed_resume"]
+    for index, name in enumerate(ROUNDS):
+        assert jobs[name]["uses"] == "./.github/workflows/phase1-round.yml"
+        assert jobs[name]["with"]["round"] == str(index + 1)
+    for index, name in enumerate(DECISIONS):
+        decision = jobs[name]
+        assert decision["uses"] == "./.github/workflows/phase1-decide.yml"
+        assert decision["needs"] == ROUNDS[index]
+        assert decision["with"]["round"] == str(index + 1)
+        assert decision["with"]["max_rounds"] == "3"
+        # GitHub expressions have no arithmetic, so the next round is explicit.
+        assert decision["with"]["next_round"] == str(index + 2)
+
+    # A later round exists only because the previous one did not converge.
+    for index, name in enumerate(ROUNDS[1:]):
+        condition = jobs[name]["if"]
+        assert f"needs.{DECISIONS[index]}.result == 'success'" in condition
+        assert (
+            f"needs.{DECISIONS[index]}.outputs.converged != 'true'"
+            in condition
+        )
+
+    workflow_text = WORKFLOW_PATH.read_text()
+    assert "scripts/harness/run.py" not in workflow_text
+    # The serial chain and its extra revalidation job are gone.
+    assert "revalidate" not in workflow_text
+    assert "phase1-native-repair" not in workflow_text
 
 
-def test_resume_operations_reuse_failed_stage_artifacts():
+
+def test_resume_restarts_one_round_from_another_run_of_the_same_pipeline():
     jobs = _workflow()["jobs"]
-    x86 = _job_text(jobs["validate_x86"])
-    arm = _job_text(jobs["validate_arm"])
-    revalidate = _job_text(jobs["revalidate_x86"])
+    seed = jobs["seed_resume"]
+    seed_text = _job_text(seed)
+
+    assert seed["if"] == "${{ inputs.operation == 'resume_round' }}"
+    assert "phase1-patch${{ inputs.resume_from_round }}-${{" in seed_text
+    assert "run-id: ${{ inputs.source_run_id }}" in seed_text
+    assert "github-token: ${{ github.token }}" in seed_text
+    # Republished under this run so every round reads one uniform name.
+    assert "phase1-patch${{ inputs.resume_from_round }}-${{ github.run_id }}" in (
+        seed_text
+    )
+
+    for index, name in enumerate(ROUNDS):
+        condition = jobs[name]["if"]
+        assert "needs.seed_resume.result == 'success'" in condition
+        assert f"inputs.resume_from_round == '{index + 1}'" in condition
+
     package = _job_text(jobs["package_candidate"])
-
-    assert "resume_x86" in x86
-    assert "phase1-x86-${{ inputs.source_run_id }}" in x86
-    assert "run-id: ${{ inputs.source_run_id }}" in x86
-    assert "github-token: ${{ github.token }}" in x86
-
-    assert "resume_arm" in arm
-    assert "phase1-arm-${{ inputs.source_run_id }}" in arm
-    assert "run-id: ${{ inputs.source_run_id }}" in arm
-    assert "github-token: ${{ github.token }}" in arm
-
-    assert "resume_x86" in arm
-    assert "resume_x86" in revalidate
-    assert "resume_arm" in revalidate
-    assert "resume_revalidate_x86" in revalidate
-    assert "phase1-arm-${{ inputs.source_run_id }}" in revalidate
-    assert "run-id: ${{ inputs.source_run_id }}" in revalidate
-
     assert "resume_package" in package
-    for artifact in (
-        "phase1-generation-",
-        "phase1-x86-",
-        "phase1-arm-",
-        "phase1-final-x86-",
-    ):
-        assert artifact in package
-    assert "inputs.source_run_id" in package
     assert "phase1-resume-candidate-" in package
-    assert WORKFLOW_PATH.read_text().count(
-        "phase1-native-repair"
-    ) == 2
-    assert WORKFLOW_PATH.read_text().count(
-        "phase1-native-validate"
-    ) == 1
-    assert WORKFLOW_PATH.read_text().count(
-        "Enforce resumed candidate gate"
-    ) == 1
-    assert "steps.tools.outputs.jq_path" in package
-    assert "aarch64.json" in revalidate
-    assert ".checks == {" in revalidate
-    for check in (
-        "native_build",
-        "dgoss",
-        "shared_tests",
-        "restart_persistence",
-    ):
-        assert f'"{check}": true' in WORKFLOW_PATH.read_text()
-    assert '.status == "passed"' in WORKFLOW_PATH.read_text()
     assert "resume-provenance.json" in package
     assert '"promotable": false' in WORKFLOW_PATH.read_text()
-
-    assert "always()" in jobs["validate_x86"]["if"]
-    assert "needs.prepare.result == 'success'" in jobs["validate_x86"]["if"]
-    assert "always()" in jobs["validate_arm"]["if"]
-    assert (
-        "needs.validate_x86.result == 'success'"
-        in jobs["validate_arm"]["if"]
-    )
-    assert "always()" in jobs["revalidate_x86"]["if"]
-    assert (
-        "needs.validate_arm.result == 'success'"
-        in jobs["revalidate_x86"]["if"]
-    )
-    assert "always()" in jobs["package_candidate"]["if"]
-    assert "resume-candidate" not in _job_text(jobs["deliver_fork_pr"])
 
 
 def test_recover_package_combines_generation_and_validation_runs():
@@ -280,17 +263,17 @@ def test_recover_package_only_accepts_confirmed_full_validation_lineage():
     assert '--expected-run-id "${evidence_run_id}"' in workflow_text
 
 
+
 def test_validate_only_jobs_have_no_gitcode_credential_or_write_command():
     jobs = _workflow()["jobs"]
 
-    for name in (
-        "prepare",
-        "validate_x86",
-        "validate_arm",
-        "revalidate_x86",
-        "package_candidate",
-    ):
+    for name in ("prepare", "seed_resume", "package_candidate"):
         text = _job_text(jobs[name])
+        assert "GITCODE_TOKEN" not in text
+        assert "fork-deliver" not in text
+        assert "issue-contract-test" not in text
+    for path in (ROUND_PATH, DECIDE_PATH):
+        text = path.read_text()
         assert "GITCODE_TOKEN" not in text
         assert "fork-deliver" not in text
         assert "issue-contract-test" not in text
@@ -303,6 +286,20 @@ def test_validate_only_jobs_have_no_gitcode_credential_or_write_command():
         "actions": "read",
         "contents": "read",
     }
+
+
+def test_only_the_decision_stage_receives_a_model_key():
+    jobs = _workflow()["jobs"]
+
+    # Rounds only build and test, so handing them a key would widen the blast
+    # radius for nothing; secrets: inherit would do exactly that.
+    assert "secrets" not in jobs["round1"]
+    assert ROUND_PATH.read_text().count("DEEPSEEK_API_KEY") == 0
+    for name in DECISIONS:
+        assert jobs[name]["secrets"] == {
+            "DEEPSEEK_API_KEY": "${{ secrets.DEEPSEEK_API_KEY }}"
+        }
+    assert "inherit" not in WORKFLOW_PATH.read_text()
 
 
 def test_fork_pr_reuses_named_artifact_from_exact_validated_run():
@@ -381,24 +378,20 @@ def test_legacy_evidence_is_allowed_only_on_the_reviewed_recovery_path():
     assert "${legacy_evidence}" in aggregate
 
 
+
 def test_each_architecture_hands_its_run_builder_back_exactly_once():
     jobs = _workflow()["jobs"]
     workflow_text = WORKFLOW_PATH.read_text()
 
-    # Validation keeps the builder alive for later repair rounds, so the run
-    # is only leak-free if a release job runs even when validation failed.
-    for name, architecture, needs, runner_label in (
-        (
-            "release_x86_builders",
-            "x86_64",
-            ["validate_x86", "revalidate_x86", "package_candidate"],
-            "oe-image-x86",
-        ),
-        ("release_arm_builders", "aarch64", ["validate_arm"], "oe-image-arm64"),
+    # Validation keeps the builder alive for later rounds, so the run is only
+    # leak-free if a release job runs even when validation failed.
+    for name, architecture, runner_label in (
+        ("release_x86_builders", "x86_64", "oe-image-x86"),
+        ("release_arm_builders", "aarch64", "oe-image-arm64"),
     ):
         job = jobs[name]
         text = _job_text(job)
-        assert job["needs"] == needs
+        assert set(ROUNDS).issubset(job["needs"])
         assert "always()" in job["if"]
         assert "skipped" in job["if"]
         assert runner_label in job["runs-on"]
@@ -408,7 +401,8 @@ def test_each_architecture_hands_its_run_builder_back_exactly_once():
         assert "GITCODE_TOKEN" not in text
 
     assert workflow_text.count("phase1-native-release") == 2
-    assert "docker buildx rm" not in workflow_text
+    for path in (WORKFLOW_PATH, ROUND_PATH, DECIDE_PATH):
+        assert "docker buildx rm" not in path.read_text()
 
 
 def test_test_duplicate_pr_skip_has_an_explicit_production_removal_marker():
@@ -427,6 +421,7 @@ def test_actionlint_knows_the_confirmed_custom_runner_labels():
     ]
 
 
+
 def test_jobs_and_run_have_readable_display_names():
     data = _workflow()
 
@@ -434,9 +429,15 @@ def test_jobs_and_run_have_readable_display_names():
     assert "inputs.app" in data["run-name"]
     expected = {
         "prepare": "Generate candidate on x86_64",
-        "validate_x86": "Build, test, and repair on x86_64",
-        "validate_arm": "Build, test, and repair on aarch64",
-        "revalidate_x86": "Revalidate final candidate on x86_64",
+        "seed_resume": "Seed resumed round candidate",
+        "round1": "Round 1",
+        "decide1": "Decision 1",
+        "round2": "Round 2",
+        "decide2": "Decision 2",
+        "round3": "Round 3",
+        "decide3": "Decision 3",
+        "round4": "Round 4",
+        "decide4": "Decision 4",
         "package_candidate": "Verify and seal validated candidate",
         "release_x86_builders": "Release x86_64 run builders",
         "release_arm_builders": "Release aarch64 run builders",
@@ -444,39 +445,34 @@ def test_jobs_and_run_have_readable_display_names():
         "issue_contract_test": "Exercise failure Issue lifecycle",
     }
     assert {
-        job_id: job["name"]
-        for job_id, job in data["jobs"].items()
+        job_id: job["name"] for job_id, job in data["jobs"].items()
     } == expected
+
 
 
 def test_pipeline_smoke_reuses_candidate_chain_without_ai_or_gitcode_steps():
     jobs = _workflow()["jobs"]
-    for job_name in (
-        "prepare",
-        "validate_x86",
-        "validate_arm",
-        "revalidate_x86",
-        "package_candidate",
-    ):
-        assert "pipeline_smoke" in jobs[job_name]["if"]
+    assert "pipeline_smoke" in jobs["prepare"]["if"]
+    assert "converged == 'true'" in jobs["package_candidate"]["if"]
 
-    prepare_steps = {
-        step["name"]: step for step in jobs["prepare"]["steps"]
-    }
+    prepare_steps = {step["name"]: step for step in jobs["prepare"]["steps"]}
     smoke_generate = prepare_steps["Create deterministic smoke candidate"]
     assert "pipeline_smoke" in smoke_generate["if"]
     assert "phase1-smoke-generate" in smoke_generate["run"]
     assert "DEEPSEEK_API_KEY" not in _job_text(smoke_generate)
 
-    for job_name in ("validate_x86", "validate_arm", "revalidate_x86"):
+    # The smoke candidate always passes, so decide1 converges and rounds 2-4
+    # skip themselves; the same round jobs serve both paths.
+    round_jobs = _workflow(ROUND_PATH)["jobs"]
+    for job in round_jobs.values():
         smoke_steps = [
             step
-            for step in jobs[job_name]["steps"]
-            if step["name"].startswith("Run native pipeline smoke")
+            for step in job["steps"]
+            if step.get("name", "").startswith("Run native pipeline smoke")
         ]
         assert len(smoke_steps) == 1
         assert "phase1-native-smoke" in smoke_steps[0]["run"]
-        assert "DEEPSEEK_API_KEY" not in _job_text(smoke_steps[0])
+        assert "pipeline_smoke" in smoke_steps[0]["if"]
 
     package_text = _job_text(jobs["package_candidate"])
     assert "phase1-smoke-candidate-" in package_text
@@ -532,33 +528,23 @@ def test_validate_only_lints_before_agent_qa_inside_generation():
     assert standalone_lint["if"] == "${{ inputs.operation == 'pipeline_smoke' }}"
 
 
-def test_native_jobs_upload_reports_and_diagnostic_patch_after_failure():
-    jobs = _workflow()["jobs"]
 
-    for job_name, label, directory in (
-        ("validate_x86", "x86", "phase1-x86"),
-        ("validate_arm", "ARM", "phase1-arm"),
-    ):
-        steps = {step["name"]: step for step in jobs[job_name]["steps"]}
-        diagnostic = steps[f"Create {label} failure diagnostic patch"]
-        assert "failure()" in diagnostic["if"]
-        assert diagnostic["continue-on-error"] is True
-        assert diagnostic["uses"] == "./.github/actions/phase1-emit-patch"
-        assert diagnostic["with"]["tolerate-missing"] == "true"
-        assert diagnostic["with"]["output-dir"] == (
-            f"${{{{ runner.temp }}}}/{directory}"
-        )
+def test_a_failed_round_still_publishes_the_evidence_the_decision_needs():
+    round_jobs = _workflow(ROUND_PATH)["jobs"]
 
-        upload_name = (
-            "Upload x86-converged artifact"
-            if job_name == "validate_x86"
-            else "Upload ARM-converged artifact"
-        )
-        upload = steps[upload_name]
+    for name, architecture in (("x86_64", "x86_64"), ("aarch64", "aarch64")):
+        steps = {step.get("name"): step for step in round_jobs[name]["steps"]}
+        validate = steps[f"Validate natively on {architecture}"]
+        # The decision stage rules on the round, so a failed build must not
+        # fail the job before its report is uploaded.
+        assert validate["continue-on-error"] is True
+        upload = steps[f"Upload {architecture} round evidence"]
         assert "always()" in upload["if"]
-        assert upload["with"]["path"] == (
-            f"${{{{ runner.temp }}}}/{directory}/"
+        assert upload["with"]["name"] == (
+            "phase1-round${{ inputs.round }}-"
+            f"{architecture}" + "-${{ github.run_id }}"
         )
+        assert upload["with"]["if-no-files-found"] == "error"
 
 
 def test_summary_markdown_does_not_trigger_single_quote_shellcheck_warning():
@@ -609,14 +595,12 @@ def _delegated_setup_step(job):
     return setup
 
 
+
 def test_every_native_job_delegates_setup_and_keeps_checkout_in_the_job():
     jobs = _workflow()["jobs"]
 
     for name, arch, preflight in (
         ("prepare", "x86_64", True),
-        ("validate_x86", "x86_64", True),
-        ("validate_arm", "aarch64", True),
-        ("revalidate_x86", "x86_64", True),
         ("package_candidate", "x86_64", False),
     ):
         setup = _delegated_setup_step(jobs[name])
@@ -624,9 +608,16 @@ def test_every_native_job_delegates_setup_and_keeps_checkout_in_the_job():
         assert setup["with"]["arch"] == arch
         assert setup["with"].get("preflight", "false") == str(preflight).lower()
 
+    for job in _workflow(ROUND_PATH)["jobs"].values():
+        setup = _delegated_setup_step(job)
+        assert setup["with"]["preflight"] == "true"
+    decide_setup = _delegated_setup_step(_workflow(DECIDE_PATH)["jobs"]["decide"])
+    assert decide_setup["with"]["arch"] == "x86_64"
+
     for name in ("deliver_fork_pr", "issue_contract_test"):
         setup = _delegated_setup_step(jobs[name])
         assert "with" not in setup
+
 
 
 def test_replay_action_always_pins_the_exact_validated_base_sha():
@@ -637,21 +628,15 @@ def test_replay_action_always_pins_the_exact_validated_base_sha():
     # A plain clone would silently drift onto a newer target master.
     assert replay.count("target-clone") == 1
 
-    for job, step_name, input_dir in (
-        ("validate_x86", "Replay exact generation candidate", "phase1-input"),
-        ("validate_arm", "Replay exact x86-converged candidate", "phase1-input"),
-        ("revalidate_x86", "Replay final patch", "phase1-input"),
-        ("package_candidate", "Replay final validated patch", "arm"),
-    ):
-        steps = {
-            step["name"]: step
-            for step in _workflow()["jobs"][job]["steps"]
-        }
-        replay_step = steps[step_name]
-        assert replay_step["uses"] == "./.github/actions/phase1-replay"
-        assert replay_step["with"]["input-dir"] == (
-            f"${{{{ runner.temp }}}}/{input_dir}"
-        )
+    replays = [
+        step
+        for path in (WORKFLOW_PATH, ROUND_PATH, DECIDE_PATH)
+        for job in _workflow(path)["jobs"].values()
+        for step in job.get("steps", [])
+        if step.get("uses") == "./.github/actions/phase1-replay"
+    ]
+    assert len(replays) == 4
+    assert all("input-dir" in step["with"] for step in replays)
 
 
 def test_emit_patch_action_refuses_a_missing_base_sha_by_default():

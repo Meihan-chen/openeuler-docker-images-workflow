@@ -15,9 +15,7 @@ on:
           - pipeline_smoke
           - validate_only
           - scenario_one
-          - resume_x86
-          - resume_arm
-          - resume_revalidate_x86
+          - resume_round
           - resume_package
           - recover_package
           - fork_pr
@@ -25,6 +23,11 @@ on:
       source_run_id:
         description: "Failed validation run ID required by resume operations"
         required: false
+        type: string
+      resume_from_round:
+        description: "Round that resume_round restarts from (1-4)"
+        required: false
+        default: "1"
         type: string
       generation_run_id:
         description: "Generation run ID required by recover_package"
@@ -186,6 +189,22 @@ jobs:
           output-dir: ${{ runner.temp }}/phase1-prepare
           tolerate-missing: "true"
 
+      - name: Stage the round 1 candidate
+        run: |
+          mkdir -p "${RUNNER_TEMP}/phase1-patch1"
+          cp "${RUNNER_TEMP}/phase1-prepare/task-spec.json" \
+            "${RUNNER_TEMP}/phase1-prepare/base-sha.txt" \
+            "${RUNNER_TEMP}/phase1-prepare/changes.patch" \
+            "${RUNNER_TEMP}/phase1-patch1/"
+
+      - name: Upload the round 1 candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: phase1-patch1-${{ github.run_id }}
+          path: ${{ runner.temp }}/phase1-patch1/
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Upload generation artifact
         if: ${{ always() && steps.base.outputs.sha != '' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -195,404 +214,161 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-  validate_x86:
-    name: Build, test, and repair on x86_64
-    if: >-
-      ${{ always() &&
-          (inputs.operation == 'pipeline_smoke' ||
-           inputs.operation == 'validate_only' ||
-           inputs.operation == 'scenario_one' ||
-           inputs.operation == 'resume_x86') &&
-          (needs.prepare.result == 'success' ||
-           inputs.operation == 'resume_x86') }}
-    needs: prepare
+  seed_resume:
+    name: Seed resumed round candidate
+    if: ${{ inputs.operation == 'resume_round' }}
     runs-on: [self-hosted, Linux, X64, oe-image-x86]
-    timeout-minutes: 180
+    timeout-minutes: 15
     steps:
-      - name: Require the source run ID
-        if: ${{ inputs.operation == 'resume_x86' }}
+      - name: Require the resume inputs
         env:
           SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          RESUME_ROUND: ${{ inputs.resume_from_round }}
         run: |
           case "${SOURCE_RUN_ID}" in
             ''|*[!0-9]*|0) echo "source_run_id must be a positive integer" >&2; exit 2 ;;
           esac
+          case "${RESUME_ROUND}" in
+            1|2|3|4) ;;
+            *) echo "resume_from_round must be 1, 2, 3 or 4" >&2; exit 2 ;;
+          esac
 
-      - name: Check out workflow source
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-
-      - name: Set up native x86 runner
-        id: tools
-        uses: ./.github/actions/phase1-setup
-        with:
-          arch: x86_64
-          preflight: "true"
-
-      - name: Download generation artifact
-        if: >-
-          ${{ inputs.operation == 'pipeline_smoke' ||
-              inputs.operation == 'validate_only' ||
-              inputs.operation == 'scenario_one' }}
+      - name: Download the source round candidate
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: phase1-generation-${{ github.run_id }}
-          path: ${{ runner.temp }}/phase1-input
-
-      - name: Download prior x86 diagnostic artifact
-        if: ${{ inputs.operation == 'resume_x86' }}
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: phase1-x86-${{ inputs.source_run_id }}
-          path: ${{ runner.temp }}/phase1-input
+          name: >-
+            phase1-patch${{ inputs.resume_from_round }}-${{
+            inputs.source_run_id }}
+          path: ${{ runner.temp }}/phase1-seed
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
           run-id: ${{ inputs.source_run_id }}
 
-      - name: Replay exact generation candidate
-        uses: ./.github/actions/phase1-replay
-        with:
-          input-dir: ${{ runner.temp }}/phase1-input
-          workspace: ${{ runner.temp }}/phase1-target
-
-      - name: Build, test, and repair on x86_64 (max 3)
-        if: ${{ inputs.operation != 'pipeline_smoke' }}
-        env:
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-        run: |
-          base_sha="$(tr -d '\n' \
-            < "${RUNNER_TEMP}/phase1-input/base-sha.txt")"
-          mkdir -p "${RUNNER_TEMP}/phase1-x86"
-          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
-            phase1-native-repair \
-            --workspace "${RUNNER_TEMP}/phase1-target" \
-            --task-spec "${RUNNER_TEMP}/phase1-input/task-spec.json" \
-            --base-sha "${base_sha}" \
-            --architecture x86_64 \
-            --run-id "${{ github.run_id }}" \
-            --dgoss "${{ steps.tools.outputs.dgoss_path }}" \
-            --goss "${{ steps.tools.outputs.goss_path }}" \
-            --report "${RUNNER_TEMP}/phase1-x86/x86_64.json" \
-            --junit "${RUNNER_TEMP}/phase1-x86/x86_64.junit.xml" \
-            --repair-report-dir \
-              "${RUNNER_TEMP}/phase1-x86/x86-repair-agents" \
-            --opencode "${{ steps.tools.outputs.opencode_path }}"
-
-      - name: Run native pipeline smoke on x86_64
-        if: ${{ inputs.operation == 'pipeline_smoke' }}
-        run: |
-          mkdir -p "${RUNNER_TEMP}/phase1-x86"
-          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
-            phase1-native-smoke \
-            --workspace "${RUNNER_TEMP}/phase1-target" \
-            --task-spec "${RUNNER_TEMP}/phase1-input/task-spec.json" \
-            --architecture x86_64 \
-            --run-id "${{ github.run_id }}" \
-            --dgoss "${{ steps.tools.outputs.dgoss_path }}" \
-            --goss "${{ steps.tools.outputs.goss_path }}" \
-            --report "${RUNNER_TEMP}/phase1-x86/x86_64.json" \
-            --junit "${RUNNER_TEMP}/phase1-x86/x86_64.junit.xml" \
-            --repair-report-dir \
-              "${RUNNER_TEMP}/phase1-x86/x86-repair-agents"
-
-      - name: Create x86-converged patch
-        uses: ./.github/actions/phase1-emit-patch
-        with:
-          workspace: ${{ runner.temp }}/phase1-target
-          input-dir: ${{ runner.temp }}/phase1-input
-          output-dir: ${{ runner.temp }}/phase1-x86
-
-      - name: Create x86 failure diagnostic patch
-        if: ${{ failure() }}
-        continue-on-error: true
-        uses: ./.github/actions/phase1-emit-patch
-        with:
-          workspace: ${{ runner.temp }}/phase1-target
-          input-dir: ${{ runner.temp }}/phase1-input
-          output-dir: ${{ runner.temp }}/phase1-x86
-          tolerate-missing: "true"
-
-      - name: Upload x86-converged artifact
-        if: ${{ always() }}
+      - name: Republish it under this run
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: phase1-x86-${{ github.run_id }}
-          path: ${{ runner.temp }}/phase1-x86/
+          name: >-
+            phase1-patch${{ inputs.resume_from_round }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/phase1-seed/
           if-no-files-found: error
           retention-days: 30
 
-  validate_arm:
-    name: Build, test, and repair on aarch64
+  round1:
+    name: Round 1
+    needs: [prepare, seed_resume]
     if: >-
       ${{ always() &&
-          (inputs.operation == 'pipeline_smoke' ||
-           inputs.operation == 'validate_only' ||
-           inputs.operation == 'scenario_one' ||
-           inputs.operation == 'resume_x86' ||
-           inputs.operation == 'resume_arm') &&
-          (needs.validate_x86.result == 'success' ||
-           inputs.operation == 'resume_arm') }}
-    needs: validate_x86
-    runs-on: [self-hosted, Linux, ARM64, oe-image-arm64]
-    timeout-minutes: 180
-    steps:
-      - name: Require the source run ID
-        if: ${{ inputs.operation == 'resume_arm' }}
-        env:
-          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
-        run: |
-          case "${SOURCE_RUN_ID}" in
-            ''|*[!0-9]*|0) echo "source_run_id must be a positive integer" >&2; exit 2 ;;
-          esac
+          ((needs.prepare.result == 'success') ||
+           (needs.seed_resume.result == 'success' &&
+            inputs.resume_from_round == '1')) }}
+    uses: ./.github/workflows/phase1-round.yml
+    with:
+      round: "1"
+      operation: ${{ inputs.operation }}
 
-      - name: Check out workflow source
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+  decide1:
+    name: Decision 1
+    needs: round1
+    if: ${{ always() && needs.round1.result != 'skipped' }}
+    uses: ./.github/workflows/phase1-decide.yml
+    with:
+      round: "1"
+      max_rounds: "3"
+      next_round: "2"
+    secrets:
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
 
-      - name: Set up native ARM runner
-        id: tools
-        uses: ./.github/actions/phase1-setup
-        with:
-          arch: aarch64
-          preflight: "true"
-
-      - name: Download x86-converged artifact
-        if: ${{ inputs.operation != 'resume_arm' }}
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: phase1-x86-${{ github.run_id }}
-          path: ${{ runner.temp }}/phase1-input
-
-      - name: Download prior ARM diagnostic artifact
-        if: ${{ inputs.operation == 'resume_arm' }}
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: phase1-arm-${{ inputs.source_run_id }}
-          path: ${{ runner.temp }}/phase1-input
-          github-token: ${{ github.token }}
-          repository: ${{ github.repository }}
-          run-id: ${{ inputs.source_run_id }}
-
-      - name: Replay exact x86-converged candidate
-        uses: ./.github/actions/phase1-replay
-        with:
-          input-dir: ${{ runner.temp }}/phase1-input
-          workspace: ${{ runner.temp }}/phase1-target
-
-      - name: Build, test, and repair on aarch64 (max 3)
-        if: ${{ inputs.operation != 'pipeline_smoke' }}
-        env:
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-        run: |
-          base_sha="$(tr -d '\n' \
-            < "${RUNNER_TEMP}/phase1-input/base-sha.txt")"
-          mkdir -p "${RUNNER_TEMP}/phase1-arm"
-          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
-            phase1-native-repair \
-            --workspace "${RUNNER_TEMP}/phase1-target" \
-            --task-spec "${RUNNER_TEMP}/phase1-input/task-spec.json" \
-            --base-sha "${base_sha}" \
-            --architecture aarch64 \
-            --run-id "${{ github.run_id }}" \
-            --dgoss "${{ steps.tools.outputs.dgoss_path }}" \
-            --goss "${{ steps.tools.outputs.goss_path }}" \
-            --report "${RUNNER_TEMP}/phase1-arm/aarch64.json" \
-            --junit "${RUNNER_TEMP}/phase1-arm/aarch64.junit.xml" \
-            --repair-report-dir \
-              "${RUNNER_TEMP}/phase1-arm/arm-repair-agents" \
-            --opencode "${{ steps.tools.outputs.opencode_path }}"
-
-      - name: Run native pipeline smoke on aarch64
-        if: ${{ inputs.operation == 'pipeline_smoke' }}
-        run: |
-          mkdir -p "${RUNNER_TEMP}/phase1-arm"
-          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
-            phase1-native-smoke \
-            --workspace "${RUNNER_TEMP}/phase1-target" \
-            --task-spec "${RUNNER_TEMP}/phase1-input/task-spec.json" \
-            --architecture aarch64 \
-            --run-id "${{ github.run_id }}" \
-            --dgoss "${{ steps.tools.outputs.dgoss_path }}" \
-            --goss "${{ steps.tools.outputs.goss_path }}" \
-            --report "${RUNNER_TEMP}/phase1-arm/aarch64.json" \
-            --junit "${RUNNER_TEMP}/phase1-arm/aarch64.junit.xml" \
-            --repair-report-dir \
-              "${RUNNER_TEMP}/phase1-arm/arm-repair-agents"
-
-      - name: Create ARM-converged final patch
-        uses: ./.github/actions/phase1-emit-patch
-        with:
-          workspace: ${{ runner.temp }}/phase1-target
-          input-dir: ${{ runner.temp }}/phase1-input
-          output-dir: ${{ runner.temp }}/phase1-arm
-
-      - name: Create ARM failure diagnostic patch
-        if: ${{ failure() }}
-        continue-on-error: true
-        uses: ./.github/actions/phase1-emit-patch
-        with:
-          workspace: ${{ runner.temp }}/phase1-target
-          input-dir: ${{ runner.temp }}/phase1-input
-          output-dir: ${{ runner.temp }}/phase1-arm
-          tolerate-missing: "true"
-
-      - name: Upload ARM-converged artifact
-        if: ${{ always() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: phase1-arm-${{ github.run_id }}
-          path: ${{ runner.temp }}/phase1-arm/
-          if-no-files-found: error
-          retention-days: 30
-
-  revalidate_x86:
-    name: Revalidate final candidate on x86_64
+  round2:
+    name: Round 2
+    needs: [decide1, seed_resume]
     if: >-
       ${{ always() &&
-          (((inputs.operation == 'pipeline_smoke' ||
-             inputs.operation == 'validate_only' ||
-             inputs.operation == 'scenario_one' ||
-             inputs.operation == 'resume_x86' ||
-             inputs.operation == 'resume_arm') &&
-            needs.validate_arm.result == 'success') ||
-           inputs.operation == 'resume_revalidate_x86') }}
-    needs: validate_arm
-    runs-on: [self-hosted, Linux, X64, oe-image-x86]
-    timeout-minutes: 180
-    steps:
-      - name: Require the source run ID
-        if: ${{ inputs.operation == 'resume_revalidate_x86' }}
-        env:
-          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
-        run: |
-          case "${SOURCE_RUN_ID}" in
-            ''|*[!0-9]*|0) echo "source_run_id must be a positive integer" >&2; exit 2 ;;
-          esac
+          ((needs.decide1.result == 'success' &&
+            needs.decide1.outputs.converged != 'true') ||
+           (needs.seed_resume.result == 'success' &&
+            inputs.resume_from_round == '2')) }}
+    uses: ./.github/workflows/phase1-round.yml
+    with:
+      round: "2"
+      operation: ${{ inputs.operation }}
 
-      - name: Check out workflow source
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+  decide2:
+    name: Decision 2
+    needs: round2
+    if: ${{ always() && needs.round2.result != 'skipped' }}
+    uses: ./.github/workflows/phase1-decide.yml
+    with:
+      round: "2"
+      max_rounds: "3"
+      next_round: "3"
+    secrets:
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
 
-      - name: Set up native x86 runner
-        id: tools
-        uses: ./.github/actions/phase1-setup
-        with:
-          arch: x86_64
-          preflight: "true"
+  round3:
+    name: Round 3
+    needs: [decide2, seed_resume]
+    if: >-
+      ${{ always() &&
+          ((needs.decide2.result == 'success' &&
+            needs.decide2.outputs.converged != 'true') ||
+           (needs.seed_resume.result == 'success' &&
+            inputs.resume_from_round == '3')) }}
+    uses: ./.github/workflows/phase1-round.yml
+    with:
+      round: "3"
+      operation: ${{ inputs.operation }}
 
-      - name: Download ARM-converged artifact
-        if: ${{ inputs.operation != 'resume_revalidate_x86' }}
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: phase1-arm-${{ github.run_id }}
-          path: ${{ runner.temp }}/phase1-input
+  decide3:
+    name: Decision 3
+    needs: round3
+    if: ${{ always() && needs.round3.result != 'skipped' }}
+    uses: ./.github/workflows/phase1-decide.yml
+    with:
+      round: "3"
+      max_rounds: "3"
+      next_round: "4"
+    secrets:
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
 
-      - name: Download prior ARM-converged artifact
-        if: ${{ inputs.operation == 'resume_revalidate_x86' }}
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: phase1-arm-${{ inputs.source_run_id }}
-          path: ${{ runner.temp }}/phase1-input
-          github-token: ${{ github.token }}
-          repository: ${{ github.repository }}
-          run-id: ${{ inputs.source_run_id }}
+  round4:
+    name: Round 4
+    needs: [decide3, seed_resume]
+    if: >-
+      ${{ always() &&
+          ((needs.decide3.result == 'success' &&
+            needs.decide3.outputs.converged != 'true') ||
+           (needs.seed_resume.result == 'success' &&
+            inputs.resume_from_round == '4')) }}
+    uses: ./.github/workflows/phase1-round.yml
+    with:
+      round: "4"
+      operation: ${{ inputs.operation }}
 
-      - name: Verify prior ARM validation passed
-        if: ${{ inputs.operation == 'resume_revalidate_x86' }}
-        run: |
-          "${{ steps.tools.outputs.jq_path }}" -e \
-            '.status == "passed" and
-             .architecture == "aarch64" and
-             .checks == {
-               "native_build": true,
-               "dgoss": true,
-               "shared_tests": true,
-               "restart_persistence": true
-             }' \
-            "${RUNNER_TEMP}/phase1-input/aarch64.json" > /dev/null
-
-      - name: Replay final patch
-        uses: ./.github/actions/phase1-replay
-        with:
-          input-dir: ${{ runner.temp }}/phase1-input
-          workspace: ${{ runner.temp }}/phase1-target
-
-      - name: Enforce resumed candidate gate
-        if: ${{ inputs.operation == 'resume_revalidate_x86' }}
-        run: |
-          base_sha="$(tr -d '\n' \
-            < "${RUNNER_TEMP}/phase1-input/base-sha.txt")"
-          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/gate_diff.py \
-            task-contract \
-            --phase generated \
-            --workspace "${RUNNER_TEMP}/phase1-target" \
-            --task-spec "${RUNNER_TEMP}/phase1-input/task-spec.json" \
-            --base-sha "${base_sha}" \
-            > "${RUNNER_TEMP}/resume-final-x86-gates.json"
-
-      - name: Revalidate final patch natively on x86
-        if: ${{ inputs.operation != 'pipeline_smoke' }}
-        run: |
-          mkdir -p "${RUNNER_TEMP}/phase1-final-x86"
-          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
-            phase1-native-validate \
-            --workspace "${RUNNER_TEMP}/phase1-target" \
-            --task-spec "${RUNNER_TEMP}/phase1-input/task-spec.json" \
-            --architecture x86_64 \
-            --run-id "${{ github.run_id }}" \
-            --dgoss "${{ steps.tools.outputs.dgoss_path }}" \
-            --goss "${{ steps.tools.outputs.goss_path }}" \
-            --report "${RUNNER_TEMP}/phase1-final-x86/x86_64.json" \
-            --junit \
-              "${RUNNER_TEMP}/phase1-final-x86/x86_64.junit.xml"
-
-      - name: Run native pipeline smoke on final x86_64 candidate
-        if: ${{ inputs.operation == 'pipeline_smoke' }}
-        run: |
-          mkdir -p "${RUNNER_TEMP}/phase1-final-x86"
-          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
-            phase1-native-smoke \
-            --workspace "${RUNNER_TEMP}/phase1-target" \
-            --task-spec "${RUNNER_TEMP}/phase1-input/task-spec.json" \
-            --architecture x86_64 \
-            --run-id "${{ github.run_id }}" \
-            --dgoss "${{ steps.tools.outputs.dgoss_path }}" \
-            --goss "${{ steps.tools.outputs.goss_path }}" \
-            --report "${RUNNER_TEMP}/phase1-final-x86/x86_64.json" \
-            --junit \
-              "${RUNNER_TEMP}/phase1-final-x86/x86_64.junit.xml" \
-            --repair-report-dir \
-              "${RUNNER_TEMP}/phase1-final-x86/smoke-agents"
-
-      - name: Upload final x86 evidence
-        if: ${{ always() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: phase1-final-x86-${{ github.run_id }}
-          path: ${{ runner.temp }}/phase1-final-x86/
-          if-no-files-found: error
-          retention-days: 30
-
-      - name: Publish resume validation result
-        if: >-
-          ${{ inputs.operation == 'resume_x86' ||
-              inputs.operation == 'resume_arm' ||
-              inputs.operation == 'resume_revalidate_x86' }}
-        run: |
-          {
-            printf '## Resume validation passed\n\n'
-            printf -- '- This cross-run result is diagnostic only.\n'
-            printf -- '- Run a fresh validate_only before fork_pr.\n'
-          } >> "${GITHUB_STEP_SUMMARY}"
+  decide4:
+    name: Decision 4
+    needs: round4
+    if: ${{ always() && needs.round4.result != 'skipped' }}
+    uses: ./.github/workflows/phase1-decide.yml
+    with:
+      round: "4"
+      max_rounds: "3"
+      next_round: "5"
+    secrets:
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
 
   package_candidate:
     name: Verify and seal validated candidate
+    # A round that passed on both architectures is itself the proof, so the
+    # candidate is sealed from whichever round converged.
     if: >-
       ${{ always() &&
-          (((inputs.operation == 'pipeline_smoke' ||
-             inputs.operation == 'validate_only' ||
-             inputs.operation == 'scenario_one') &&
-            needs.revalidate_x86.result == 'success') ||
+          (needs.decide1.outputs.converged == 'true' ||
+           needs.decide2.outputs.converged == 'true' ||
+           needs.decide3.outputs.converged == 'true' ||
+           needs.decide4.outputs.converged == 'true' ||
            inputs.operation == 'resume_package' ||
            inputs.operation == 'recover_package') }}
-    needs: revalidate_x86
+    needs: [decide1, decide2, decide3, decide4]
     runs-on: [self-hosted, Linux, X64, oe-image-x86]
     timeout-minutes: 60
     steps:
@@ -658,6 +434,9 @@ jobs:
             inputs.source_run_id || github.run_id }}
 
       - name: Download x86 repair evidence
+        if: >-
+          ${{ inputs.operation == 'resume_package' ||
+              inputs.operation == 'recover_package' }}
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: >-
@@ -674,6 +453,9 @@ jobs:
             inputs.source_run_id || github.run_id }}
 
       - name: Download ARM final patch and evidence
+        if: >-
+          ${{ inputs.operation == 'resume_package' ||
+              inputs.operation == 'recover_package' }}
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: >-
@@ -690,6 +472,9 @@ jobs:
             inputs.source_run_id || github.run_id }}
 
       - name: Download final x86 evidence
+        if: >-
+          ${{ inputs.operation == 'resume_package' ||
+              inputs.operation == 'recover_package' }}
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: >-
@@ -704,6 +489,47 @@ jobs:
             ${{ (inputs.operation == 'resume_package' ||
             inputs.operation == 'recover_package') &&
             inputs.source_run_id || github.run_id }}
+
+      - name: Download the converged round
+        if: >-
+          ${{ inputs.operation != 'resume_package' &&
+              inputs.operation != 'recover_package' }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: phase1-converged-${{ github.run_id }}
+          path: ${{ runner.temp }}/converged
+
+      - name: Download round decision evidence
+        if: >-
+          ${{ inputs.operation != 'resume_package' &&
+              inputs.operation != 'recover_package' }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: phase1-decide*-${{ github.run_id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/decide-agents
+
+      - name: Lay the converged round out as sealing input
+        if: >-
+          ${{ inputs.operation != 'resume_package' &&
+              inputs.operation != 'recover_package' }}
+        run: |
+          mkdir -p "${RUNNER_TEMP}/arm/arm-repair-agents" \
+            "${RUNNER_TEMP}/final-x86" \
+            "${RUNNER_TEMP}/x86/x86-repair-agents"
+          cp "${RUNNER_TEMP}/converged/task-spec.json" \
+            "${RUNNER_TEMP}/converged/base-sha.txt" \
+            "${RUNNER_TEMP}/converged/changes.patch" \
+            "${RUNNER_TEMP}/converged/aarch64.json" \
+            "${RUNNER_TEMP}/converged/aarch64.junit.xml" \
+            "${RUNNER_TEMP}/arm/"
+          cp "${RUNNER_TEMP}/converged/x86_64.json" \
+            "${RUNNER_TEMP}/converged/x86_64.junit.xml" \
+            "${RUNNER_TEMP}/final-x86/"
+          if [ -d "${RUNNER_TEMP}/decide-agents" ]; then
+            cp -a "${RUNNER_TEMP}/decide-agents/." \
+              "${RUNNER_TEMP}/x86/x86-repair-agents/"
+          fi
 
       - name: Verify recovered artifact identity
         if: ${{ inputs.operation == 'recover_package' }}
@@ -978,9 +804,9 @@ jobs:
     # layer cache, so the run has to hand it back explicitly.
     if: >-
       ${{ always() &&
-          (needs.validate_x86.result != 'skipped' ||
-           needs.revalidate_x86.result != 'skipped') }}
-    needs: [validate_x86, revalidate_x86, package_candidate]
+          (needs.round1.result != 'skipped' ||
+           needs.decide1.result != 'skipped') }}
+    needs: [round1, round2, round3, round4, decide1, package_candidate]
     runs-on: [self-hosted, Linux, X64, oe-image-x86]
     timeout-minutes: 15
     steps:
@@ -1000,8 +826,8 @@ jobs:
 
   release_arm_builders:
     name: Release aarch64 run builders
-    if: ${{ always() && needs.validate_arm.result != 'skipped' }}
-    needs: [validate_arm]
+    if: ${{ always() && needs.round1.result != 'skipped' }}
+    needs: [round1, round2, round3, round4]
     runs-on: [self-hosted, Linux, ARM64, oe-image-arm64]
     timeout-minutes: 15
     steps:

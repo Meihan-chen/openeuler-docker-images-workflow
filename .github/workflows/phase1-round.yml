@@ -1,0 +1,165 @@
+name: Phase 1 - Validation round
+
+# One round validates the same candidate on both architectures at once, so
+# the round that passes on both is itself the dual-architecture proof.
+# Validation must not fail the job: the decide stage reads both reports and
+# rules on the round, so a failed build still has to publish its evidence.
+
+on:
+  workflow_call:
+    inputs:
+      round:
+        description: "Validation round number"
+        required: true
+        type: string
+      operation:
+        description: "Phase-one operation being executed"
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  PYTHONUNBUFFERED: "1"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  x86_64:
+    name: Validate round ${{ inputs.round }} on x86_64
+    runs-on: [self-hosted, Linux, X64, oe-image-x86]
+    timeout-minutes: 180
+    steps:
+      - name: Check out workflow source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Provision phase-one tooling
+        id: tools
+        uses: ./.github/actions/phase1-setup
+        with:
+          arch: x86_64
+          preflight: "true"
+
+      - name: Download round candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: phase1-patch${{ inputs.round }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/phase1-input
+
+      - name: Replay round candidate
+        uses: ./.github/actions/phase1-replay
+        with:
+          input-dir: ${{ runner.temp }}/phase1-input
+          workspace: ${{ runner.temp }}/phase1-target
+
+      - name: Validate natively on x86_64
+        if: ${{ inputs.operation != 'pipeline_smoke' }}
+        continue-on-error: true
+        run: |
+          mkdir -p "${RUNNER_TEMP}/phase1-round"
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
+            phase1-native-validate \
+            --workspace "${RUNNER_TEMP}/phase1-target" \
+            --task-spec "${RUNNER_TEMP}/phase1-input/task-spec.json" \
+            --architecture x86_64 \
+            --run-id "${{ github.run_id }}" \
+            --dgoss "${{ steps.tools.outputs.dgoss_path }}" \
+            --goss "${{ steps.tools.outputs.goss_path }}" \
+            --report "${RUNNER_TEMP}/phase1-round/x86_64.json" \
+            --junit "${RUNNER_TEMP}/phase1-round/x86_64.junit.xml"
+
+      - name: Run native pipeline smoke on x86_64
+        if: ${{ inputs.operation == 'pipeline_smoke' }}
+        continue-on-error: true
+        run: |
+          mkdir -p "${RUNNER_TEMP}/phase1-round"
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
+            phase1-native-smoke \
+            --workspace "${RUNNER_TEMP}/phase1-target" \
+            --task-spec "${RUNNER_TEMP}/phase1-input/task-spec.json" \
+            --architecture x86_64 \
+            --run-id "${{ github.run_id }}" \
+            --dgoss "${{ steps.tools.outputs.dgoss_path }}" \
+            --goss "${{ steps.tools.outputs.goss_path }}" \
+            --report "${RUNNER_TEMP}/phase1-round/x86_64.json" \
+            --junit "${RUNNER_TEMP}/phase1-round/x86_64.junit.xml" \
+            --repair-report-dir "${RUNNER_TEMP}/phase1-round/smoke-agents"
+
+      - name: Upload x86_64 round evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: phase1-round${{ inputs.round }}-x86_64-${{ github.run_id }}
+          path: ${{ runner.temp }}/phase1-round/
+          if-no-files-found: error
+          retention-days: 30
+
+  aarch64:
+    name: Validate round ${{ inputs.round }} on aarch64
+    runs-on: [self-hosted, Linux, ARM64, oe-image-arm64]
+    timeout-minutes: 180
+    steps:
+      - name: Check out workflow source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Provision phase-one tooling
+        id: tools
+        uses: ./.github/actions/phase1-setup
+        with:
+          arch: aarch64
+          preflight: "true"
+
+      - name: Download round candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: phase1-patch${{ inputs.round }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/phase1-input
+
+      - name: Replay round candidate
+        uses: ./.github/actions/phase1-replay
+        with:
+          input-dir: ${{ runner.temp }}/phase1-input
+          workspace: ${{ runner.temp }}/phase1-target
+
+      - name: Validate natively on aarch64
+        if: ${{ inputs.operation != 'pipeline_smoke' }}
+        continue-on-error: true
+        run: |
+          mkdir -p "${RUNNER_TEMP}/phase1-round"
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
+            phase1-native-validate \
+            --workspace "${RUNNER_TEMP}/phase1-target" \
+            --task-spec "${RUNNER_TEMP}/phase1-input/task-spec.json" \
+            --architecture aarch64 \
+            --run-id "${{ github.run_id }}" \
+            --dgoss "${{ steps.tools.outputs.dgoss_path }}" \
+            --goss "${{ steps.tools.outputs.goss_path }}" \
+            --report "${RUNNER_TEMP}/phase1-round/aarch64.json" \
+            --junit "${RUNNER_TEMP}/phase1-round/aarch64.junit.xml"
+
+      - name: Run native pipeline smoke on aarch64
+        if: ${{ inputs.operation == 'pipeline_smoke' }}
+        continue-on-error: true
+        run: |
+          mkdir -p "${RUNNER_TEMP}/phase1-round"
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
+            phase1-native-smoke \
+            --workspace "${RUNNER_TEMP}/phase1-target" \
+            --task-spec "${RUNNER_TEMP}/phase1-input/task-spec.json" \
+            --architecture aarch64 \
+            --run-id "${{ github.run_id }}" \
+            --dgoss "${{ steps.tools.outputs.dgoss_path }}" \
+            --goss "${{ steps.tools.outputs.goss_path }}" \
+            --report "${RUNNER_TEMP}/phase1-round/aarch64.json" \
+            --junit "${RUNNER_TEMP}/phase1-round/aarch64.junit.xml" \
+            --repair-report-dir "${RUNNER_TEMP}/phase1-round/smoke-agents"
+
+      - name: Upload aarch64 round evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: phase1-round${{ inputs.round }}-aarch64-${{ github.run_id }}
+          path: ${{ runner.temp }}/phase1-round/
+          if-no-files-found: error
+          retention-days: 30
