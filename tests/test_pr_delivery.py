@@ -23,6 +23,7 @@ def _candidate(
     *,
     testcase_qa_status="approved",
     testcase_repaired=False,
+    native_fixer=False,
 ):
     from scripts.lib.candidate_bundle import CandidateBundle
 
@@ -124,6 +125,39 @@ def _candidate(
             }
         )
     )
+    if native_fixer:
+        nested_agents = root / "reports" / "agents" / "agents"
+        nested_agents.mkdir()
+        (nested_agents / "fixer-native-dual-round1-attempt1.json").write_text(
+            json.dumps(
+                {
+                    "_input_review": {
+                        "kind": "native_validation_failure",
+                        "architectures": {
+                            "x86_64": {"status": "failed"},
+                            "aarch64": {"status": "failed"},
+                        },
+                    },
+                    "changes": [
+                        {
+                            "file": (
+                                "Database/kvrocks/2.16.0/"
+                                "24.03-lts-sp4/Dockerfile"
+                            ),
+                            "change": (
+                                "Disabled unavailable static libstdc++ linkage."
+                            ),
+                        }
+                    ],
+                    "status": "fixed",
+                    "success": True,
+                    "summary": (
+                        "Adjusted the build flags for both architectures."
+                    ),
+                },
+                sort_keys=True,
+            )
+        )
     return CandidateBundle.create(
         root,
         task=_task(),
@@ -189,6 +223,7 @@ def test_pr_content_contains_candidate_and_dual_architecture_evidence(tmp_path):
         "## Summary",
         "## Changes",
         "## Adversarial review",
+        "## Fixer process",
         "## Repository checks",
         "## Checklist",
     ]
@@ -212,6 +247,44 @@ def test_pr_content_contains_candidate_and_dual_architecture_evidence(tmp_path):
     assert "`Database/image-list.yml`" not in content.body.split(
         "## Repository checks", 1
     )[1]
+
+
+def test_pr_content_records_native_fixer_process(tmp_path):
+    from scripts.harness.compose_pr import compose_pull_request
+
+    bundle = _candidate(tmp_path, native_fixer=True)
+
+    content = compose_pull_request(bundle)
+
+    assert "## Fixer process" in content.body
+    assert "- Native Fixer invocations: `1`." in content.body
+    assert (
+        "- Round 1, attempt 1: `fixed` — "
+        "Adjusted the build flags for both architectures."
+    ) in content.body
+    assert (
+        "  - Trigger: `native_validation_failure`; failed architectures: "
+        "`x86_64`, `aarch64`."
+    ) in content.body
+    assert (
+        "  - Change: "
+        "`Database/kvrocks/2.16.0/24.03-lts-sp4/Dockerfile` — "
+        "Disabled unavailable static libstdc++ linkage."
+    ) in content.body
+    assert (
+        "- Final outcome: the repaired candidate passed sealed native "
+        "validation on `x86_64` and `aarch64`."
+    ) in content.body
+
+
+def test_pr_content_records_when_native_fixer_was_not_needed(tmp_path):
+    from scripts.harness.compose_pr import compose_pull_request
+
+    content = compose_pull_request(_candidate(tmp_path))
+
+    assert "## Fixer process" in content.body
+    assert "- Native Fixer invocations: `0`." in content.body
+    assert "- No native repair was required." in content.body
 
 
 def test_pr_content_summarizes_qa_rounds_and_findings(tmp_path):

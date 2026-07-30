@@ -338,6 +338,115 @@ def _qa_review_lines(root: Path, prefix: str, label: str) -> tuple[str, ...]:
     return tuple(lines)
 
 
+def _fixer_process_lines(root: Path) -> tuple[str, ...]:
+    pattern = re.compile(
+        r"^fixer-native-(?P<architecture>[A-Za-z0-9_]+)"
+        r"-round(?P<round>[0-9]+)"
+        r"(?:-attempt(?P<attempt>[0-9]+))?\.json$"
+    )
+
+    def report_order(path: Path) -> tuple[int, int, str]:
+        match = pattern.fullmatch(path.name)
+        if match is None:
+            raise PRDeliveryError("native Fixer evidence filename is invalid")
+        return (
+            int(match.group("round")),
+            int(match.group("attempt") or 1),
+            match.group("architecture"),
+        )
+
+    paths = sorted(
+        (root / "reports" / "agents").rglob("fixer-native-*.json"),
+        key=report_order,
+    )
+    lines = [
+        "## Fixer process",
+        "",
+        f"- Native Fixer invocations: `{len(paths)}`.",
+    ]
+    if not paths:
+        return (
+            *lines,
+            "- No native repair was required.",
+            "- Final outcome: the candidate passed sealed native validation "
+            "on `x86_64` and `aarch64`.",
+            "",
+        )
+
+    for path in paths:
+        match = pattern.fullmatch(path.name)
+        if match is None:
+            raise PRDeliveryError("native Fixer evidence filename is invalid")
+        report = _load_json(path, "native Fixer")
+        if report.get("success") is not True:
+            raise PRDeliveryError("native Fixer evidence did not succeed")
+        review = report.get("_input_review")
+        if not isinstance(review, dict):
+            raise PRDeliveryError("native Fixer input review is invalid")
+        kind = _brief(review.get("kind", "unknown"), limit=80)
+        status = _brief(report.get("status", "fixed"), limit=30)
+        round_number = int(match.group("round"))
+        attempt = int(match.group("attempt") or 1)
+        lines.append(
+            f"- Round {round_number}, attempt {attempt}: `{status}` — "
+            f"{_brief(report.get('summary'))}"
+        )
+
+        architectures = review.get("architectures")
+        failed_architectures: list[str] = []
+        if isinstance(architectures, dict):
+            failed_architectures = [
+                str(name)
+                for name, evidence in architectures.items()
+                if not isinstance(evidence, dict)
+                or evidence.get("status") != "passed"
+            ]
+            architecture_order = {"x86_64": 0, "aarch64": 1}
+            failed_architectures.sort(
+                key=lambda name: (architecture_order.get(name, 2), name)
+            )
+        elif review.get("architecture"):
+            failed_architectures = [str(review["architecture"])]
+        if failed_architectures:
+            failed = ", ".join(
+                f"`{_brief(name, limit=30)}`"
+                for name in failed_architectures
+            )
+            lines.append(
+                f"  - Trigger: `{kind}`; failed architectures: {failed}."
+            )
+        else:
+            lines.append(f"  - Trigger: `{kind}`.")
+
+        changes = report.get("changes")
+        if not isinstance(changes, list):
+            raise PRDeliveryError("native Fixer changes are invalid")
+        for change in changes[:3]:
+            if isinstance(change, dict):
+                description = _brief(change.get("change"))
+                file = change.get("file")
+                location = (
+                    f"`{_brief(file, limit=200)}` — " if file else ""
+                )
+                lines.append(f"  - Change: {location}{description}")
+            else:
+                lines.append(f"  - Change: {_brief(change)}")
+        if len(changes) > 3:
+            lines.append(
+                f"  - {len(changes) - 3} more changes are preserved in "
+                "the validation artifact."
+            )
+
+    lines.extend(
+        (
+            "- Final outcome: the repaired candidate passed sealed native "
+            "validation on `x86_64` and `aarch64`.",
+            "",
+        )
+    )
+    return tuple(lines)
+
+
 def _patch_changes(bundle: CandidateBundle) -> tuple[tuple[str, str], ...]:
     try:
         lines = (bundle.root / "changes.patch").read_text().splitlines()
@@ -470,6 +579,7 @@ def compose_pull_request(bundle: CandidateBundle) -> PullRequestContent:
         "testcase-qa",
         "Testcase",
     )
+    fixer_process = _fixer_process_lines(bundle.root)
     recovery = _recovery_provenance(bundle)
     recovery_lines: tuple[str, ...] = ()
     candidate_origin = (
@@ -514,6 +624,7 @@ def compose_pull_request(bundle: CandidateBundle) -> PullRequestContent:
             "",
             *image_review,
             *testcase_review,
+            *fixer_process,
             "## Repository checks",
             "",
             "| Architecture | Platform | Image ID | Duration | Passed checks |",
@@ -536,6 +647,7 @@ def compose_pull_request(bundle: CandidateBundle) -> PullRequestContent:
             "- [x] x86_64 native validation passed",
             "- [x] aarch64 native validation passed",
             "- [x] Adversarial review records are preserved",
+            "- [x] Native Fixer process is recorded",
             "- [x] Candidate integrity was verified before delivery",
         )
     )
