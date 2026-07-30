@@ -966,6 +966,53 @@ jobs:
             printf 'non-overlapping target-base advance.\n'
           } >> "${GITHUB_STEP_SUMMARY}"
 
+  release_x86_builders:
+    name: Release x86_64 run builders
+    # The builder now outlives each validation so repair rounds keep their
+    # layer cache, so the run has to hand it back explicitly.
+    if: >-
+      ${{ always() &&
+          (needs.validate_x86.result != 'skipped' ||
+           needs.revalidate_x86.result != 'skipped') }}
+    needs: [validate_x86, revalidate_x86, package_candidate]
+    runs-on: [self-hosted, Linux, X64, oe-image-x86]
+    timeout-minutes: 15
+    steps:
+      - name: Check out workflow source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Provision phase-one tooling
+        uses: ./.github/actions/phase1-setup
+
+      - name: Release this run's x86_64 builders
+        run: |
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
+            phase1-native-release \
+            --workspace "${GITHUB_WORKSPACE}" \
+            --architecture x86_64 \
+            --run-id "${{ github.run_id }}"
+
+  release_arm_builders:
+    name: Release aarch64 run builders
+    if: ${{ always() && needs.validate_arm.result != 'skipped' }}
+    needs: [validate_arm]
+    runs-on: [self-hosted, Linux, ARM64, oe-image-arm64]
+    timeout-minutes: 15
+    steps:
+      - name: Check out workflow source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Provision phase-one tooling
+        uses: ./.github/actions/phase1-setup
+
+      - name: Release this run's aarch64 builders
+        run: |
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
+            phase1-native-release \
+            --workspace "${GITHUB_WORKSPACE}" \
+            --architecture aarch64 \
+            --run-id "${{ github.run_id }}"
+
   deliver_fork_pr:
     name: Promote validated candidate to fork PR
     if: >-

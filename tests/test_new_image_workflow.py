@@ -364,6 +364,36 @@ def test_actions_are_commit_pinned_and_python_install_requires_hashes():
     assert ".github/python-phase1.lock.txt" in setup
 
 
+def test_each_architecture_hands_its_run_builder_back_exactly_once():
+    jobs = _workflow()["jobs"]
+    workflow_text = WORKFLOW_PATH.read_text()
+
+    # Validation keeps the builder alive for later repair rounds, so the run
+    # is only leak-free if a release job runs even when validation failed.
+    for name, architecture, needs, runner_label in (
+        (
+            "release_x86_builders",
+            "x86_64",
+            ["validate_x86", "revalidate_x86", "package_candidate"],
+            "oe-image-x86",
+        ),
+        ("release_arm_builders", "aarch64", ["validate_arm"], "oe-image-arm64"),
+    ):
+        job = jobs[name]
+        text = _job_text(job)
+        assert job["needs"] == needs
+        assert "always()" in job["if"]
+        assert "skipped" in job["if"]
+        assert runner_label in job["runs-on"]
+        assert "phase1-native-release" in text
+        assert f"--architecture {architecture}" in text
+        assert "github.run_id" in text
+        assert "GITCODE_TOKEN" not in text
+
+    assert workflow_text.count("phase1-native-release") == 2
+    assert "docker buildx rm" not in workflow_text
+
+
 def test_test_duplicate_pr_skip_has_an_explicit_production_removal_marker():
     text = WORKFLOW_PATH.read_text()
 
@@ -391,6 +421,8 @@ def test_jobs_and_run_have_readable_display_names():
         "validate_arm": "Build, test, and repair on aarch64",
         "revalidate_x86": "Revalidate final candidate on x86_64",
         "package_candidate": "Verify and seal validated candidate",
+        "release_x86_builders": "Release x86_64 run builders",
+        "release_arm_builders": "Release aarch64 run builders",
         "deliver_fork_pr": "Promote validated candidate to fork PR",
         "issue_contract_test": "Exercise failure Issue lifecycle",
     }

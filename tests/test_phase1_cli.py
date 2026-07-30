@@ -184,10 +184,10 @@ def test_candidate_commands_create_then_verify_for_same_base(tmp_path):
 
     assert created.returncode == 0, created.stderr
     assert verified.returncode == 0, verified.stderr
-    assert json.loads(verified.stdout)["promotion_action"] == "reuse"
+    assert "promotion_action" not in json.loads(verified.stdout)
 
 
-def test_candidate_verify_reports_revalidation_for_changed_base(tmp_path):
+def test_candidate_verify_does_not_judge_changed_base(tmp_path):
     task_spec = tmp_path / "input-task.json"
     candidate = tmp_path / "candidate"
     candidate.mkdir()
@@ -227,7 +227,7 @@ def test_candidate_verify_reports_revalidation_for_changed_base(tmp_path):
 
     assert created.returncode == 0, created.stderr
     assert verified.returncode == 0, verified.stderr
-    assert json.loads(verified.stdout)["promotion_action"] == "revalidate"
+    assert "promotion_action" not in json.loads(verified.stdout)
 
 
 def test_target_workspace_commands_clone_create_and_replay_patch(tmp_path):
@@ -369,6 +369,7 @@ def test_pipeline_stage_commands_are_exposed():
         "phase1-native-smoke",
         "phase1-native-repair",
         "phase1-native-validate",
+        "phase1-native-release",
     ):
         result = _run(command, "--help")
         assert result.returncode == 0, f"{command}: {result.stderr}"
@@ -397,6 +398,7 @@ def test_flow_is_the_only_phase_one_entry():
         "phase1-native-smoke",
         "phase1-native-repair",
         "phase1-native-validate",
+        "phase1-native-release",
     ):
         result = _run(command, "--help")
         assert result.returncode == 0, f"{command}: {result.stderr}"

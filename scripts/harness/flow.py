@@ -19,7 +19,6 @@ from scripts.lib.agent_runtime import AgentRuntimeError
 from scripts.lib.candidate_bundle import (
     CandidateBundle,
     CandidateBundleError,
-    CandidatePromotionError,
 )
 from scripts.lib.generation_pipeline import (
     GenerationPipelineError,
@@ -44,6 +43,7 @@ from scripts.lib.native_repair import (
 )
 from scripts.lib.native_validation import (
     NativeValidationError,
+    release_run_builders,
     validate_native_image,
     validate_native_smoke,
 )
@@ -140,7 +140,6 @@ def _candidate_verify(args: argparse.Namespace) -> None:
     _print_json(
         {
             "content_sha256": bundle.manifest.content_sha256,
-            "promotion_action": bundle.promotion_action(args.current_base_sha),
             "task_id": bundle.manifest.task_id,
             "validated_run_id": bundle.manifest.validated_run_id,
         }
@@ -368,6 +367,16 @@ def cmd_phase1_native_smoke(args: argparse.Namespace) -> None:
     _print_json(report)
 
 
+def cmd_phase1_native_release(args: argparse.Namespace) -> None:
+    _print_json(
+        release_run_builders(
+            run_id=args.run_id,
+            architecture=args.architecture,
+            workspace=args.workspace,
+        )
+    )
+
+
 def _add_task_commands(commands: argparse._SubParsersAction) -> None:
     task = commands.add_parser("task-spec")
     task.add_argument("--app", required=True)
@@ -533,6 +542,19 @@ def _add_native_commands(commands: argparse._SubParsersAction) -> None:
     smoke.add_argument("--repair-report-dir", required=True, type=Path)
     smoke.set_defaults(handler=cmd_phase1_native_smoke)
 
+    release = commands.add_parser(
+        "phase1-native-release",
+        help="Release the builders this run owns on one architecture",
+    )
+    release.add_argument("--workspace", required=True, type=Path)
+    release.add_argument(
+        "--architecture",
+        required=True,
+        choices=("x86_64", "aarch64"),
+    )
+    release.add_argument("--run-id", required=True)
+    release.set_defaults(handler=cmd_phase1_native_release)
+
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -556,7 +578,6 @@ def main(argv: list[str] | None = None) -> int:
     except (
         AgentRuntimeError,
         CandidateBundleError,
-        CandidatePromotionError,
         DeliveryConfigError,
         ForkPRPipelineError,
         GenerationPipelineError,

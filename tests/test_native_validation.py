@@ -14,6 +14,7 @@ class DockerRunner:
     ):
         self.fail_build = fail_build
         self.failure_text = failure_text
+        self.builders = set()
         self.calls = []
 
     def __call__(self, command, cwd, env, timeout):
@@ -26,6 +27,17 @@ class DockerRunner:
                 "timeout": timeout,
             }
         )
+        if command[:3] == ["docker", "buildx", "inspect"]:
+            present = command[3] in self.builders
+            return subprocess.CompletedProcess(
+                command, 0 if present else 1, "", ""
+            )
+        if command[:3] == ["docker", "buildx", "create"]:
+            self.builders.add(command[command.index("--name") + 1])
+            return subprocess.CompletedProcess(command, 0, "", "")
+        if command[:4] == ["docker", "buildx", "rm", "--force"]:
+            self.builders.discard(command[4])
+            return subprocess.CompletedProcess(command, 0, "", "")
         if self.fail_build and "build" in command:
             return subprocess.CompletedProcess(
                 command, 1, "", self.failure_text
@@ -148,11 +160,15 @@ def test_native_validation_uses_dedicated_builder_and_full_runtime_checks(
     ]
     assert " SET oe-e2e-persistence run-123456" in flattened
     assert " GET oe-e2e-persistence" in flattened
-    assert "docker buildx rm" in flattened
     assert "docker volume rm" in flattened
     assert "docker image rm" in flattened
     assert "system prune" not in flattened
     assert "setup-qemu" not in flattened
+    # The builder carries this run's layer cache, so it must survive until
+    # release_run_builders runs; --use would also leak it as the runner-wide
+    # default once it is no longer torn down here.
+    assert "docker buildx rm" not in flattened
+    assert "--use" not in flattened
     output = capsys.readouterr().out
     markers = [
         "[flow][native:x86_64] START validation",
@@ -202,10 +218,11 @@ def test_native_validation_failure_still_cleans_exact_resources(tmp_path):
     flattened = "\n".join(
         " ".join(call["command"]) for call in runner.calls
     )
-    assert "docker buildx rm" in flattened
     assert "docker volume rm" in flattened
     assert "docker image rm" in flattened
     assert "system prune" not in flattened
+    # A failed round is exactly when the next round needs the cached builder.
+    assert "docker buildx rm" not in flattened
 
 
 def test_native_validation_failure_keeps_root_cause_at_end_of_long_log(tmp_path):
@@ -280,7 +297,7 @@ def test_native_pipeline_smoke_builds_and_runs_dgoss_without_ai(
     assert str(dgoss) in commands
     assert "docker image inspect" in commands
     assert "docker image rm" in commands
-    assert "docker buildx rm" in commands
+    assert "docker buildx rm" not in commands
     assert "docker exec" not in commands
     dgoss_call = next(
         call for call in runner.calls if call["command"][0] == str(dgoss)
@@ -292,6 +309,88 @@ def test_native_pipeline_smoke_builds_and_runs_dgoss_without_ai(
     assert (
         repair_dir / "native-repair-x86_64.json"
     ).is_file()
+
+
+def test_repeated_validation_reuses_the_run_builder_and_its_layer_cache(
+    tmp_path,
+):
+    from scripts.lib.native_validation import validate_native_image
+
+    workspace = _workspace(tmp_path)
+    dgoss, goss = _tools(tmp_path)
+    runner = DockerRunner()
+
+    for attempt in range(2):
+        validate_native_image(
+            workspace=workspace,
+            task=_task(),
+            architecture="x86_64",
+            run_id="123456",
+            dgoss=dgoss,
+            goss=goss,
+            report_path=tmp_path / f"reports/{attempt}/x86_64.json",
+            junit_path=tmp_path / f"reports/{attempt}/x86_64.junit.xml",
+            runner=runner,
+            sleep=lambda _: None,
+        )
+
+    commands = [call["command"] for call in runner.calls]
+    creates = [command for command in commands if command[:3] == [
+        "docker", "buildx", "create",
+    ]]
+    inspects = [command for command in commands if command[:3] == [
+        "docker", "buildx", "inspect",
+    ]]
+    # A repair round re-enters validation; recreating the builder would throw
+    # away the cached builder stage and rebuild from source every round.
+    assert len(inspects) == 2
+    assert len(creates) == 1
+    assert creates[0][creates[0].index("--name") + 1] == (
+        "oe-e2e-123456-x86-64-builder"
+    )
+
+
+def test_release_run_builders_frees_exactly_this_run_on_one_architecture(
+    tmp_path,
+):
+    from scripts.lib.native_validation import release_run_builders
+
+    runner = DockerRunner()
+
+    report = release_run_builders(
+        run_id="123456",
+        architecture="aarch64",
+        workspace=tmp_path,
+        runner=runner,
+    )
+
+    removed = [
+        call["command"][4]
+        for call in runner.calls
+        if call["command"][:4] == ["docker", "buildx", "rm", "--force"]
+    ]
+    assert removed == [
+        "oe-e2e-123456-aarch64-builder",
+        "oe-smoke-123456-aarch64-builder",
+    ]
+    assert report["released_builders"] == removed
+    assert report["status"] == "passed"
+
+
+@pytest.mark.parametrize("run_id", ["", "0", "abc", "12x"])
+def test_release_run_builders_rejects_an_unusable_run_id(tmp_path, run_id):
+    from scripts.lib.native_validation import (
+        NativeValidationError,
+        release_run_builders,
+    )
+
+    with pytest.raises(NativeValidationError, match="run_id"):
+        release_run_builders(
+            run_id=run_id,
+            architecture="x86_64",
+            workspace=tmp_path,
+            runner=DockerRunner(),
+        )
 
 
 @pytest.mark.parametrize("architecture", ["amd64", "arm64", "../x86_64"])
