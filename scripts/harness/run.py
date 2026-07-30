@@ -192,8 +192,7 @@ def _build_creator_prompt(role: str, *, round_num: int, qa_feedback: dict | None
         instruction = (
             f"Create functional test cases for {pkg} {app_ver}.\n"
             f"Place tests under {target}/{domain}/{pkg}/tests/ (goss.yaml, goss_wait.yaml, "
-            f"test_helpers.sh) and a test.sh entry alongside the Dockerfile at "
-            f"{target}/{domain}/{pkg}/{app_ver}/{os_ver}/test.sh.\n"
+            f"test_helpers.sh, test.sh).\n"
             f"Read the Dockerfile at {target}/{domain}/{pkg}/{app_ver}/{os_ver}/Dockerfile "
             f"to determine binary name, ports, and version.\n"
             f"Write test-ai-result.json with your self-assessment."
@@ -367,32 +366,56 @@ def cmd_test(args: argparse.Namespace) -> None:
 
 
 def _run_test_sh_fallback(target: Path, app: str, arch: str, results_dir: Path | None = None) -> None:
-    """Fallback: run test.sh alongside Dockerfile if no goss.yaml exists."""
+    """Fallback: run the app-level shared test inside the image."""
     test_sh = None
-    for p in target.glob(f"**/{app}/**/test.sh"):
+    for p in target.glob(f"**/{app}/tests/test.sh"):
         test_sh = p
         break
 
     if not test_sh:
-        print(f"No test.sh found for {app} either; marking as skipped")
+        print(f"No shared tests/test.sh found for {app} either; marking as skipped")
         return
+
+    app_dir = test_sh.parent.parent
+    meta_path = app_dir / "meta.yml"
+    meta = {}
+    if meta_path.is_file():
+        import yaml
+        meta = yaml.safe_load(meta_path.read_text()) or {}
+    tag = next(iter(meta.keys()), "")
+    expected_version, _ = _parse_tag(tag)
 
     container_name = f"{app}-test"
     subprocess.run(["docker", "rm", "-f", container_name], capture_output=True)
     run = subprocess.run(
-        ["docker", "run", "-d", "--name", container_name, f"openeuler/{app}:test"],
+        [
+            "docker",
+            "run",
+            "-d",
+            "--name",
+            container_name,
+            "-v",
+            f"{test_sh.parent.resolve()}:/opt/oe-tests:ro",
+            f"openeuler/{app}:test",
+        ],
         capture_output=True, text=True,
     )
     if run.returncode != 0:
         print(f"docker run failed: {run.stderr}", file=sys.stderr)
         sys.exit(1)
 
-    env = os.environ.copy()
-    env["PACKAGE_NAME"] = app
-    env["CONTAINER_NAME"] = container_name
     result = subprocess.run(
-        ["bash", str(test_sh)],
-        env=env,
+        [
+            "docker",
+            "exec",
+            "-e",
+            f"EXPECTED_VERSION={expected_version}",
+            "-e",
+            f"BINARY={app}",
+            container_name,
+            "bash",
+            "/opt/oe-tests/test.sh",
+        ],
         capture_output=True,
         text=True,
     )

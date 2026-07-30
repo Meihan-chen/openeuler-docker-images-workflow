@@ -69,6 +69,10 @@ def test_deterministic_smoke_candidate_passes_the_real_target_contract(
         / "Dockerfile"
     )
     assert dockerfile.is_file()
+    assert not (dockerfile.parent / "test.sh").exists()
+    shared_test = repo / "Database" / "kvrocks" / "tests" / "test.sh"
+    assert shared_test.is_file()
+    assert shared_test.stat().st_mode & 0o111
     dockerfile_text = dockerfile.read_text()
     assert "dnf install -y redis" in dockerfile_text
     assert "dnf clean all" in dockerfile_text

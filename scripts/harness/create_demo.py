@@ -2,7 +2,7 @@
 
 Used as a fallback when DEEPSEEK_API_KEY is not configured.
 Generates a minimal but valid image directory: Dockerfile, meta.yml, README.md,
-doc/image-info.yml, logo, tests/goss.yaml + test.sh entry.
+doc/image-info.yml, logo, and shared tests.
 """
 
 import json
@@ -142,16 +142,16 @@ port:
 }
 """)
 
-    # test.sh entry alongside Dockerfile (per DESIGN §5.3)
-    (ver_dir / "test.sh").write_text(f"""#!/bin/bash
+    # Shared test entry executed inside an already-running container.
+    shared_test = tests_dir / "test.sh"
+    shared_test.write_text(f"""#!/bin/bash
 set -e; set -o pipefail
 
-CONTAINER_NAME="${{CONTAINER_NAME:-${{PACKAGE_NAME:-{app}}}-test}}"
-BINARY="{app}"
-EXPECTED_VERSION="{version}"
+BINARY="${{BINARY:-{app}}}"
+: "${{EXPECTED_VERSION:?EXPECTED_VERSION is required}}"
 
 test_binary_exists() {{
-    if docker exec "${{CONTAINER_NAME}}" which "$BINARY" >/dev/null 2>&1; then
+    if command -v "$BINARY" >/dev/null 2>&1; then
         echo "PASS: binary exists"; return 0
     fi
     echo "FAIL: binary not found"; return 1
@@ -159,8 +159,8 @@ test_binary_exists() {{
 
 test_version() {{
     local output
-    output=$(docker exec "${{CONTAINER_NAME}}" "$BINARY" -v 2>&1 || echo "")
-    if echo "$output" | grep -qi "$EXPECTED_VERSION"; then
+    output=$("$BINARY" -v 2>&1 || echo "")
+    if echo "$output" | grep -Fq "$EXPECTED_VERSION"; then
         echo "PASS: version check - $output"; return 0
     fi
     echo "FAIL: version check - expected $EXPECTED_VERSION, got: $output"; return 1
@@ -177,6 +177,7 @@ main() {{
 }}
 main "$@"
 """)
+    shared_test.chmod(0o755)
 
     # ai-result.json
     (base / "ai-result.json").write_text(
@@ -192,7 +193,7 @@ main "$@"
                 f"{domain}/{app}/doc/picture/logo.png",
                 f"{domain}/{app}/tests/goss.yaml",
                 f"{domain}/{app}/tests/test_helpers.sh",
-                f"{domain}/{app}/{version}/{os_ver}/test.sh",
+                f"{domain}/{app}/tests/test.sh",
             ],
         }, ensure_ascii=False, indent=2)
     )

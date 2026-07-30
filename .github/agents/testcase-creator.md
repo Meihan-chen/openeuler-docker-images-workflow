@@ -76,16 +76,16 @@ retry() {
 
 具体断言必须按 Dockerfile 和任务契约替换这些通用示例；非 HTTP 应用不得照搬 HTTP 断言。容器内的就绪探测只能使用 runtime image 已确认安装的命令，并优先调用应用协议客户端，不得假设 `ss`、`netstat` 或 `curl` 存在。
 
-### 步骤 4：生成 test.sh（与 Dockerfile 同级）
+### 步骤 4：生成共享 test.sh
 
-旧流程可能从宿主机调用 `test.sh`，新原生验证流程会在已经启动的容器内调用共享测试。追加的任务契约会声明执行方式，并覆盖以下通用模板。无论采用哪种方式，脚本都不得自行 build、run、stop 或删除容器。
+在 `{category}/{package_name}/tests/test.sh` 创建唯一的功能测试入口。原生验证流程会将该目录挂载到已经启动的容器内，注入 `EXPECTED_VERSION` 后执行脚本。脚本不得自行 build、run、stop 或删除容器。
 
 ```bash
 #!/bin/bash
 set -e; set -o pipefail
 
 BINARY="{binary_name}"
-EXPECTED_VERSION="{version}"
+: "${EXPECTED_VERSION:?EXPECTED_VERSION is required}"
 
 test_version() {
     local output
@@ -142,7 +142,7 @@ main "$@"
 
 ## 核心约束
 
-- 共享测试用例放在 `{app}/tests/`（应用级共享），入口 `test.sh` 与 Dockerfile 同级
+- 共享测试用例及唯一入口 `test.sh` 都放在 `{app}/tests/`（应用级共享）
 - 测试必须由任务输入注入版本，应用级共享测试不得硬编码单一版本
 - 版本号验证必须精确验证目标应用报告的版本，不能用可能接受其他版本的模糊子串
 - 服务应用必须覆盖核心协议/数据路径，不能用 `--help` 代替功能验证

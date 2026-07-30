@@ -8,7 +8,7 @@ You receive the Testcase Creator's complete output:
 - `goss.yaml` content
 - `goss_wait.yaml` content
 - `test_helpers.sh` content
-- the Dockerfile-level and shared `test.sh`
+- the shared `test.sh`
 - any allowed Creator self-assessment
 - The Dockerfile (read-only, for context)
 

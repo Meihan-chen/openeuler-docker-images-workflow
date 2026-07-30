@@ -82,6 +82,35 @@ def test_agent_execution_is_exposed_through_flow_orchestrator():
     assert "native-validate-repair" not in workflow
 
 
+def test_legacy_harness_also_uses_only_the_app_shared_test_entrypoint(
+    tmp_path,
+    monkeypatch,
+):
+    from scripts.harness.create_demo import create_demo
+    from scripts.harness.run import _build_creator_prompt
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TARGET_REPO_DIR", str(tmp_path))
+    monkeypatch.setenv("PACKAGE", "nginx")
+    monkeypatch.setenv("APP_VERSION", "1.27.2")
+    monkeypatch.setenv("OS_VERSION", "24.03-lts")
+    monkeypatch.setenv("DOMAIN", "Cloud")
+
+    create_demo("nginx", "1.27.2", "24.03-lts", "Cloud")
+    prompt = _build_creator_prompt("testcase", round_num=1)
+
+    assert not (
+        tmp_path / "Cloud" / "nginx" / "1.27.2" / "24.03-lts" / "test.sh"
+    ).exists()
+    assert (
+        tmp_path / "Cloud" / "nginx" / "tests" / "test.sh"
+    ).is_file()
+    assert "tests/ (goss.yaml, goss_wait.yaml, test_helpers.sh, test.sh)" in (
+        prompt
+    )
+    assert "alongside the Dockerfile" not in prompt
+
+
 def test_workflow_uses_existing_validation_and_artifact_clis():
     workflow = (
         ROOT / ".github" / "workflows" / "new-image.yml"

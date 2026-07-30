@@ -133,9 +133,6 @@ def _phase1_kvrocks_contract(task: TaskSpec, role: str) -> tuple[str, ...]:
                 "- Required shared test files are `goss.yaml`, "
                 "`goss_wait.yaml`, `test_helpers.sh`, and executable "
                 "`test.sh`.",
-                "- The Dockerfile-level `test.sh` must set "
-                "`EXPECTED_VERSION` to the TaskSpec version and invoke "
-                "`../../tests/test.sh`.",
                 "- Shared `tests/test.sh` must use injected "
                 "`EXPECTED_VERSION` and check exact `kvrocks --version`, "
                 "`redis-cli -p 6666 PING` behavior, and UID 999 without "
@@ -188,15 +185,14 @@ def build_role_prompt(
                 "- Every in-container readiness probe must use commands "
                 "available in the runtime image; infer availability from "
                 "the Dockerfile and do not assume host diagnostic tools.",
-                f"- Dockerfile test entrypoint: `{image_root}/test.sh`",
                 f"- Shared tests: `{app_root}/tests/`",
                 f"- Shared test entrypoint: `{app_root}/tests/test.sh`",
             )
         )
     if role in {"testcase_creator", "testcase_qa"}:
         contract_lines.append(
-            "- Only the Dockerfile-level test entrypoint and shared test "
-            "paths above are writable; image-list, Dockerfile, metadata, "
+            "- Only the shared test paths above are writable; image-list, "
+            "Dockerfile, metadata, "
             "documentation and logo are read-only."
         )
     if role == "fixer":
@@ -207,7 +203,6 @@ def build_role_prompt(
             f"{app_root}/doc/image-info.yml",
             f"{app_root}/doc/picture/logo.png",
             f"{image_root}/Dockerfile",
-            f"{image_root}/test.sh",
             f"{app_root}/tests/goss.yaml",
             f"{app_root}/tests/goss_wait.yaml",
             f"{app_root}/tests/test_helpers.sh",
@@ -287,7 +282,6 @@ def _qa_prompt(
         tests_root = app_root / "tests"
         paths = [
             image_root / "Dockerfile",
-            image_root / "test.sh",
             tests_root / "goss.yaml",
             tests_root / "goss_wait.yaml",
             tests_root / "test_helpers.sh",
@@ -633,7 +627,6 @@ def run_generation_pipeline(
     )
     app_root = workspace / task.domain / task.app
     testcase_owned = {
-        app_root / task.version / task.os_version / "test.sh",
         app_root / "tests" / "goss.yaml",
         app_root / "tests" / "goss_wait.yaml",
         app_root / "tests" / "test_helpers.sh",
@@ -1014,13 +1007,6 @@ def write_smoke_candidate(
         "HEALTHCHECK CMD redis-cli -p 6666 PING | grep PONG\n"
         'ENTRYPOINT ["kvrocks", "--bind", "0.0.0.0"]\n'
     )
-    entry = image / "test.sh"
-    entry.write_text(
-        "#!/bin/bash\n"
-        "set -euo pipefail\n"
-        f"export EXPECTED_VERSION={task.version}\n"
-        'exec ../../tests/test.sh "$@"\n'
-    )
     (tests / "goss.yaml").write_text(
         "port:\n"
         "  tcp:6666:\n"
@@ -1052,7 +1038,7 @@ def write_smoke_candidate(
         "redis-cli -p 6666 PING | grep -F PONG\n"
         'test "$(id -u)" = 999\n'
     )
-    for script in (entry, helpers, shared):
+    for script in (helpers, shared):
         script.chmod(0o755)
 
     log("smoke", "PASS deterministic candidate")

@@ -112,13 +112,6 @@ def _write_valid_generated_candidate(repo):
         "HEALTHCHECK CMD redis-cli -p 6666 PING | grep PONG\n"
         "ENTRYPOINT [\"kvrocks\", \"--bind\", \"0.0.0.0\"]\n"
     )
-    (image / "test.sh").write_text(
-        "#!/bin/bash\n"
-        "set -euo pipefail\n"
-        'export EXPECTED_VERSION="2.16.0"\n'
-        'SHARED_DIR="$(cd "$(dirname "$0")/../../tests" && pwd)"\n'
-        'exec "$SHARED_DIR/test.sh" "$@"\n'
-    )
     (tests / "goss.yaml").write_text(
         "port:\n"
         "  tcp:6666:\n"
@@ -147,7 +140,6 @@ def _write_valid_generated_candidate(repo):
         "redis-cli -p 6666 PING | grep -F PONG\n"
         "test \"$(id -u)\" = 999\n"
     )
-    (image / "test.sh").chmod(0o755)
     (tests / "test.sh").chmod(0o755)
 
 
@@ -208,12 +200,6 @@ def _write_valid_results(repo):
 def _remove_testcase_owned_files(repo):
     app = repo / "Database" / "kvrocks"
     shutil.rmtree(app / "tests")
-    (
-        app
-        / "2.16.0"
-        / "24.03-lts-sp4"
-        / "test.sh"
-    ).unlink()
 
 
 def test_image_phase_accepts_candidate_before_testcase_creator(tmp_path):
@@ -248,8 +234,23 @@ def test_valid_generated_kvrocks_candidate_passes_contract(tmp_path):
 
     assert report["status"] == "passed"
     assert report["task_id"] == _task().task_id
-    assert report["added_files"] >= 10
+    assert report["added_files"] == 9
     assert report["modified_files"] == ["Database/image-list.yml"]
+
+
+def test_generated_contract_uses_only_the_app_shared_test_entrypoint(tmp_path):
+    from scripts.harness.gate_diff import validate_generated_target
+
+    repo, base_sha = _repo(tmp_path)
+    _write_valid_generated_candidate(repo)
+
+    report = validate_generated_target(
+        repo=repo,
+        task=_task(),
+        base_sha=base_sha,
+    )
+
+    assert report["status"] == "passed"
 
 
 @pytest.mark.parametrize(
@@ -261,7 +262,6 @@ def test_valid_generated_kvrocks_candidate_passes_contract(tmp_path):
         "git_clone_source",
         "fixed_binary_variable",
         "defaulted_binary_variable",
-        "braced_shared_directory",
     ],
 )
 def test_generated_contract_accepts_historical_equivalent_syntax(
@@ -321,15 +321,6 @@ def test_generated_contract_accepts_historical_equivalent_syntax(
                 assignment,
             )
         )
-    elif variant == "braced_shared_directory":
-        entry_test = app / "2.16.0" / "24.03-lts-sp4" / "test.sh"
-        entry_test.write_text(
-            entry_test.read_text().replace(
-                '"$SHARED_DIR/test.sh"',
-                '"${SHARED_DIR}/test.sh"',
-            )
-        )
-
     report = validate_generated_target(
         repo=repo,
         task=_task(),

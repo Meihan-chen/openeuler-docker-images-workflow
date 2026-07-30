@@ -186,7 +186,6 @@ def _required_paths(
     if phase == "image":
         return app_root, image_paths
     return app_root, image_paths + [
-        f"{image_root}/test.sh",
         f"{app_root}/tests/goss.yaml",
         f"{app_root}/tests/goss_wait.yaml",
         f"{app_root}/tests/test_helpers.sh",
@@ -310,8 +309,6 @@ def _validate_tests(
     errors: list[str],
 ) -> None:
     shared = repo / app_root / "tests"
-    entry = repo / app_root / task.version / task.os_version / "test.sh"
-    entry_text = entry.read_text()
     shared_text = (shared / "test.sh").read_text()
     goss_text = (shared / "goss.yaml").read_text()
     goss_wait_text = (shared / "goss_wait.yaml").read_text()
@@ -350,17 +347,6 @@ def _validate_tests(
             )
     elif goss_wait_data is not None:
         errors.append("goss_wait.yaml must contain a YAML mapping")
-    version_assignment = re.compile(
-        rf"EXPECTED_VERSION=(?:\"{re.escape(task.version)}\"|"
-        rf"'{re.escape(task.version)}'|{re.escape(task.version)})"
-    )
-    if not version_assignment.search(entry_text):
-        errors.append("Dockerfile-level test.sh must inject the expected version")
-    if not re.search(
-        r"(?:\.\./\.\./tests/test\.sh|\$\{?SHARED_DIR\}?/test\.sh)",
-        entry_text,
-    ):
-        errors.append("Dockerfile-level test.sh must call the app-level shared tests")
     if task.version in shared_text:
         errors.append("app-level shared tests must not hardcode one application version")
     version_command = re.search(r"\bkvrocks\s+--version\b", shared_text)
@@ -384,9 +370,9 @@ def _validate_tests(
     for fragment in ("tcp:6666", ".Env.EXPECTED_VERSION", "PING", "PONG"):
         if fragment not in goss_text:
             errors.append(f"goss.yaml is missing assertion: {fragment}")
-    for script in (entry, shared / "test.sh"):
-        if not script.stat().st_mode & 0o111:
-            errors.append(f"{script.relative_to(repo)} must be executable")
+    shared_entry = shared / "test.sh"
+    if not shared_entry.stat().st_mode & 0o111:
+        errors.append(f"{shared_entry.relative_to(repo)} must be executable")
 
 
 def _validate_docs(

@@ -949,7 +949,6 @@ def test_qa_prompts_embed_candidate_snapshot_without_tool_reads(tmp_path):
     image.mkdir(parents=True)
     tests.mkdir(parents=True)
     (image / "Dockerfile").write_text("FROM openEuler\n")
-    (image / "test.sh").write_text("exec ../../tests/test.sh\n")
     (tests / "test.sh").write_text("redis-cli -p 6666 PING\n")
     agent = _fully_approved_agent()
 
@@ -973,6 +972,9 @@ def test_qa_prompts_embed_candidate_snapshot_without_tool_reads(tmp_path):
     assert "Database/kvrocks/tests/test.sh" not in image_qa_prompt
     assert "Required shared test files" not in image_qa_prompt
     assert "Embedded candidate snapshot" in testcase_qa_prompt
+    assert "Database/kvrocks/2.16.0/24.03-lts-sp4/test.sh" not in (
+        testcase_qa_prompt
+    )
     assert "Database/kvrocks/tests/test.sh" in testcase_qa_prompt
     assert "redis-cli -p 6666 PING" in testcase_qa_prompt
 
@@ -1186,5 +1188,5 @@ def test_fixer_prompt_whitelists_generated_candidate_files():
     assert "Fixer whitelist (only these files may be modified)" in prompt
     assert "Database/image-list.yml" in prompt
     assert "Database/kvrocks/2.16.0/24.03-lts-sp4/Dockerfile" in prompt
-    assert "Database/kvrocks/2.16.0/24.03-lts-sp4/test.sh" in prompt
+    assert "Database/kvrocks/2.16.0/24.03-lts-sp4/test.sh" not in prompt
     assert "Database/kvrocks/tests/goss.yaml" in prompt

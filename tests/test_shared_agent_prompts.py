@@ -48,3 +48,5 @@ def test_shared_qa_prompts_preserve_findings_for_local_validation():
     assert "runtime image" in testcase_qa
     assert "test-ai-result.json" not in testcase_creator
     assert "container_name" not in testcase_creator
+    assert "与 dockerfile 同级" not in testcase_creator
+    assert "dockerfile-level" not in testcase_qa
