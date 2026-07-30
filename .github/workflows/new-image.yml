@@ -849,7 +849,7 @@ jobs:
            needs.round2.result != 'skipped' ||
            needs.round3.result != 'skipped' ||
            needs.round4.result != 'skipped') }}
-    needs: [round1, round2, round3, round4, decide1, package_candidate]
+    needs: [round1, round2, round3, round4]
     runs-on: [self-hosted, Linux, X64, oe-image-x86]
     timeout-minutes: 15
     steps:

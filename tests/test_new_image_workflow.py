@@ -470,7 +470,7 @@ def test_each_architecture_hands_its_run_builder_back_exactly_once():
     ):
         job = jobs[name]
         text = _job_text(job)
-        assert set(ROUNDS).issubset(job["needs"])
+        assert job["needs"] == list(ROUNDS)
         assert "always()" in job["if"]
         assert "skipped" in job["if"]
         assert runner_label in job["runs-on"]
