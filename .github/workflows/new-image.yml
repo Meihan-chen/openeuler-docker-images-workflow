@@ -244,12 +244,29 @@ jobs:
           repository: ${{ github.repository }}
           run-id: ${{ inputs.source_run_id }}
 
-      - name: Republish it under this run
+      - name: Download the source generation evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: phase1-generation-${{ inputs.source_run_id }}
+          path: ${{ runner.temp }}/phase1-seed-generation
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.source_run_id }}
+
+      - name: Republish the round candidate under this run
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: >-
             phase1-patch${{ inputs.resume_from_round }}-${{ github.run_id }}
           path: ${{ runner.temp }}/phase1-seed/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Republish the generation evidence under this run
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: phase1-generation-${{ github.run_id }}
+          path: ${{ runner.temp }}/phase1-seed-generation/
           if-no-files-found: error
           retention-days: 30
 
@@ -370,10 +387,14 @@ jobs:
     # candidate is sealed from whichever round converged.
     if: >-
       ${{ always() &&
-          (needs.decide1.outputs.converged == 'true' ||
-           needs.decide2.outputs.converged == 'true' ||
-           needs.decide3.outputs.converged == 'true' ||
-           needs.decide4.outputs.converged == 'true' ||
+          ((needs.decide1.result == 'success' &&
+            needs.decide1.outputs.converged == 'true') ||
+           (needs.decide2.result == 'success' &&
+            needs.decide2.outputs.converged == 'true') ||
+           (needs.decide3.result == 'success' &&
+            needs.decide3.outputs.converged == 'true') ||
+           (needs.decide4.result == 'success' &&
+            needs.decide4.outputs.converged == 'true') ||
            inputs.operation == 'resume_package' ||
            inputs.operation == 'recover_package') }}
     needs: [decide1, decide2, decide3, decide4]
@@ -700,9 +721,11 @@ jobs:
             "${RUNNER_TEMP}/candidate/reports/agents/"
           cp -a "${RUNNER_TEMP}/arm/arm-repair-agents/." \
             "${RUNNER_TEMP}/candidate/reports/agents/"
-          if [ "${{ inputs.operation }}" = "resume_package" ]; then
+          if [ "${{ inputs.operation }}" = "resume_package" ] ||
+             [ "${{ inputs.operation }}" = "resume_round" ]; then
             printf \
-              '{"mode":"resume_package","source_run_id":"%s","verification_run_id":"%s","promotable": false}\n' \
+              '{"mode":"%s","source_run_id":"%s","verification_run_id":"%s","promotable": false}\n' \
+              "${{ inputs.operation }}" \
               "${{ inputs.source_run_id }}" \
               "${{ github.run_id }}" \
               > "${RUNNER_TEMP}/candidate/reports/resume-provenance.json"
@@ -739,11 +762,12 @@ jobs:
           "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
             candidate-verify \
             --candidate-dir "${RUNNER_TEMP}/candidate" \
-            --expected-run-id "${{ github.run_id }}" \
-            --current-base-sha "${base_sha}"
+            --expected-run-id "${{ github.run_id }}"
 
       - name: Upload immutable candidate
-        if: ${{ inputs.operation != 'resume_package' }}
+        if: >-
+          ${{ inputs.operation != 'resume_package' &&
+              inputs.operation != 'resume_round' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: >-
@@ -753,8 +777,10 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Upload resume-package diagnostic candidate
-        if: ${{ inputs.operation == 'resume_package' }}
+      - name: Upload resumed diagnostic candidate
+        if: >-
+          ${{ inputs.operation == 'resume_package' ||
+              inputs.operation == 'resume_round' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: phase1-resume-candidate-${{ github.run_id }}
@@ -785,12 +811,15 @@ jobs:
             printf -- '- No AI or GitCode write API was used.\n'
           } >> "${GITHUB_STEP_SUMMARY}"
 
-      - name: Publish resume-package result
-        if: ${{ inputs.operation == 'resume_package' }}
+      - name: Publish resumed diagnostic result
+        if: >-
+          ${{ inputs.operation == 'resume_package' ||
+              inputs.operation == 'resume_round' }}
         run: |
           {
-            printf '## Resume package diagnostic passed\n\n'
-            printf -- '- The source run must contain all four phase artifacts.\n'
+            printf '## %s diagnostic passed\n\n' "${{ inputs.operation }}"
+            printf -- "- Candidate artifact: \`phase1-resume-candidate-%s\`\n" \
+              "${{ github.run_id }}"
             printf -- '- This cross-run candidate is diagnostic only.\n'
             printf -- '- Run a fresh validate_only before fork_pr.\n'
           } >> "${GITHUB_STEP_SUMMARY}"

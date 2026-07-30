@@ -440,7 +440,6 @@ def _add_candidate_commands(commands: argparse._SubParsersAction) -> None:
     verify = commands.add_parser("candidate-verify")
     verify.add_argument("--candidate-dir", required=True, type=Path)
     verify.add_argument("--expected-run-id", required=True)
-    verify.add_argument("--current-base-sha", required=True)
     verify.set_defaults(handler=_candidate_verify)
 
     clone = commands.add_parser("target-clone")

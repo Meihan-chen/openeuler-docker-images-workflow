@@ -71,8 +71,12 @@ def test_scenario_one_runs_full_validation_chain_and_delivers_same_run():
     jobs = _workflow()["jobs"]
 
     assert "scenario_one" in jobs["prepare"]["if"]
-    # Sealing is gated on convergence, not on which operation asked for it.
-    assert "converged == 'true'" in jobs["package_candidate"]["if"]
+    # A converged output is not enough: the decision job must have completed
+    # successfully, including publishing its evidence.
+    package_condition = jobs["package_candidate"]["if"]
+    for name in DECISIONS:
+        assert f"needs.{name}.result == 'success'" in package_condition
+        assert f"needs.{name}.outputs.converged == 'true'" in package_condition
 
     delivery = jobs["deliver_fork_pr"]
     delivery_text = _job_text(delivery)
@@ -208,17 +212,74 @@ def test_resume_restarts_one_round_from_another_run_of_the_same_pipeline():
     assert "phase1-patch${{ inputs.resume_from_round }}-${{ github.run_id }}" in (
         seed_text
     )
+    # Packaging still needs the original generation reports. Resume must
+    # republish them under this run just like it republishes the round patch.
+    assert "phase1-generation-${{ inputs.source_run_id }}" in seed_text
+    assert "phase1-generation-${{ github.run_id }}" in seed_text
 
     for index, name in enumerate(ROUNDS):
         condition = jobs[name]["if"]
         assert "needs.seed_resume.result == 'success'" in condition
         assert f"inputs.resume_from_round == '{index + 1}'" in condition
 
-    package = _job_text(jobs["package_candidate"])
-    assert "resume_package" in package
-    assert "phase1-resume-candidate-" in package
-    assert "resume-provenance.json" in package
+    package = jobs["package_candidate"]
+    package_text = _job_text(package)
+    immutable_upload = next(
+        step
+        for step in package["steps"]
+        if step.get("name") == "Upload immutable candidate"
+    )
+    diagnostic_upload = next(
+        step
+        for step in package["steps"]
+        if step.get("name") == "Upload resumed diagnostic candidate"
+    )
+    assert "inputs.operation != 'resume_round'" in immutable_upload["if"]
+    assert "inputs.operation != 'resume_package'" in immutable_upload["if"]
+    assert "resume_round" in diagnostic_upload["if"]
+    assert "resume_package" in diagnostic_upload["if"]
+    assert "phase1-resume-candidate-" in _job_text(diagnostic_upload)
+    assert "resume-provenance.json" in package_text
     assert '"promotable": false' in WORKFLOW_PATH.read_text()
+    assert '"mode":"%s"' in WORKFLOW_PATH.read_text()
+
+
+def test_artifact_producers_cover_each_package_input_mode():
+    jobs = _workflow()["jobs"]
+    prepare_text = _job_text(jobs["prepare"])
+    seed_text = _job_text(jobs["seed_resume"])
+    package_text = _job_text(jobs["package_candidate"])
+
+    # Fresh runs produce both inputs in this run.
+    assert "phase1-generation-${{ github.run_id }}" in prepare_text
+    assert "phase1-patch1-${{ github.run_id }}" in prepare_text
+    # Round resume republishes both source inputs under the current run, so
+    # all downstream consumers keep one stable artifact naming contract.
+    assert "phase1-generation-${{ inputs.source_run_id }}" in seed_text
+    assert "phase1-generation-${{ github.run_id }}" in seed_text
+    assert "phase1-patch${{ inputs.resume_from_round }}-${{" in seed_text
+    assert "phase1-patch${{ inputs.resume_from_round }}-${{ github.run_id }}" in (
+        seed_text
+    )
+    # Package resume intentionally consumes the source run directly.
+    assert "phase1-converged-${{ inputs.operation == 'resume_package' &&" in (
+        package_text
+    )
+    assert "inputs.source_run_id || github.run_id" in package_text
+
+
+def test_candidate_verify_workflow_does_not_claim_to_check_current_base():
+    package = _workflow()["jobs"]["package_candidate"]
+    seal = next(
+        step
+        for step in package["steps"]
+        if step.get("name") == "Seal immutable candidate bundle"
+    )
+
+    assert "candidate-verify" in seal["run"]
+    assert "--current-base-sha" not in seal["run"]
+    # The similarly named argument remains meaningful for recovered patches.
+    assert "--current-base-sha" in WORKFLOW_PATH.read_text()
 
 
 def test_recover_package_combines_generation_and_validation_runs():

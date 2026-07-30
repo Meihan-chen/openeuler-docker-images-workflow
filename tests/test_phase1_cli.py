@@ -178,8 +178,6 @@ def test_candidate_commands_create_then_verify_for_same_base(tmp_path):
         str(candidate),
         "--expected-run-id",
         "123456",
-        "--current-base-sha",
-        BASE_SHA,
     )
 
     assert created.returncode == 0, created.stderr
@@ -187,7 +185,7 @@ def test_candidate_commands_create_then_verify_for_same_base(tmp_path):
     assert "promotion_action" not in json.loads(verified.stdout)
 
 
-def test_candidate_verify_does_not_judge_changed_base(tmp_path):
+def test_candidate_verify_does_not_require_a_current_base(tmp_path):
     task_spec = tmp_path / "input-task.json"
     candidate = tmp_path / "candidate"
     candidate.mkdir()
@@ -221,8 +219,6 @@ def test_candidate_verify_does_not_judge_changed_base(tmp_path):
         str(candidate),
         "--expected-run-id",
         "123456",
-        "--current-base-sha",
-        "a" * 40,
     )
 
     assert created.returncode == 0, created.stderr
