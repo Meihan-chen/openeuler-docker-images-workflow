@@ -122,8 +122,8 @@ def _phase1_kvrocks_contract(task: TaskSpec, role: str) -> tuple[str, ...]:
         "- The locked openEuler base image may already contain UID/GID 999; "
         "use `groupadd --non-unique` and `useradd --non-unique` so the "
         "Kvrocks runtime identity remains exactly 999:999.",
-        "- The runtime image must install the openEuler `redis` package, "
-        "start Kvrocks with `ENTRYPOINT`, and run "
+        "- The runtime image must install the openEuler `redis` and "
+        "`libatomic` packages, start Kvrocks with `ENTRYPOINT`, and run "
         "`redis-cli -p 6666 PING` in `HEALTHCHECK`; `/dev/tcp` probes or "
         "CMD-only startup do not satisfy this phase-one contract.",
     ]

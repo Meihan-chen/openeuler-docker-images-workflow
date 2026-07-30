@@ -1099,6 +1099,7 @@ def test_phase1_prompts_pin_kvrocks_paths_and_forbid_scope_escape():
     assert "LICENSE and NOTICE" in prompt
     assert "base image may already contain UID/GID 999" in prompt
     assert "--non-unique" in prompt
+    assert "libatomic" in prompt
     assert "Do not install or upgrade host tools or packages" in prompt
     assert "Do not run Docker builds or invoke linters" in prompt
     assert "Your final response MUST be exactly one JSON object" in prompt
@@ -1158,6 +1159,7 @@ def test_shared_prompt_contract_does_not_inject_kvrocks_rules():
         "6666",
         "./x.py build",
         "UID/GID 999",
+        "libatomic",
     ):
         assert fragment not in image_prompt
 
