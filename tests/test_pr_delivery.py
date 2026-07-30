@@ -18,12 +18,33 @@ def _task():
     )
 
 
-def _candidate(tmp_path, *, testcase_qa_status="approved"):
+def _candidate(
+    tmp_path,
+    *,
+    testcase_qa_status="approved",
+    testcase_repaired=False,
+):
     from scripts.lib.candidate_bundle import CandidateBundle
 
     root = tmp_path / "candidate"
     (root / "reports" / "agents").mkdir(parents=True)
-    (root / "changes.patch").write_text("diff --git a/a b/a\n")
+    (root / "changes.patch").write_text(
+        "diff --git a/Database/image-list.yml "
+        "b/Database/image-list.yml\n"
+        "index 1111111..2222222 100644\n"
+        "--- a/Database/image-list.yml\n"
+        "+++ b/Database/image-list.yml\n"
+        "@@ -1 +1,2 @@\n"
+        "+  kvrocks: kvrocks\n"
+        "diff --git "
+        "a/Database/kvrocks/2.16.0/24.03-lts-sp4/Dockerfile "
+        "b/Database/kvrocks/2.16.0/24.03-lts-sp4/Dockerfile\n"
+        "new file mode 100644\n"
+        "--- /dev/null\n"
+        "+++ b/Database/kvrocks/2.16.0/24.03-lts-sp4/Dockerfile\n"
+        "@@ -0,0 +1 @@\n"
+        "+FROM openeuler/openeuler:24.03-lts-sp4\n"
+    )
     for architecture in ("x86_64", "aarch64"):
         (root / "reports" / f"{architecture}.json").write_text(
             json.dumps(
@@ -50,25 +71,56 @@ def _candidate(tmp_path, *, testcase_qa_status="approved"):
         json.dumps({"status": "passed", "added_files": 14})
     )
     (root / "reports" / "agents" / "image-qa-round1.json").write_text(
-        json.dumps({"status": "approved", "issues": [], "summary": "approved"})
+        json.dumps(
+            {
+                "status": "approved",
+                "issues": [],
+                "summary": "Image metadata and runtime contract are consistent.",
+            }
+        )
     )
-    testcase_round = 1 if testcase_qa_status == "approved" else 2
-    (
+    if testcase_repaired or testcase_qa_status == "needs_fix":
+        (root / "reports" / "agents" / "testcase-qa-round1.json").write_text(
+            json.dumps(
+                {
+                    "status": "needs_fix",
+                    "issues": [
+                        {
+                            "severity": "major",
+                            "file": "Database/kvrocks/tests/test.sh",
+                            "description": "Version assertion is too weak.",
+                        }
+                    ],
+                    "coverage_score": 0.75,
+                    "summary": "The version check can produce a false positive.",
+                }
+            )
+        )
+    testcase_round = (
+        2 if testcase_repaired or testcase_qa_status == "needs_fix" else 1
+    )
+    testcase_issues = (
+        [{"severity": "major", "description": "coverage gap"}]
+        if testcase_qa_status == "needs_fix"
+        else []
+    )
+    testcase_report = (
         root
         / "reports"
         / "agents"
         / f"testcase-qa-round{testcase_round}.json"
-    ).write_text(
+    )
+    testcase_report.write_text(
         json.dumps(
             {
                 "status": testcase_qa_status,
-                "issues": (
-                    []
-                    if testcase_qa_status == "approved"
-                    else [{"severity": "major", "description": "coverage gap"}]
-                ),
+                "issues": testcase_issues,
                 "coverage_score": 0.95,
-                "summary": testcase_qa_status,
+                "summary": (
+                    "The repaired tests now verify the exact application version."
+                    if testcase_repaired
+                    else testcase_qa_status
+                ),
             }
         )
     )
@@ -131,16 +183,56 @@ def test_pr_content_contains_candidate_and_dual_architecture_evidence(tmp_path):
     content = compose_pull_request(bundle)
 
     assert content.title == (
-        "[New Image] Add Apache Kvrocks 2.16.0 for openEuler 24.03-lts-sp4"
+        "[New Image] Add kvrocks 2.16.0 for openEuler 24.03-lts-sp4"
     )
+    assert [line for line in content.body.splitlines() if line.startswith("## ")] == [
+        "## Summary",
+        "## Changes",
+        "## Adversarial review",
+        "## Repository checks",
+        "## Checklist",
+    ]
+    assert "| Modified | `Database/image-list.yml` |" in content.body
+    assert (
+        "| Added | "
+        "`Database/kvrocks/2.16.0/24.03-lts-sp4/Dockerfile` |"
+    ) in content.body
     assert "x86_64" in content.body
     assert "aarch64" in content.body
     assert "restart_persistence" in content.body
     assert bundle.manifest.content_sha256 in content.body
     assert "validated run `123456`" in content.body
-    assert "image QA: approved" in content.body
-    assert "testcase QA: approved" in content.body
+    assert "Final result: `approved` after 1 round." in content.body
+    assert "Image metadata and runtime contract are consistent." in content.body
+    assert "Result evidence: `results.json`, `version_info.json`" in content.body
     assert "https://github.com/apache/kvrocks/tree/v2.16.0" in content.body
+    assert "Confidence Score" not in content.body
+    assert "Apache Kvrocks" not in content.body
+    assert "Redis-protocol" not in content.body
+    assert "`Database/image-list.yml`" not in content.body.split(
+        "## Repository checks", 1
+    )[1]
+
+
+def test_pr_content_summarizes_qa_rounds_and_findings(tmp_path):
+    from scripts.harness.compose_pr import compose_pull_request
+
+    bundle = _candidate(tmp_path, testcase_repaired=True)
+
+    content = compose_pull_request(bundle)
+
+    assert "### Testcase review" in content.body
+    assert "Final result: `approved` after 2 rounds." in content.body
+    assert "Round 1: `needs_fix`" in content.body
+    assert "The version check can produce a false positive." in content.body
+    assert (
+        "`major` — `Database/kvrocks/tests/test.sh`: "
+        "Version assertion is too weak."
+    ) in content.body
+    assert "Round 2: `approved`" in content.body
+    assert "The repaired tests now verify the exact application version." in (
+        content.body
+    )
 
 
 def test_pr_content_records_non_blocking_qa_disagreement(tmp_path):
@@ -150,8 +242,11 @@ def test_pr_content_records_non_blocking_qa_disagreement(tmp_path):
 
     content = compose_pull_request(bundle)
 
-    assert "image QA: approved" in content.body
-    assert "testcase QA: needs_fix" in content.body
+    assert "### Image review" in content.body
+    assert "Final result: `approved` after 1 round." in content.body
+    assert "### Testcase review" in content.body
+    assert "Final result: `needs_fix` after 2 rounds." in content.body
+    assert "`major` — coverage gap" in content.body
 
 
 def test_pr_content_records_recovered_candidate_provenance(tmp_path):
@@ -181,12 +276,12 @@ def test_pr_content_records_recovered_candidate_provenance(tmp_path):
 
     content = compose_pull_request(bundle)
 
-    assert "Generation evidence run `30478803960`" in content.body
-    assert "Native validation evidence run `30483501656`" in content.body
-    assert "Recovery packaging run `123456`" in content.body
+    assert "- Generation evidence run: `30478803960`." in content.body
+    assert "- Native validation evidence run: `30483501656`." in content.body
+    assert "- Recovery packaging run: `123456`." in content.body
     assert "Promoted from validated run `123456`" not in content.body
-    assert "Packaged in recovery run `123456`" in content.body
-    assert "non-overlapping target-base advance" in content.body
+    assert "- Packaged in recovery run: `123456`." in content.body
+    assert "Non-overlapping target-base advance: verified." in content.body
 
 
 def test_pr_content_rejects_recovery_packaging_run_mismatch(tmp_path):

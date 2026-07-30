@@ -273,15 +273,102 @@ def _load_json(path: Path, label: str) -> Mapping[str, object]:
     return payload
 
 
-def _last_qa_status(root: Path, prefix: str) -> str:
-    paths = sorted((root / "reports" / "agents").glob(f"{prefix}-round*.json"))
+def _brief(value: object, *, limit: int = 300) -> str:
+    text = " ".join(str(value or "").split())
+    if not text:
+        return "No summary recorded."
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3].rstrip() + "..."
+
+
+def _qa_review_lines(root: Path, prefix: str, label: str) -> tuple[str, ...]:
+    def round_number(path: Path) -> int:
+        match = re.search(r"-round([0-9]+)\.json$", path.name)
+        return int(match.group(1)) if match else 0
+
+    paths = sorted(
+        (root / "reports" / "agents").glob(f"{prefix}-round*.json"),
+        key=round_number,
+    )
+    lines = [f"### {label} review", ""]
     if not paths:
-        return "not recorded"
-    report = _load_json(paths[-1], prefix)
-    status = str(report.get("status", "unknown"))
-    if status not in {"approved", "needs_fix"}:
-        raise PRDeliveryError(f"{prefix} evidence has an invalid status")
-    return status
+        return (*lines, "- Final result: `not recorded`.", "")
+
+    reports = []
+    for path in paths:
+        report = _load_json(path, f"{prefix} round {round_number(path)}")
+        status = str(report.get("status", "unknown"))
+        if status not in {"approved", "needs_fix"}:
+            raise PRDeliveryError(f"{prefix} evidence has an invalid status")
+        reports.append((round_number(path), status, report))
+
+    final_status = reports[-1][1]
+    rounds = len(reports)
+    suffix = "round" if rounds == 1 else "rounds"
+    lines.append(f"- Final result: `{final_status}` after {rounds} {suffix}.")
+    coverage = reports[-1][2].get("coverage_score")
+    if coverage is not None:
+        lines.append(f"- Coverage score: `{coverage}`.")
+    for number, status, report in reports:
+        lines.append(
+            f"- Round {number}: `{status}` — {_brief(report.get('summary'))}"
+        )
+        issues = report.get("issues")
+        if not isinstance(issues, list):
+            continue
+        for issue in issues[:3]:
+            if not isinstance(issue, dict):
+                continue
+            severity = _brief(issue.get("severity", "unknown"), limit=30)
+            description = _brief(issue.get("description"), limit=300)
+            file = (
+                _brief(issue.get("file"), limit=200)
+                if issue.get("file")
+                else ""
+            )
+            location = f"`{file}`: " if file else ""
+            lines.append(f"  - `{severity}` — {location}{description}")
+        if len(issues) > 3:
+            lines.append(
+                f"  - {len(issues) - 3} more findings are preserved in "
+                "the validation artifact."
+            )
+    lines.append("")
+    return tuple(lines)
+
+
+def _patch_changes(bundle: CandidateBundle) -> tuple[tuple[str, str], ...]:
+    try:
+        lines = (bundle.root / "changes.patch").read_text().splitlines()
+    except OSError as error:
+        raise PRDeliveryError("candidate patch is unavailable") from error
+
+    changes: list[tuple[str, str]] = []
+    path = ""
+    status = "Modified"
+
+    def record() -> None:
+        if path:
+            changes.append((status, path))
+
+    for line in lines:
+        match = re.fullmatch(r"diff --git a/(.+) b/(.+)", line)
+        if match:
+            record()
+            path = match.group(2)
+            status = "Modified"
+        elif line.startswith("new file mode "):
+            status = "Added"
+        elif line.startswith("deleted file mode "):
+            status = "Deleted"
+        elif line.startswith("rename to "):
+            status = "Renamed"
+            path = line.removeprefix("rename to ")
+    record()
+    if not changes:
+        raise PRDeliveryError("candidate patch contains no file changes")
+    return tuple(changes)
 
 
 def _recovery_provenance(
@@ -347,6 +434,7 @@ def _recovery_provenance(
 
 def compose_pull_request(bundle: CandidateBundle) -> PullRequestContent:
     task = bundle.task
+    changes = _patch_changes(bundle)
     rows = []
     for architecture in ("x86_64", "aarch64"):
         report = _load_json(
@@ -376,8 +464,12 @@ def compose_pull_request(bundle: CandidateBundle) -> PullRequestContent:
     gates = _load_json(bundle.root / "reports" / "gates.json", "target gates")
     if gates.get("status") != "passed":
         raise PRDeliveryError("deterministic target gates did not pass")
-    image_qa = _last_qa_status(bundle.root, "image-qa")
-    testcase_qa = _last_qa_status(bundle.root, "testcase-qa")
+    image_review = _qa_review_lines(bundle.root, "image-qa", "Image")
+    testcase_review = _qa_review_lines(
+        bundle.root,
+        "testcase-qa",
+        "Testcase",
+    )
     recovery = _recovery_provenance(bundle)
     recovery_lines: tuple[str, ...] = ()
     candidate_origin = (
@@ -386,74 +478,65 @@ def compose_pull_request(bundle: CandidateBundle) -> PullRequestContent:
     )
     if recovery is not None:
         candidate_origin = (
-            f"- Packaged in recovery run `{recovery['packaging_run_id']}` "
-            f"from native validation run `{recovery['validation_run_id']}`."
+            f"- Packaged in recovery run: `{recovery['packaging_run_id']}`."
         )
         recovery_lines = (
-            "",
-            "## Recovery provenance",
-            "",
-            f"- Generation evidence run `{recovery.get('generation_run_id')}`.",
-            f"- Native validation evidence run `{recovery.get('validation_run_id')}`.",
-            f"- Recovery packaging run `{recovery.get('packaging_run_id')}`.",
-            "- The candidate was replayed after a non-overlapping "
-            "target-base advance.",
+            f"- Generation evidence run: "
+            f"`{recovery.get('generation_run_id')}`.",
+            f"- Native validation evidence run: "
+            f"`{recovery.get('validation_run_id')}`.",
+            f"- Recovery packaging run: "
+            f"`{recovery.get('packaging_run_id')}`.",
+            "- Non-overlapping target-base advance: verified.",
         )
     title = (
-        f"[New Image] Add Apache {task.app.capitalize()} {task.version} "
+        f"[New Image] Add {task.app} {task.version} "
         f"for openEuler {task.os_version}"
     )
     body = "\n".join(
         (
             "## Summary",
             "",
-            f"Add Apache {task.app.capitalize()} {task.version} built from "
-            f"[the upstream release]({task.source_url}) on openEuler "
+            f"Add `{task.app}` `{task.version}` built from "
+            f"[the pinned upstream source]({task.source_url}) for openEuler "
             f"{task.os_version}.",
             "",
-            "The runtime is built and tested natively on both supported "
-            "architectures. It runs as a non-root user and includes a "
-            "Redis-protocol health check plus restart-persistence coverage.",
-            "",
-            "## Validated candidate",
-            "",
-            candidate_origin,
-            f"- Target base SHA: `{bundle.manifest.base_sha}`.",
+            f"- Validated run: `{bundle.manifest.validated_run_id}`.",
             f"- Candidate SHA256: `{bundle.manifest.content_sha256}`.",
-            f"- Task ID: `{bundle.manifest.task_id}`.",
             "",
-            "## Native build and test evidence",
+            "## Changes",
+            "",
+            "| Status | File |",
+            "|---|---|",
+            *(f"| {status} | `{path}` |" for status, path in changes),
+            "",
+            "## Adversarial review",
+            "",
+            *image_review,
+            *testcase_review,
+            "## Repository checks",
             "",
             "| Architecture | Platform | Image ID | Duration | Passed checks |",
             "|---|---|---|---:|---|",
             *rows,
             "",
-            "Each architecture passed native source build, dgoss assertions, "
-            "shared version/function tests, and restart-persistence validation.",
-            "",
-            "## Adversarial review",
-            "",
-            f"- image QA: {image_qa}",
-            f"- testcase QA: {testcase_qa}",
+            candidate_origin,
             *recovery_lines,
-            "",
-            "## Repository checks",
-            "",
             f"- Deterministic target contract: {gates.get('status')}",
-            f"- Added files: {gates.get('added_files', 'recorded in artifact')}",
-            "- Existing image files were not modified or deleted.",
-            "- `Database/image-list.yml` preserves all prior entries.",
-            "- Application tests and bounded result evidence are included under "
-            "the application MDU.",
+            f"- Target base SHA: `{bundle.manifest.base_sha}`.",
+            f"- Task ID: `{bundle.manifest.task_id}`.",
+            "- Result evidence: `results.json`, `version_info.json`, "
+            "`x86_64.junit.xml`, `aarch64.junit.xml`.",
+            "- Candidate integrity: verified before delivery.",
             "",
             "## Checklist",
             "",
             "- [x] Version and upstream source are pinned",
-            "- [x] openEuler base and metadata paths are consistent",
-            "- [x] x86_64 native build and tests passed",
-            "- [x] aarch64 native build and tests passed",
-            "- [x] Non-root runtime, health check, and persistence passed",
-            "- [x] Candidate integrity verified before delivery",
+            "- [x] Changed files are restricted to the task scope",
+            "- [x] x86_64 native validation passed",
+            "- [x] aarch64 native validation passed",
+            "- [x] Adversarial review records are preserved",
+            "- [x] Candidate integrity was verified before delivery",
         )
     )
     return PullRequestContent(title=title, body=body + "\n")

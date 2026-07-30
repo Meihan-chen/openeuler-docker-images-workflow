@@ -139,7 +139,7 @@ def test_replays_exact_validated_base_then_promotes_and_delivers(tmp_path):
     assert delivery["client"] is client
     assert delivery["promotion"].branch == events[1][1]["branch"]
     assert bundle.manifest.content_sha256 in delivery["body"]
-    assert delivery["title"].startswith("[New Image] Add Apache Kvrocks")
+    assert delivery["title"].startswith("[New Image] Add kvrocks")
 
 
 def test_wrong_validated_run_stops_before_clone_or_delivery(tmp_path):
