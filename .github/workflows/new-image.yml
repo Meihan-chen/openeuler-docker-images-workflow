@@ -14,6 +14,7 @@ on:
         options:
           - pipeline_smoke
           - validate_only
+          - scenario_one
           - resume_x86
           - resume_arm
           - resume_revalidate_x86
@@ -76,7 +77,8 @@ jobs:
     name: Generate candidate on x86_64
     if: >-
       ${{ inputs.operation == 'pipeline_smoke' ||
-          inputs.operation == 'validate_only' }}
+          inputs.operation == 'validate_only' ||
+          inputs.operation == 'scenario_one' }}
     runs-on: [self-hosted, Linux, X64, oe-image-x86]
     timeout-minutes: 120
     outputs:
@@ -217,6 +219,7 @@ jobs:
       ${{ always() &&
           (inputs.operation == 'pipeline_smoke' ||
            inputs.operation == 'validate_only' ||
+           inputs.operation == 'scenario_one' ||
            inputs.operation == 'resume_x86') &&
           (needs.prepare.result == 'success' ||
            inputs.operation == 'resume_x86') }}
@@ -386,6 +389,7 @@ jobs:
       ${{ always() &&
           (inputs.operation == 'pipeline_smoke' ||
            inputs.operation == 'validate_only' ||
+           inputs.operation == 'scenario_one' ||
            inputs.operation == 'resume_x86' ||
            inputs.operation == 'resume_arm') &&
           (needs.validate_x86.result == 'success' ||
@@ -554,6 +558,7 @@ jobs:
       ${{ always() &&
           (((inputs.operation == 'pipeline_smoke' ||
              inputs.operation == 'validate_only' ||
+             inputs.operation == 'scenario_one' ||
              inputs.operation == 'resume_x86' ||
              inputs.operation == 'resume_arm') &&
             needs.validate_arm.result == 'success') ||
@@ -719,7 +724,8 @@ jobs:
     if: >-
       ${{ always() &&
           (((inputs.operation == 'pipeline_smoke' ||
-             inputs.operation == 'validate_only') &&
+             inputs.operation == 'validate_only' ||
+             inputs.operation == 'scenario_one') &&
             needs.revalidate_x86.result == 'success') ||
            inputs.operation == 'resume_package' ||
            inputs.operation == 'recover_package') }}
@@ -1121,11 +1127,17 @@ jobs:
 
   deliver_fork_pr:
     name: Promote validated candidate to fork PR
-    if: ${{ inputs.operation == 'fork_pr' }}
+    if: >-
+      ${{ always() &&
+          (inputs.operation == 'fork_pr' ||
+           (inputs.operation == 'scenario_one' &&
+            needs.package_candidate.result == 'success')) }}
+    needs: package_candidate
     runs-on: [self-hosted, Linux, X64, oe-image-x86]
     timeout-minutes: 30
     steps:
       - name: Require the validated run ID
+        if: ${{ inputs.operation == 'fork_pr' }}
         env:
           VALIDATED_RUN_ID: ${{ inputs.validated_run_id }}
         run: |
@@ -1146,11 +1158,16 @@ jobs:
       - name: Download exact validated candidate
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: phase1-candidate-${{ inputs.validated_run_id }}
+          name: >-
+            phase1-candidate-${{
+            inputs.operation == 'scenario_one' &&
+            github.run_id || inputs.validated_run_id }}
           path: ${{ runner.temp }}/candidate
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
-          run-id: ${{ inputs.validated_run_id }}
+          run-id: >-
+            ${{ inputs.operation == 'scenario_one' &&
+            github.run_id || inputs.validated_run_id }}
 
       - name: Promote candidate and create fork PR
         env:
@@ -1159,7 +1176,9 @@ jobs:
           "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
             fork-deliver \
             --candidate-dir "${RUNNER_TEMP}/candidate" \
-            --expected-run-id "${{ inputs.validated_run_id }}" \
+            --expected-run-id \
+              "${{ inputs.operation == 'scenario_one' &&
+                  github.run_id || inputs.validated_run_id }}" \
             --delivery-run-id "${{ github.run_id }}" \
             --delivery-run-attempt "${{ github.run_attempt }}" \
             --workspace \

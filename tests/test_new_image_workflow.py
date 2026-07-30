@@ -33,6 +33,7 @@ def test_phase1_is_manual_only_with_explicit_operations():
     assert operation["options"] == [
         "pipeline_smoke",
         "validate_only",
+        "scenario_one",
         "resume_x86",
         "resume_arm",
         "resume_revalidate_x86",
@@ -44,6 +45,29 @@ def test_phase1_is_manual_only_with_explicit_operations():
     assert "validated_run_id" in trigger["workflow_dispatch"]["inputs"]
     assert "source_run_id" in trigger["workflow_dispatch"]["inputs"]
     assert "generation_run_id" in trigger["workflow_dispatch"]["inputs"]
+
+
+def test_scenario_one_runs_full_validation_chain_and_delivers_same_run():
+    jobs = _workflow()["jobs"]
+
+    for job_name in (
+        "prepare",
+        "validate_x86",
+        "validate_arm",
+        "revalidate_x86",
+        "package_candidate",
+    ):
+        assert "scenario_one" in jobs[job_name]["if"]
+
+    delivery = jobs["deliver_fork_pr"]
+    delivery_text = _job_text(delivery)
+    assert delivery["needs"] == "package_candidate"
+    assert "always()" in delivery["if"]
+    assert "inputs.operation == 'scenario_one'" in delivery["if"]
+    assert "needs.package_candidate.result == 'success'" in delivery["if"]
+    assert "inputs.operation == 'fork_pr'" in delivery["if"]
+    assert "inputs.operation == 'fork_pr'" in delivery_text
+    assert "github.run_id" in delivery_text
 
 
 def test_phase1_task_defaults_are_the_confirmed_kvrocks_contract():
