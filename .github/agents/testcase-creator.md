@@ -63,25 +63,18 @@ port:
 
 **test_helpers.sh** — 辅助函数：
 ```bash
-wait_for_port() {
-    local port=$1 timeout=${2:-30}
+retry() {
+    local timeout=$1
+    shift
     for _ in $(seq 1 $timeout); do
-        if ss -tlnp | grep -q ":$port "; then return 0; fi
-        sleep 1
-    done
-    return 1
-}
-wait_for_http() {
-    local url=$1 timeout=${2:-30}
-    for _ in $(seq 1 $timeout); do
-        if curl -sf "$url" >/dev/null 2>&1; then return 0; fi
+        if "$@" >/dev/null 2>&1; then return 0; fi
         sleep 1
     done
     return 1
 }
 ```
 
-具体断言必须按 Dockerfile 和任务契约替换这些通用示例；非 HTTP 应用不得照搬 HTTP 断言。
+具体断言必须按 Dockerfile 和任务契约替换这些通用示例；非 HTTP 应用不得照搬 HTTP 断言。容器内的就绪探测只能使用 runtime image 已确认安装的命令，并优先调用应用协议客户端，不得假设 `ss`、`netstat` 或 `curl` 存在。
 
 ### 步骤 4：生成 test.sh（与 Dockerfile 同级）
 

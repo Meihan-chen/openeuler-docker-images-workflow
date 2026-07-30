@@ -29,6 +29,7 @@ Challenge from these angles:
 - Could any test pass for the wrong application version?
 - Could any test pass when the image is actually broken?
 - Are timeout values bounded and reasonable?
+- Do readiness probes use only commands available in the runtime image?
 - Are port checks using the correct IP binding? (0.0.0.0 vs 127.0.0.1)
 - Does any fallback swallow a failed command or weaken an assertion?
 

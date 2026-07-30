@@ -149,6 +149,10 @@ def _application_contract(task: TaskSpec, role: str) -> tuple[str, ...]:
                 "- The native harness executes shared tests inside an "
                 "already-running container; test scripts must not invoke "
                 "Docker or own container lifecycle.",
+                "- Every in-container readiness probe must use commands "
+                "guaranteed by the runtime image. For Kvrocks, use "
+                "`redis-cli -p 6666 PING` and require PONG; do not assume "
+                "host diagnostics such as `ss` or `netstat` are installed.",
             )
         )
     return tuple(contract)

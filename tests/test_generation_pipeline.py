@@ -1116,8 +1116,17 @@ def test_phase1_prompts_pin_kvrocks_paths_and_forbid_scope_escape():
     assert "Database/kvrocks/tests/test.sh" in testcase_prompt
     assert "stdout` must be a YAML list" in testcase_prompt
     assert "redis-cli -p 6666 PING" in testcase_prompt
+    assert "guaranteed by the runtime image" in testcase_prompt
+    assert "`ss`" in testcase_prompt
     assert "image-list, Dockerfile, metadata" in testcase_prompt
     assert "read-only" in testcase_prompt
+
+    fixer_prompt = build_role_prompt(
+        role="fixer",
+        task=_task(),
+        base_sha="1" * 40,
+    )
+    assert "guaranteed by the runtime image" in fixer_prompt
 
 
 def test_fixer_prompt_whitelists_generated_candidate_files():

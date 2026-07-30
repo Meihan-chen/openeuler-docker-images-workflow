@@ -43,3 +43,6 @@ def test_shared_qa_prompts_preserve_findings_for_local_validation():
     assert "模糊匹配" not in testcase_creator
     assert "exact" in testcase_creator or "精确" in testcase_creator
     assert "timeout: 30000" not in testcase_creator
+    assert "ss -tlnp" not in testcase_creator
+    assert "runtime image" in testcase_creator
+    assert "runtime image" in testcase_qa
