@@ -169,7 +169,12 @@ def test_every_round_validates_one_candidate_on_both_architectures():
         assert decision["uses"] == "./.github/workflows/phase1-decide.yml"
         assert decision["needs"] == ROUNDS[index]
         assert decision["with"]["round"] == str(index + 1)
-        assert decision["with"]["max_rounds"] == "3"
+        # pipeline_smoke converges deterministically; giving it a repair
+        # budget would burn model calls the Fixer cannot possibly help with,
+        # because the smoke image is built from a synthetic context.
+        assert decision["with"]["max_rounds"] == (
+            "${{ inputs.operation == 'pipeline_smoke' && '0' || '3' }}"
+        )
         # GitHub expressions have no arithmetic, so the next round is explicit.
         assert decision["with"]["next_round"] == str(index + 2)
 
@@ -296,10 +301,23 @@ def test_only_the_decision_stage_receives_a_model_key():
     assert "secrets" not in jobs["round1"]
     assert ROUND_PATH.read_text().count("DEEPSEEK_API_KEY") == 0
     for name in DECISIONS:
-        assert jobs[name]["secrets"] == {
-            "DEEPSEEK_API_KEY": "${{ secrets.DEEPSEEK_API_KEY }}"
-        }
+        key = jobs[name]["secrets"]["DEEPSEEK_API_KEY"]
+        assert "secrets.DEEPSEEK_API_KEY" in key
+        # The smoke path must reach the decision stage with no key at all.
+        assert "pipeline_smoke" in key
     assert "inherit" not in WORKFLOW_PATH.read_text()
+
+
+def test_the_smoke_path_can_never_reach_the_fixer():
+    jobs = _workflow()["jobs"]
+
+    for name in DECISIONS:
+        assert "pipeline_smoke" in jobs[name]["with"]["max_rounds"]
+        assert "'0'" in jobs[name]["with"]["max_rounds"]
+    # A zero budget makes decide_round raise before it ever builds a prompt,
+    # so a flaky smoke build fails loudly instead of silently repairing.
+    decide_call = _trigger(_workflow(DECIDE_PATH))["workflow_call"]
+    assert decide_call["secrets"]["DEEPSEEK_API_KEY"]["required"] is False
 
 
 def test_fork_pr_reuses_named_artifact_from_exact_validated_run():

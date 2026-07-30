@@ -369,9 +369,6 @@ def cmd_phase1_native_smoke(args: argparse.Namespace) -> None:
 
 
 def cmd_phase1_decide(args: argparse.Namespace) -> None:
-    api_key = os.environ.get("DEEPSEEK_API_KEY", "")
-    if not api_key:
-        raise NativeRepairError("DEEPSEEK_API_KEY is required")
     reports = {
         "x86_64": json.loads(args.x86_report.read_text()),
         "aarch64": json.loads(args.arm_report.read_text()),
@@ -385,7 +382,7 @@ def cmd_phase1_decide(args: argparse.Namespace) -> None:
         reports=reports,
         report_dir=args.report_dir,
         executable=args.opencode,
-        api_key=api_key,
+        api_key=os.environ.get("DEEPSEEK_API_KEY", ""),
     )
     summary = {
         "converged": decision.converged,

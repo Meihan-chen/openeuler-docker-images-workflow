@@ -142,8 +142,6 @@ def decide_round(
         raise NativeRepairError(
             "native repair evidence must remain outside target workspace"
         )
-    if not api_key:
-        raise NativeRepairError("DEEPSEEK_API_KEY is required")
     missing = [name for name in _ARCHITECTURES if name not in reports]
     if missing:
         raise NativeRepairError(
@@ -182,6 +180,10 @@ def decide_round(
             f"{max_rounds} repair attempts"
         )
 
+    if not api_key:
+        # Converging needs no model, so the key is only required once a repair
+        # is actually about to run.
+        raise NativeRepairError("DEEPSEEK_API_KEY is required to repair")
     review: dict[str, object] = {
         "kind": "native_validation_failure",
         "repair_round": round_number,

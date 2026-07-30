@@ -23,7 +23,9 @@ on:
         type: string
     secrets:
       DEEPSEEK_API_KEY:
-        required: true
+        # pipeline_smoke converges deterministically and must never repair,
+        # so it calls this workflow without a key at all.
+        required: false
     outputs:
       converged:
         description: "true when both architectures passed on one candidate"

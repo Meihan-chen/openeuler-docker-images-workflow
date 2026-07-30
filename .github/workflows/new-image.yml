@@ -273,10 +273,12 @@ jobs:
     uses: ./.github/workflows/phase1-decide.yml
     with:
       round: "1"
-      max_rounds: "3"
+      max_rounds: ${{ inputs.operation == 'pipeline_smoke' && '0' || '3' }}
       next_round: "2"
     secrets:
-      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      DEEPSEEK_API_KEY: >-
+        ${{ inputs.operation == 'pipeline_smoke' && ''
+        || secrets.DEEPSEEK_API_KEY }}
 
   round2:
     name: Round 2
@@ -299,10 +301,12 @@ jobs:
     uses: ./.github/workflows/phase1-decide.yml
     with:
       round: "2"
-      max_rounds: "3"
+      max_rounds: ${{ inputs.operation == 'pipeline_smoke' && '0' || '3' }}
       next_round: "3"
     secrets:
-      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      DEEPSEEK_API_KEY: >-
+        ${{ inputs.operation == 'pipeline_smoke' && ''
+        || secrets.DEEPSEEK_API_KEY }}
 
   round3:
     name: Round 3
@@ -325,10 +329,12 @@ jobs:
     uses: ./.github/workflows/phase1-decide.yml
     with:
       round: "3"
-      max_rounds: "3"
+      max_rounds: ${{ inputs.operation == 'pipeline_smoke' && '0' || '3' }}
       next_round: "4"
     secrets:
-      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      DEEPSEEK_API_KEY: >-
+        ${{ inputs.operation == 'pipeline_smoke' && ''
+        || secrets.DEEPSEEK_API_KEY }}
 
   round4:
     name: Round 4
@@ -351,10 +357,12 @@ jobs:
     uses: ./.github/workflows/phase1-decide.yml
     with:
       round: "4"
-      max_rounds: "3"
+      max_rounds: ${{ inputs.operation == 'pipeline_smoke' && '0' || '3' }}
       next_round: "5"
     secrets:
-      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      DEEPSEEK_API_KEY: >-
+        ${{ inputs.operation == 'pipeline_smoke' && ''
+        || secrets.DEEPSEEK_API_KEY }}
 
   package_candidate:
     name: Verify and seal validated candidate
@@ -434,9 +442,7 @@ jobs:
             inputs.source_run_id || github.run_id }}
 
       - name: Download x86 repair evidence
-        if: >-
-          ${{ inputs.operation == 'resume_package' ||
-              inputs.operation == 'recover_package' }}
+        if: ${{ inputs.operation == 'recover_package' }}
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: >-
@@ -453,9 +459,7 @@ jobs:
             inputs.source_run_id || github.run_id }}
 
       - name: Download ARM final patch and evidence
-        if: >-
-          ${{ inputs.operation == 'resume_package' ||
-              inputs.operation == 'recover_package' }}
+        if: ${{ inputs.operation == 'recover_package' }}
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: >-
@@ -472,9 +476,7 @@ jobs:
             inputs.source_run_id || github.run_id }}
 
       - name: Download final x86 evidence
-        if: >-
-          ${{ inputs.operation == 'resume_package' ||
-              inputs.operation == 'recover_package' }}
+        if: ${{ inputs.operation == 'recover_package' }}
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: >-
@@ -491,28 +493,36 @@ jobs:
             inputs.source_run_id || github.run_id }}
 
       - name: Download the converged round
-        if: >-
-          ${{ inputs.operation != 'resume_package' &&
-              inputs.operation != 'recover_package' }}
+        if: ${{ inputs.operation != 'recover_package' }}
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: phase1-converged-${{ github.run_id }}
+          name: >-
+            phase1-converged-${{ inputs.operation == 'resume_package' &&
+            inputs.source_run_id || github.run_id }}
           path: ${{ runner.temp }}/converged
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: >-
+            ${{ inputs.operation == 'resume_package' &&
+            inputs.source_run_id || github.run_id }}
 
       - name: Download round decision evidence
-        if: >-
-          ${{ inputs.operation != 'resume_package' &&
-              inputs.operation != 'recover_package' }}
+        if: ${{ inputs.operation != 'recover_package' }}
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          pattern: phase1-decide*-${{ github.run_id }}
+          pattern: >-
+            phase1-decide*-${{ inputs.operation == 'resume_package' &&
+            inputs.source_run_id || github.run_id }}
           merge-multiple: true
           path: ${{ runner.temp }}/decide-agents
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: >-
+            ${{ inputs.operation == 'resume_package' &&
+            inputs.source_run_id || github.run_id }}
 
       - name: Lay the converged round out as sealing input
-        if: >-
-          ${{ inputs.operation != 'resume_package' &&
-              inputs.operation != 'recover_package' }}
+        if: ${{ inputs.operation != 'recover_package' }}
         run: |
           mkdir -p "${RUNNER_TEMP}/arm/arm-repair-agents" \
             "${RUNNER_TEMP}/final-x86" \
@@ -802,10 +812,14 @@ jobs:
     name: Release x86_64 run builders
     # The builder now outlives each validation so repair rounds keep their
     # layer cache, so the run has to hand it back explicitly.
+    # resume_round can start at round 2, 3 or 4, so gating on round 1 alone
+    # would strand the builders those later rounds create.
     if: >-
       ${{ always() &&
           (needs.round1.result != 'skipped' ||
-           needs.decide1.result != 'skipped') }}
+           needs.round2.result != 'skipped' ||
+           needs.round3.result != 'skipped' ||
+           needs.round4.result != 'skipped') }}
     needs: [round1, round2, round3, round4, decide1, package_candidate]
     runs-on: [self-hosted, Linux, X64, oe-image-x86]
     timeout-minutes: 15
@@ -826,7 +840,12 @@ jobs:
 
   release_arm_builders:
     name: Release aarch64 run builders
-    if: ${{ always() && needs.round1.result != 'skipped' }}
+    if: >-
+      ${{ always() &&
+          (needs.round1.result != 'skipped' ||
+           needs.round2.result != 'skipped' ||
+           needs.round3.result != 'skipped' ||
+           needs.round4.result != 'skipped') }}
     needs: [round1, round2, round3, round4]
     runs-on: [self-hosted, Linux, ARM64, oe-image-arm64]
     timeout-minutes: 15
