@@ -50,3 +50,14 @@ def test_shared_qa_prompts_preserve_findings_for_local_validation():
     assert "container_name" not in testcase_creator
     assert "与 dockerfile 同级" not in testcase_creator
     assert "dockerfile-level" not in testcase_qa
+
+
+def test_image_prompts_define_generic_auxiliary_file_policy():
+    image_creator = (AGENTS_DIR / "image-creator.md").read_text().lower()
+    image_qa = (AGENTS_DIR / "image-qa.md").read_text().lower()
+
+    assert "minimum required structure" in image_creator
+    assert "upstream-provided configuration" in image_creator
+    assert "persistent data directory" in image_creator
+    assert "auxiliary files" in image_qa
+    assert "configuration provenance" in image_qa

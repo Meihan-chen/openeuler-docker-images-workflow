@@ -979,6 +979,53 @@ def test_qa_prompts_embed_candidate_snapshot_without_tool_reads(tmp_path):
     assert "redis-cli -p 6666 PING" in testcase_qa_prompt
 
 
+def test_image_qa_snapshot_includes_auxiliary_image_files(tmp_path):
+    auxiliary_root = (
+        tmp_path
+        / "target"
+        / "Database"
+        / "kvrocks"
+        / "2.16.0"
+        / "24.03-lts-sp4"
+    )
+    agent = _fully_approved_agent()
+
+    def write_candidate(role, _):
+        if role != "image_creator":
+            return
+        auxiliary_root.mkdir(parents=True)
+        (auxiliary_root / "Dockerfile").write_text(
+            "FROM openEuler\nCOPY service.conf /etc/example/service.conf\n"
+        )
+        (auxiliary_root / "service.conf").write_text("listen = 0.0.0.0\n")
+        (auxiliary_root / "entrypoint.sh").write_text("#!/bin/sh\nexec example\n")
+        tests_root = auxiliary_root.parents[2] / "tests"
+        tests_root.mkdir()
+        (tests_root / "test.sh").write_text("should not reach image QA\n")
+        results_root = auxiliary_root.parents[2] / "results"
+        results_root.mkdir()
+        (results_root / "results.json").write_text('{"status": "passed"}\n')
+
+    _run_recorded_pipeline(
+        tmp_path,
+        agent,
+        mutation=write_candidate,
+    )
+
+    image_qa_prompt = agent.calls[1]["prompt"]
+    assert (
+        "Database/kvrocks/2.16.0/24.03-lts-sp4/service.conf"
+        in image_qa_prompt
+    )
+    assert "listen = 0.0.0.0" in image_qa_prompt
+    assert (
+        "Database/kvrocks/2.16.0/24.03-lts-sp4/entrypoint.sh"
+        in image_qa_prompt
+    )
+    assert "Database/kvrocks/tests/test.sh" not in image_qa_prompt
+    assert "Database/kvrocks/results/results.json" not in image_qa_prompt
+
+
 def test_qa_snapshot_failure_writes_machine_readable_report(tmp_path):
     dockerfile = (
         tmp_path
@@ -1176,17 +1223,37 @@ def test_shared_prompt_contract_does_not_inject_kvrocks_rules():
             assert fragment not in prompt
 
 
-def test_fixer_prompt_whitelists_generated_candidate_files():
+def test_fixer_prompt_whitelists_generated_candidate_files(tmp_path):
     from scripts.lib.generation_pipeline import build_role_prompt
+
+    workspace = tmp_path / "target"
+    image_root = (
+        workspace
+        / "Database"
+        / "kvrocks"
+        / "2.16.0"
+        / "24.03-lts-sp4"
+    )
+    image_root.mkdir(parents=True)
+    (image_root / "Dockerfile").write_text("FROM openEuler\n")
+    (image_root / "service.conf").write_text("listen = 0.0.0.0\n")
+    (image_root / "entrypoint.sh").write_text("#!/bin/sh\n")
+    results_root = workspace / "Database" / "kvrocks" / "results"
+    results_root.mkdir()
+    (results_root / "results.json").write_text('{"status": "passed"}\n')
 
     prompt = build_role_prompt(
         role="fixer",
         task=_task(),
         base_sha="1" * 40,
+        workspace=workspace,
     )
 
     assert "Fixer whitelist (only these files may be modified)" in prompt
     assert "Database/image-list.yml" in prompt
     assert "Database/kvrocks/2.16.0/24.03-lts-sp4/Dockerfile" in prompt
+    assert "Database/kvrocks/2.16.0/24.03-lts-sp4/service.conf" in prompt
+    assert "Database/kvrocks/2.16.0/24.03-lts-sp4/entrypoint.sh" in prompt
     assert "Database/kvrocks/2.16.0/24.03-lts-sp4/test.sh" not in prompt
     assert "Database/kvrocks/tests/goss.yaml" in prompt
+    assert "Database/kvrocks/results/results.json" not in prompt

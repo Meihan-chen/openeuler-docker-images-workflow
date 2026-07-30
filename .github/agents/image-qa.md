@@ -10,6 +10,8 @@ You receive the Image Creator's complete output:
 - `README.md` content
 - `doc/image-info.yml` content
 - `image-list.yml` update
+- all auxiliary files created for the image, such as configuration,
+  entrypoint, patch and template files
 - any allowed Creator self-assessment
 
 ## Review Checklist
@@ -23,6 +25,10 @@ Challenge from these angles:
 - Does `yum clean all` or `dnf clean all` follow every package installation?
 - Are necessary ports exposed?
 - Is the ENTRYPOINT/CMD correct for this application?
+- Is configuration provenance clear, with upstream-provided configuration
+  preferred unless a local configuration is necessary?
+- Are configuration files kept outside the persistent data directory so a
+  data-volume mount cannot hide required startup configuration?
 - For compiled apps: is multi-stage build used correctly?
 - Can the same Dockerfile build natively on both amd64 and arm64?
 - Are the required non-root identity, persistent paths and health check functional rather than cosmetic?

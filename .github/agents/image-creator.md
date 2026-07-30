@@ -56,6 +56,14 @@ gh api repos/{owner}/{repo}/readme --jq '.content' | base64 -d | head -60
     └── picture/logo.png
 ```
 
+这是 minimum required structure，不是完整文件白名单。应用确有需要时，可以在本次 MDU
+目录内增加配置、entrypoint、patch 或模板等附属文件。
+
+优先复用固定版本源码中的 upstream-provided configuration。只有上游配置不存在，或无法
+满足容器运行要求且不能通过启动参数覆盖时，才创建本地配置；在最终 summary 中说明其来源
+和相对上游的必要差异。配置文件应与 persistent data directory 分离，避免挂载数据卷时
+遮蔽启动所需配置。
+
 ### 步骤 4：编写 Dockerfile
 
 使用 `dnf` (openEuler 24.03)，Go 下载用 `https://golang.google.cn/dl/`，最后 `dnf clean all`。支持 amd64 和 arm64，不得下载或硬编码单一架构产物。编译型应用优先使用多阶段构建，构建阶段和运行阶段都使用任务指定的 openEuler 基础镜像，并将构建工具和源码留在运行镜像之外。

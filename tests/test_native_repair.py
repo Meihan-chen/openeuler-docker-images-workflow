@@ -177,6 +177,47 @@ def test_native_failure_is_fixed_gated_and_retried_up_to_success(tmp_path):
     assert "deepseek-secret" not in json.dumps(reports)
 
 
+def test_native_fixer_can_edit_existing_auxiliary_candidate_files(tmp_path):
+    from scripts.lib.native_repair import validate_native_with_repairs
+
+    workspace = tmp_path / "target"
+    evidence = tmp_path / "evidence"
+    image_root = (
+        workspace
+        / "Database"
+        / "kvrocks"
+        / "2.16.0"
+        / "24.03-lts-sp4"
+    )
+    image_root.mkdir(parents=True)
+    (image_root / "service.conf").write_text("listen = 0.0.0.0\n")
+    fixer = Fixer()
+
+    result = validate_native_with_repairs(
+        workspace=workspace,
+        task=_task(),
+        base_sha="1" * 40,
+        architecture="x86_64",
+        run_id="123456",
+        dgoss=tmp_path / "dgoss",
+        goss=tmp_path / "goss",
+        report_path=evidence / "x86_64.json",
+        junit_path=evidence / "x86_64.junit.xml",
+        repair_report_dir=evidence / "agents",
+        executable=tmp_path / "opencode",
+        api_key="deepseek-secret",
+        native_validator=NativeValidator(failures=1),
+        agent_runner=fixer,
+        target_validator=lambda **_: {"status": "passed"},
+    )
+
+    assert result.status == "passed"
+    assert (
+        "Database/kvrocks/2.16.0/24.03-lts-sp4/service.conf"
+        in fixer.calls[0]["prompt"]
+    )
+
+
 def test_initial_target_gate_is_fixed_before_native_validation(tmp_path):
     from scripts.lib.native_repair import validate_native_with_repairs
 

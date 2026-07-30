@@ -153,12 +153,42 @@ def _phase1_kvrocks_contract(task: TaskSpec, role: str) -> tuple[str, ...]:
     return tuple(contract)
 
 
+def _candidate_paths(
+    *,
+    workspace: Path,
+    task: TaskSpec,
+) -> tuple[Path, ...]:
+    app_root = workspace / task.domain / task.app
+    image_root = app_root / task.version / task.os_version
+    paths = {
+        workspace / task.domain / "image-list.yml",
+        app_root / "meta.yml",
+        app_root / "README.md",
+        app_root / "doc" / "image-info.yml",
+        app_root / "doc" / "picture" / "logo.png",
+        image_root / "Dockerfile",
+        app_root / "tests" / "goss.yaml",
+        app_root / "tests" / "goss_wait.yaml",
+        app_root / "tests" / "test_helpers.sh",
+        app_root / "tests" / "test.sh",
+    }
+    if app_root.is_dir():
+        paths.update(
+            path
+            for path in app_root.rglob("*")
+            if path.is_file()
+            and path.relative_to(app_root).parts[0] != "results"
+        )
+    return tuple(sorted(paths))
+
+
 def build_role_prompt(
     *,
     role: str,
     task: TaskSpec,
     base_sha: str,
     review: Mapping[str, object] | None = None,
+    workspace: Path | None = None,
 ) -> str:
     try:
         instructions = (_PROMPT_DIR / _PROMPT_FILES[role]).read_text()
@@ -196,18 +226,28 @@ def build_role_prompt(
             "documentation and logo are read-only."
         )
     if role == "fixer":
-        fixer_whitelist = (
-            f"{task.domain}/image-list.yml",
-            f"{app_root}/meta.yml",
-            f"{app_root}/README.md",
-            f"{app_root}/doc/image-info.yml",
-            f"{app_root}/doc/picture/logo.png",
-            f"{image_root}/Dockerfile",
-            f"{app_root}/tests/goss.yaml",
-            f"{app_root}/tests/goss_wait.yaml",
-            f"{app_root}/tests/test_helpers.sh",
-            f"{app_root}/tests/test.sh",
-        )
+        if workspace is None:
+            fixer_whitelist = (
+                f"{task.domain}/image-list.yml",
+                f"{app_root}/meta.yml",
+                f"{app_root}/README.md",
+                f"{app_root}/doc/image-info.yml",
+                f"{app_root}/doc/picture/logo.png",
+                f"{image_root}/Dockerfile",
+                f"{app_root}/tests/goss.yaml",
+                f"{app_root}/tests/goss_wait.yaml",
+                f"{app_root}/tests/test_helpers.sh",
+                f"{app_root}/tests/test.sh",
+            )
+        else:
+            workspace = Path(workspace)
+            fixer_whitelist = tuple(
+                path.relative_to(workspace).as_posix()
+                for path in _candidate_paths(
+                    workspace=workspace,
+                    task=task,
+                )
+            )
         contract_lines.extend(
             (
                 "## Fixer whitelist (only these files may be modified)",
@@ -270,13 +310,14 @@ def _qa_prompt(
     app_root = workspace / task.domain / task.app
     image_root = app_root / task.version / task.os_version
     if role == "image_qa":
+        tests_root = app_root / "tests"
         paths = [
-            workspace / task.domain / "image-list.yml",
-            app_root / "meta.yml",
-            app_root / "README.md",
-            app_root / "doc" / "image-info.yml",
-            app_root / "doc" / "picture" / "logo.png",
-            image_root / "Dockerfile",
+            path
+            for path in _candidate_paths(
+                workspace=workspace,
+                task=task,
+            )
+            if tests_root not in path.parents
         ]
     else:
         tests_root = app_root / "tests"
@@ -678,17 +719,16 @@ def run_generation_pipeline(
         return report
 
     def image_owned_snapshot() -> dict[str, str]:
-        image_list = workspace / task.domain / "image-list.yml"
-        candidates = [image_list] if image_list.is_file() else []
-        if app_root.is_dir():
-            candidates.extend(path for path in app_root.rglob("*") if path.is_file())
         return {
             str(path.relative_to(workspace)): (
                 f"{path.stat().st_mode & 0o777:o}:"
                 f"{hashlib.sha256(path.read_bytes()).hexdigest()}"
             )
-            for path in candidates
-            if path not in testcase_owned
+            for path in _candidate_paths(
+                workspace=workspace,
+                task=task,
+            )
+            if path.is_file() and path not in testcase_owned
         }
 
     def repair_deterministic_failure(
