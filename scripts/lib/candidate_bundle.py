@@ -16,10 +16,6 @@ class CandidateBundleError(ValueError):
     """Raised when a candidate cannot be trusted for promotion."""
 
 
-class CandidatePromotionError(RuntimeError):
-    """Raised when a validated candidate cannot be reused safely."""
-
-
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _RUN_ID_RE = re.compile(r"^[1-9][0-9]*$")
 _REQUIRED_PAYLOAD = (
@@ -181,12 +177,6 @@ class CandidateBundle:
 
         return cls(root=root, task=task, manifest=manifest)
 
-    def promotion_action(self, current_base_sha: str) -> str:
-        _validate_sha(current_base_sha, "current_base_sha")
-        if current_base_sha == self.manifest.base_sha:
-            return "reuse"
-        return "revalidate"
-
 
 @dataclass(frozen=True)
 class CandidatePromotion:
@@ -208,10 +198,6 @@ def promote_candidate(
         candidate_dir,
         expected_run_id=expected_run_id,
     )
-    if bundle.promotion_action(workspace.base_sha) != "reuse":
-        raise CandidatePromotionError(
-            "target master changed after validation; run validate_only again"
-        )
 
     workspace.apply_patch(bundle.root / "changes.patch")
     delivery_branch = branch or bundle.task.branch

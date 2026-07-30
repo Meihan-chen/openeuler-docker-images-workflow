@@ -169,36 +169,32 @@ def test_wrong_validated_run_stops_before_clone_or_delivery(tmp_path):
     assert events == []
 
 
-def test_changed_target_master_stops_before_promotion_or_delivery(tmp_path):
-    from scripts.lib.pr_delivery import (
-        ForkPRPipelineError,
-        deliver_validated_candidate,
-    )
+def test_changed_target_master_does_not_block_promotion_or_delivery(tmp_path):
+    from scripts.lib.pr_delivery import deliver_validated_candidate
 
     bundle = _candidate(tmp_path)
     events = []
 
-    with pytest.raises(ForkPRPipelineError, match="validate_only"):
-        deliver_validated_candidate(
-            candidate_dir=bundle.root,
-            expected_run_id="123456",
-            workspace_dir=tmp_path / "promotion",
-            target_source="https://gitcode.com/upstream.git",
-            config=_config(),
-            username="qq_42020325",
-            token="secret",
-            delivery_run_id="654321",
-            delivery_run_attempt="1",
-            clone=lambda *args, **kwargs: Workspace(
-                tmp_path / "promotion",
-                base_sha="9" * 40,
-            ),
-            promote=lambda **kwargs: events.append("promote"),
-            client_factory=lambda **kwargs: events.append("client"),
-            deliver=lambda **kwargs: events.append("deliver"),
-        )
+    deliver_validated_candidate(
+        candidate_dir=bundle.root,
+        expected_run_id="123456",
+        workspace_dir=tmp_path / "promotion",
+        target_source="https://gitcode.com/upstream.git",
+        config=_config(),
+        username="qq_42020325",
+        token="secret",
+        delivery_run_id="654321",
+        delivery_run_attempt="1",
+        clone=lambda *args, **kwargs: Workspace(
+            tmp_path / "promotion",
+            base_sha="9" * 40,
+        ),
+        promote=lambda **kwargs: events.append("promote"),
+        client_factory=lambda **kwargs: events.append("client"),
+        deliver=lambda **kwargs: events.append("deliver"),
+    )
 
-    assert events == []
+    assert events == ["promote", "client", "deliver"]
 
 
 def test_validate_only_and_missing_token_stop_before_clone(tmp_path):

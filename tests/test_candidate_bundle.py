@@ -162,21 +162,6 @@ def test_candidate_bundle_rejects_run_id_mismatch(tmp_path):
         CandidateBundle.verify(tmp_path, expected_run_id="999999")
 
 
-def test_candidate_bundle_marks_changed_base_for_revalidation(tmp_path):
-    from scripts.lib.candidate_bundle import CandidateBundle
-
-    _payload(tmp_path)
-    bundle = CandidateBundle.create(
-        tmp_path,
-        task=_task(),
-        base_sha=BASE_SHA,
-        validated_run_id="123456",
-    )
-
-    assert bundle.promotion_action(BASE_SHA) == "reuse"
-    assert bundle.promotion_action("a" * 40) == "revalidate"
-
-
 def test_candidate_bundle_rejects_symlink_payload(tmp_path):
     from scripts.lib.candidate_bundle import CandidateBundle, CandidateBundleError
 

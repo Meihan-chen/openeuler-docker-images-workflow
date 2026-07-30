@@ -168,11 +168,8 @@ def test_test_delivery_can_override_only_the_candidate_branch(tmp_path):
     assert _git(workspace.path, "rev-parse", "HEAD^") == base_sha
 
 
-def test_changed_target_base_requires_new_validation_run(tmp_path):
-    from scripts.lib.candidate_bundle import (
-        CandidatePromotionError,
-        promote_candidate,
-    )
+def test_changed_target_base_uses_current_master_without_base_check(tmp_path):
+    from scripts.lib.candidate_bundle import promote_candidate
     from scripts.lib.git_workspace import TargetWorkspace
 
     upstream = _upstream(tmp_path)
@@ -187,13 +184,13 @@ def test_changed_target_base_requires_new_validation_run(tmp_path):
         branch="master",
     )
 
-    with pytest.raises(CandidatePromotionError, match="validate_only"):
-        promote_candidate(
-            candidate_dir=candidate,
-            expected_run_id="123456",
-            workspace=workspace,
-        )
+    result = promote_candidate(
+        candidate_dir=candidate,
+        expected_run_id="123456",
+        workspace=workspace,
+    )
 
     assert old_base_sha != new_base_sha
-    assert _git(workspace.path, "rev-parse", "HEAD") == new_base_sha
+    assert _git(workspace.path, "rev-parse", "HEAD^") == new_base_sha
+    assert _git(workspace.path, "rev-parse", "HEAD") == result.commit_sha
     assert _git(workspace.path, "status", "--porcelain") == ""

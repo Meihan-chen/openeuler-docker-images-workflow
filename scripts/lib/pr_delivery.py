@@ -635,10 +635,6 @@ def deliver_validated_candidate(
         workspace_dir,
         branch=config.target_branch,
     )
-    if workspace.base_sha != bundle.manifest.base_sha:
-        raise ForkPRPipelineError(
-            "target master changed after validation; run validate_only again"
-        )
     promotion = promote(
         candidate_dir=candidate_dir,
         expected_run_id=expected_run_id,
