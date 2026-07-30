@@ -40,13 +40,23 @@ def _environment(architecture):
     }
 
 
-def _write_report(root, architecture, *, status="passed"):
+CANDIDATE_DIGEST = "a" * 64
+
+
+def _write_report(
+    root,
+    architecture,
+    *,
+    status="passed",
+    validated_patch_sha256=CANDIDATE_DIGEST,
+):
     payload = {
         "status": status,
         "task_id": _task().task_id,
         "architecture": architecture,
         "platform": "linux/amd64" if architecture == "x86_64" else "linux/arm64",
         "image_id": f"sha256:{architecture}",
+        "validated_patch_sha256": validated_patch_sha256,
         "duration_seconds": 10.5,
         "environment": _environment(architecture),
         "checks": {
@@ -190,6 +200,54 @@ def test_rejects_report_for_a_different_task(tmp_path):
     report_path.write_text(json.dumps(payload))
 
     with pytest.raises(ResultAggregationError, match="task"):
+        aggregate_native_results(
+            workspace=workspace,
+            task=_task(),
+            run_id="123456",
+            run_url="https://github.com/Meihan-chen/repo/actions/runs/123456",
+            report_dir=reports,
+        )
+
+
+def test_rejects_architectures_that_validated_different_candidates(tmp_path):
+    from scripts.utils.artifacts import (
+        ResultAggregationError,
+        aggregate_native_results,
+    )
+
+    workspace = _workspace(tmp_path)
+    reports = _reports(tmp_path)
+    # A repair on one architecture invalidates the other architecture's
+    # earlier pass; job order alone cannot detect that.
+    _write_report(reports, "aarch64", validated_patch_sha256="b" * 64)
+
+    with pytest.raises(ResultAggregationError, match="different candidate"):
+        aggregate_native_results(
+            workspace=workspace,
+            task=_task(),
+            run_id="123456",
+            run_url="https://github.com/Meihan-chen/repo/actions/runs/123456",
+            report_dir=reports,
+        )
+
+    assert not (
+        workspace / "Database" / "kvrocks" / "results"
+    ).exists()
+
+
+def test_rejects_a_report_that_does_not_name_the_validated_candidate(tmp_path):
+    from scripts.utils.artifacts import (
+        ResultAggregationError,
+        aggregate_native_results,
+    )
+
+    workspace = _workspace(tmp_path)
+    reports = _reports(tmp_path)
+    payload = json.loads((reports / "x86_64.json").read_text())
+    del payload["validated_patch_sha256"]
+    (reports / "x86_64.json").write_text(json.dumps(payload))
+
+    with pytest.raises(ResultAggregationError, match="validated"):
         aggregate_native_results(
             workspace=workspace,
             task=_task(),

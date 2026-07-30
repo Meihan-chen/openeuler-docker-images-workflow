@@ -17,6 +17,7 @@ class ResultAggregationError(ValueError):
 
 _ARCHITECTURES = ("x86_64", "aarch64")
 _RUN_ID_RE = re.compile(r"^[1-9][0-9]*$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _ENVIRONMENT_FIELDS = {
     "test_time",
     "Model",
@@ -50,6 +51,10 @@ def _load_report(path: Path, architecture: str, task: TaskSpec) -> dict[str, obj
         raise ResultAggregationError(f"{architecture} report architecture is inconsistent")
     if not str(report.get("image_id", "")).startswith("sha256:"):
         raise ResultAggregationError(f"{architecture} report has no image ID")
+    if not _SHA256_RE.fullmatch(str(report.get("validated_patch_sha256", ""))):
+        raise ResultAggregationError(
+            f"{architecture} report does not record the candidate it validated"
+        )
     checks = report.get("checks")
     if not isinstance(checks, dict) or not checks or not all(
         value is True for value in checks.values()
@@ -138,6 +143,21 @@ def aggregate_native_results(
         )
         for architecture in _ARCHITECTURES
     }
+    validated = {
+        str(reports[architecture]["validated_patch_sha256"])
+        for architecture in _ARCHITECTURES
+    }
+    if len(validated) != 1:
+        # Job order alone cannot prove this: a repair on one architecture
+        # silently invalidates the other architecture's earlier pass.
+        raise ResultAggregationError(
+            "x86_64 and aarch64 validated different candidate content: "
+            + ", ".join(
+                f"{architecture}="
+                f"{reports[architecture]['validated_patch_sha256']}"
+                for architecture in _ARCHITECTURES
+            )
+        )
     junit = {
         architecture: _load_junit(
             report_dir / f"{architecture}.junit.xml",

@@ -65,6 +65,23 @@ def _task():
     )
 
 
+def _git_init(workspace):
+    """A validated workspace is a checkout at base SHA with the patch applied."""
+    subprocess.run(["git", "init", "-q", str(workspace)], check=True)
+    for key, value in (("user.email", "t@example.com"), ("user.name", "T")):
+        subprocess.run(
+            ["git", "-C", str(workspace), "config", key, value], check=True
+        )
+    (workspace / ".keep").write_text("base\n")
+    subprocess.run(
+        ["git", "-C", str(workspace), "add", "--", ".keep"], check=True
+    )
+    subprocess.run(
+        ["git", "-C", str(workspace), "commit", "-qm", "base"], check=True
+    )
+    return workspace
+
+
 def _workspace(tmp_path):
     workspace = tmp_path / "target"
     image = workspace / "Database" / "kvrocks" / "2.16.0" / "24.03-lts-sp4"
@@ -76,7 +93,7 @@ def _workspace(tmp_path):
     (tests / "goss_wait.yaml").write_text("{}\n")
     (tests / "test.sh").write_text("#!/bin/bash\n")
     (tests / "test.sh").chmod(0o755)
-    return workspace
+    return _git_init(workspace)
 
 
 def _tools(tmp_path):
@@ -264,8 +281,7 @@ def test_native_pipeline_smoke_builds_and_runs_dgoss_without_ai(
 ):
     from scripts.lib.native_validation import validate_native_smoke
 
-    workspace = tmp_path / "target"
-    workspace.mkdir()
+    workspace = _git_init(tmp_path / "target")
     dgoss, goss = _tools(tmp_path)
     runner = DockerRunner()
     report_path = tmp_path / "reports" / "x86_64.json"
@@ -348,6 +364,40 @@ def test_repeated_validation_reuses_the_run_builder_and_its_layer_cache(
     assert creates[0][creates[0].index("--name") + 1] == (
         "oe-e2e-123456-x86-64-builder"
     )
+
+
+def test_report_records_the_candidate_content_that_was_validated(tmp_path):
+    from scripts.lib.native_validation import validate_native_image
+
+    workspace = _workspace(tmp_path)
+    dgoss, goss = _tools(tmp_path)
+
+    def _validate(attempt):
+        return validate_native_image(
+            workspace=workspace,
+            task=_task(),
+            architecture="x86_64",
+            run_id="123456",
+            dgoss=dgoss,
+            goss=goss,
+            report_path=tmp_path / f"reports/{attempt}/x86_64.json",
+            junit_path=tmp_path / f"reports/{attempt}/x86_64.junit.xml",
+            runner=DockerRunner(),
+            sleep=lambda _: None,
+        )
+
+    before = _validate(0)["validated_patch_sha256"]
+    dockerfile = (
+        workspace / "Database" / "kvrocks" / "2.16.0" / "24.03-lts-sp4"
+        / "Dockerfile"
+    )
+    dockerfile.write_text("FROM scratch\nRUN true\n")
+    after = _validate(1)["validated_patch_sha256"]
+
+    assert len(before) == 64
+    # A Fixer edit between rounds must be visible in the recorded digest,
+    # otherwise the digest cannot prove what each architecture validated.
+    assert before != after
 
 
 def test_release_run_builders_frees_exactly_this_run_on_one_architecture(

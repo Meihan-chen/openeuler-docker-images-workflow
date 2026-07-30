@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import platform as runtime_platform
@@ -105,6 +106,36 @@ def _write_evidence(
         encoding="utf-8",
         xml_declaration=True,
     )
+
+
+def validated_patch_digest(workspace: Path) -> str:
+    """Digest the candidate content this workspace actually holds.
+
+    The workspace is checked out at the immutable base SHA with the candidate
+    patch applied and never committed, so diffing HEAD yields exactly the
+    candidate. Recording it lets a later stage prove both architectures
+    validated the same content instead of trusting job order.
+    """
+    workspace = Path(workspace)
+    if not (workspace / ".git").is_dir():
+        raise NativeValidationError(
+            "target workspace must be a Git checkout to digest its candidate"
+        )
+    for arguments in (
+        ["add", "--intent-to-add", "--", "."],
+        ["diff", "--binary", "--full-index", "--no-ext-diff", "HEAD", "--"],
+    ):
+        completed = subprocess.run(
+            ["git", "-C", str(workspace), *arguments],
+            check=False,
+            capture_output=True,
+        )
+        if completed.returncode != 0:
+            raise NativeValidationError(
+                (completed.stderr or b"").decode(errors="replace").strip()
+                or "candidate digest failed"
+            )
+    return hashlib.sha256(completed.stdout).hexdigest()
 
 
 def _builder_name(kind: str, run_id: str, architecture: str) -> str:
@@ -315,6 +346,7 @@ def validate_native_image(
     volume = f"{prefix}-data"
     image = f"oe-autopilot/{task.app}:{task.version}-{run_id}-{slug}"
     persistence_value = f"run-{run_id}"
+    validated_patch_sha256 = validated_patch_digest(workspace)
     start = time.monotonic()
     image_id = ""
     failure: str | None = None
@@ -502,6 +534,7 @@ def validate_native_image(
         "architecture": architecture,
         "platform": platform,
         "image_id": image_id,
+        "validated_patch_sha256": validated_patch_sha256,
         "duration_seconds": round(time.monotonic() - start, 3),
         "environment": _environment_evidence(task, architecture),
         "checks": {
@@ -578,6 +611,7 @@ def validate_native_smoke(
     container = f"{prefix}-dgoss"
     image = f"oe-autopilot/pipeline-smoke:{run_id}-{slug}"
     stage = f"smoke:{architecture}"
+    validated_patch_sha256 = validated_patch_digest(workspace)
     start = time.monotonic()
     image_id = ""
     failure: str | None = None
@@ -643,6 +677,7 @@ def validate_native_smoke(
         "architecture": architecture,
         "platform": platform,
         "image_id": image_id,
+        "validated_patch_sha256": validated_patch_sha256,
         "duration_seconds": round(time.monotonic() - start, 3),
         "environment": _environment_evidence(task, architecture),
         "checks": {
