@@ -80,10 +80,16 @@ def test_scenario_one_runs_full_validation_chain_and_delivers_same_run():
 
     delivery = jobs["deliver_fork_pr"]
     delivery_text = _job_text(delivery)
-    assert delivery["needs"] == "package_candidate"
+    assert delivery["needs"] == [
+        "package_candidate",
+        "release_x86_builders",
+        "release_arm_builders",
+    ]
     assert "always()" in delivery["if"]
     assert "inputs.operation == 'scenario_one'" in delivery["if"]
     assert "needs.package_candidate.result == 'success'" in delivery["if"]
+    assert "needs.release_x86_builders.result" not in delivery["if"]
+    assert "needs.release_arm_builders.result" not in delivery["if"]
     assert "inputs.operation == 'fork_pr'" in delivery["if"]
     assert "github.run_id" in delivery_text
 

@@ -191,15 +191,27 @@ def release_run_builders(
         )
     if not _RUN_ID_RE.fullmatch(run_id):
         raise NativeValidationError("run_id must be a positive integer")
+    listed = _run(
+        runner,
+        ["docker", "buildx", "ls", "--format", "{{.Name}}"],
+        cwd=Path(workspace),
+        timeout=300,
+    )
+    existing = {
+        line.strip()
+        for line in str(listed.stdout or "").splitlines()
+        if line.strip()
+    }
     released = []
     for kind in ("e2e", "smoke"):
         builder = _builder_name(kind, run_id, architecture)
+        if builder not in existing:
+            continue
         _run(
             runner,
             ["docker", "buildx", "rm", "--force", builder],
             cwd=Path(workspace),
             timeout=300,
-            check=False,
         )
         released.append(builder)
     log(f"native:{architecture}", "PASS released run builders")

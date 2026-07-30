@@ -900,7 +900,12 @@ jobs:
           (inputs.operation == 'fork_pr' ||
            (inputs.operation == 'scenario_one' &&
             needs.package_candidate.result == 'success')) }}
-    needs: package_candidate
+    # Cleanup is ordered before delivery for a complete lifecycle, but a
+    # cleanup failure must not block a PR for an already validated candidate.
+    needs:
+      - package_candidate
+      - release_x86_builders
+      - release_arm_builders
     runs-on: [self-hosted, Linux, X64, oe-image-x86]
     timeout-minutes: 30
     steps:

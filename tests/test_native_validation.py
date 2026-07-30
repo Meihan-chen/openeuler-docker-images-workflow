@@ -32,6 +32,11 @@ class DockerRunner:
             return subprocess.CompletedProcess(
                 command, 0 if present else 1, "", ""
             )
+        if command[:3] == ["docker", "buildx", "ls"]:
+            output = "\n".join(sorted(self.builders))
+            return subprocess.CompletedProcess(
+                command, 0, f"{output}\n" if output else "", ""
+            )
         if command[:3] == ["docker", "buildx", "create"]:
             self.builders.add(command[command.index("--name") + 1])
             return subprocess.CompletedProcess(command, 0, "", "")
@@ -406,6 +411,12 @@ def test_release_run_builders_frees_exactly_this_run_on_one_architecture(
     from scripts.lib.native_validation import release_run_builders
 
     runner = DockerRunner()
+    runner.builders.update(
+        {
+            "oe-e2e-123456-aarch64-builder",
+            "oe-smoke-123456-aarch64-builder",
+        }
+    )
 
     report = release_run_builders(
         run_id="123456",
@@ -425,6 +436,67 @@ def test_release_run_builders_frees_exactly_this_run_on_one_architecture(
     ]
     assert report["released_builders"] == removed
     assert report["status"] == "passed"
+
+
+@pytest.mark.parametrize("failure", ["list", "remove"])
+def test_release_run_builders_reports_buildx_failures(tmp_path, failure):
+    from scripts.lib.native_validation import (
+        NativeValidationError,
+        release_run_builders,
+    )
+
+    class FailingReleaseRunner(DockerRunner):
+        def __call__(self, command, cwd, env, timeout):
+            command = list(command)
+            if failure == "list" and command[:3] == [
+                "docker",
+                "buildx",
+                "ls",
+            ]:
+                return subprocess.CompletedProcess(
+                    command, 1, "", "cannot connect to Docker daemon"
+                )
+            if failure == "remove" and command[:4] == [
+                "docker",
+                "buildx",
+                "rm",
+                "--force",
+            ]:
+                return subprocess.CompletedProcess(
+                    command, 1, "", "failed to remove builder"
+                )
+            return super().__call__(command, cwd, env, timeout)
+
+    runner = FailingReleaseRunner()
+    runner.builders.add("oe-e2e-123456-x86-64-builder")
+
+    with pytest.raises(
+        NativeValidationError,
+        match=(
+            "cannot connect to Docker daemon"
+            if failure == "list"
+            else "failed to remove builder"
+        ),
+    ):
+        release_run_builders(
+            run_id="123456",
+            architecture="x86_64",
+            workspace=tmp_path,
+            runner=runner,
+        )
+
+
+def test_release_run_builders_allows_missing_run_builders(tmp_path):
+    from scripts.lib.native_validation import release_run_builders
+
+    report = release_run_builders(
+        run_id="123456",
+        architecture="x86_64",
+        workspace=tmp_path,
+        runner=DockerRunner(),
+    )
+
+    assert report["released_builders"] == []
 
 
 @pytest.mark.parametrize("run_id", ["", "0", "abc", "12x"])
