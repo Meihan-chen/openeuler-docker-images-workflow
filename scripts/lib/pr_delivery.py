@@ -19,6 +19,7 @@ from scripts.lib.gitcode_client import DeliveryConfig, GitCodeClient
 
 TARGET_SOURCE = "https://gitcode.com/openeuler/openeuler-docker-images.git"
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_RUN_ID_RE = re.compile(r"^[1-9][0-9]*$")
 _REF_CHARS_RE = re.compile(r"^[A-Za-z0-9._+/-]+$")
 
 GitRunner = Callable[
@@ -283,6 +284,67 @@ def _last_qa_status(root: Path, prefix: str) -> str:
     return status
 
 
+def _recovery_provenance(
+    bundle: CandidateBundle,
+) -> Mapping[str, object] | None:
+    path = bundle.root / "reports" / "recovery-provenance.json"
+    if not path.is_file():
+        return None
+    recovery = _load_json(path, "recovery provenance")
+    expected_fields = {
+        "schema_version",
+        "mode",
+        "status",
+        "generation_run_id",
+        "validation_run_id",
+        "packaging_run_id",
+        "validated_base_sha",
+        "current_base_sha",
+        "upstream_changed_paths",
+        "candidate_changed_paths",
+        "promotable",
+    }
+    if set(recovery) != expected_fields:
+        raise PRDeliveryError("recovery provenance has an invalid schema")
+    if (
+        recovery.get("schema_version") != 1
+        or recovery.get("mode") != "recover_package"
+        or recovery.get("status") != "passed"
+        or recovery.get("promotable") is not True
+    ):
+        raise PRDeliveryError("recovery provenance is not promotable")
+    for field in (
+        "generation_run_id",
+        "validation_run_id",
+        "packaging_run_id",
+    ):
+        if not _RUN_ID_RE.fullmatch(str(recovery.get(field, ""))):
+            raise PRDeliveryError(f"recovery provenance {field} is invalid")
+    if recovery["packaging_run_id"] != bundle.manifest.validated_run_id:
+        raise PRDeliveryError(
+            "recovery packaging run does not match candidate manifest"
+        )
+    if recovery["current_base_sha"] != bundle.manifest.base_sha:
+        raise PRDeliveryError(
+            "recovery current base does not match candidate manifest"
+        )
+    if not _SHA_RE.fullmatch(str(recovery["validated_base_sha"])):
+        raise PRDeliveryError("recovery validated base SHA is invalid")
+    upstream = recovery["upstream_changed_paths"]
+    candidate = recovery["candidate_changed_paths"]
+    if (
+        not isinstance(upstream, list)
+        or not isinstance(candidate, list)
+        or not candidate
+        or any(not isinstance(path, str) or not path for path in upstream)
+        or any(not isinstance(path, str) or not path for path in candidate)
+    ):
+        raise PRDeliveryError("recovery changed paths are invalid")
+    if set(upstream) & set(candidate):
+        raise PRDeliveryError("recovery changed paths overlap")
+    return recovery
+
+
 def compose_pull_request(bundle: CandidateBundle) -> PullRequestContent:
     task = bundle.task
     rows = []
@@ -316,6 +378,27 @@ def compose_pull_request(bundle: CandidateBundle) -> PullRequestContent:
         raise PRDeliveryError("deterministic target gates did not pass")
     image_qa = _last_qa_status(bundle.root, "image-qa")
     testcase_qa = _last_qa_status(bundle.root, "testcase-qa")
+    recovery = _recovery_provenance(bundle)
+    recovery_lines: tuple[str, ...] = ()
+    candidate_origin = (
+        f"- Promoted from validated run "
+        f"`{bundle.manifest.validated_run_id}`."
+    )
+    if recovery is not None:
+        candidate_origin = (
+            f"- Packaged in recovery run `{recovery['packaging_run_id']}` "
+            f"from native validation run `{recovery['validation_run_id']}`."
+        )
+        recovery_lines = (
+            "",
+            "## Recovery provenance",
+            "",
+            f"- Generation evidence run `{recovery.get('generation_run_id')}`.",
+            f"- Native validation evidence run `{recovery.get('validation_run_id')}`.",
+            f"- Recovery packaging run `{recovery.get('packaging_run_id')}`.",
+            "- The candidate was replayed after a non-overlapping "
+            "target-base advance.",
+        )
     title = (
         f"[New Image] Add Apache {task.app.capitalize()} {task.version} "
         f"for openEuler {task.os_version}"
@@ -334,7 +417,7 @@ def compose_pull_request(bundle: CandidateBundle) -> PullRequestContent:
             "",
             "## Validated candidate",
             "",
-            f"- Promoted from validated run `{bundle.manifest.validated_run_id}`.",
+            candidate_origin,
             f"- Target base SHA: `{bundle.manifest.base_sha}`.",
             f"- Candidate SHA256: `{bundle.manifest.content_sha256}`.",
             f"- Task ID: `{bundle.manifest.task_id}`.",
@@ -352,6 +435,7 @@ def compose_pull_request(bundle: CandidateBundle) -> PullRequestContent:
             "",
             f"- image QA: {image_qa}",
             f"- testcase QA: {testcase_qa}",
+            *recovery_lines,
             "",
             "## Repository checks",
             "",

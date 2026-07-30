@@ -154,6 +154,67 @@ def test_pr_content_records_non_blocking_qa_disagreement(tmp_path):
     assert "testcase QA: needs_fix" in content.body
 
 
+def test_pr_content_records_recovered_candidate_provenance(tmp_path):
+    bundle = _candidate(tmp_path)
+    (bundle.root / "reports" / "recovery-provenance.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "mode": "recover_package",
+                "status": "passed",
+                "generation_run_id": "30478803960",
+                "validation_run_id": "30483501656",
+                "packaging_run_id": "123456",
+                "validated_base_sha": "2" * 40,
+                "current_base_sha": "1" * 40,
+                "upstream_changed_paths": [
+                    "Security/reports/docker.io/openeuler/nginx/latest.md"
+                ],
+                "candidate_changed_paths": [
+                    "Database/kvrocks/README.md"
+                ],
+                "promotable": True,
+            }
+        )
+    )
+    from scripts.harness.compose_pr import compose_pull_request
+
+    content = compose_pull_request(bundle)
+
+    assert "Generation evidence run `30478803960`" in content.body
+    assert "Native validation evidence run `30483501656`" in content.body
+    assert "Recovery packaging run `123456`" in content.body
+    assert "Promoted from validated run `123456`" not in content.body
+    assert "Packaged in recovery run `123456`" in content.body
+    assert "non-overlapping target-base advance" in content.body
+
+
+def test_pr_content_rejects_recovery_packaging_run_mismatch(tmp_path):
+    from scripts.harness.compose_pr import PRDeliveryError, compose_pull_request
+
+    bundle = _candidate(tmp_path)
+    (bundle.root / "reports" / "recovery-provenance.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "mode": "recover_package",
+                "status": "passed",
+                "generation_run_id": "30478803960",
+                "validation_run_id": "30483501656",
+                "packaging_run_id": "999999",
+                "validated_base_sha": "2" * 40,
+                "current_base_sha": "1" * 40,
+                "upstream_changed_paths": ["Security/scan.md"],
+                "candidate_changed_paths": ["Database/kvrocks/README.md"],
+                "promotable": True,
+            }
+        )
+    )
+
+    with pytest.raises(PRDeliveryError, match="packaging run"):
+        compose_pull_request(bundle)
+
+
 def test_delivery_pushes_then_creates_cross_repository_pr(tmp_path):
     from scripts.harness.compose_pr import deliver_promoted_candidate
 

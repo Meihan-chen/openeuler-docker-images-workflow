@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import subprocess
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -16,6 +16,17 @@ class GitWorkspaceError(RuntimeError):
 BOT_NAME = "openEuler Docker Autopilot Bot"
 BOT_EMAIL = "openeuler-docker-autopilot@users.noreply.github.com"
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+@dataclass(frozen=True)
+class RecoveredPatchEvidence:
+    validated_base_sha: str
+    current_base_sha: str
+    upstream_changed_paths: tuple[str, ...]
+    candidate_changed_paths: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, object]:
+        return {"status": "passed", **asdict(self)}
 
 
 def _run(repo: Path | None, *args: str, text: bool = True) -> subprocess.CompletedProcess:
@@ -45,6 +56,28 @@ def _validate_clone_source(source: str) -> None:
             raise GitWorkspaceError("clone URL must not contain credentials")
     elif "@" in source or source.startswith(("git:", "ssh:")):
         raise GitWorkspaceError("clone URL must not contain credentials")
+
+
+def _patch_paths(repo: Path, patch: Path) -> tuple[str, ...]:
+    result = _run(
+        repo,
+        "apply",
+        "--numstat",
+        "-z",
+        str(patch),
+        text=False,
+    )
+    paths = []
+    for record in result.stdout.split(b"\0"):
+        if not record:
+            continue
+        fields = record.split(b"\t", maxsplit=2)
+        if len(fields) != 3 or not fields[2]:
+            raise GitWorkspaceError("candidate patch contains an invalid path")
+        paths.append(fields[2].decode("utf-8", errors="strict"))
+    if not paths:
+        raise GitWorkspaceError("candidate patch contains no changed paths")
+    return tuple(sorted(paths))
 
 
 @dataclass(frozen=True)
@@ -151,6 +184,59 @@ class TargetWorkspace:
             raise GitWorkspaceError("candidate patch is missing or empty")
         _run(self.path, "apply", "--check", "--binary", str(patch))
         _run(self.path, "apply", "--binary", str(patch))
+
+    def apply_recovered_patch(
+        self,
+        patch: Path,
+        *,
+        validated_base_sha: str,
+    ) -> RecoveredPatchEvidence:
+        if not _SHA_RE.fullmatch(validated_base_sha):
+            raise GitWorkspaceError(
+                "validated base SHA must be full lowercase hex"
+            )
+        try:
+            _run(
+                self.path,
+                "merge-base",
+                "--is-ancestor",
+                validated_base_sha,
+                self.base_sha,
+            )
+        except GitWorkspaceError as error:
+            raise GitWorkspaceError(
+                "validated base must be an ancestor of current master"
+            ) from error
+
+        upstream_changed = tuple(
+            sorted(
+                filter(
+                    None,
+                    _run(
+                        self.path,
+                        "diff",
+                        "--name-only",
+                        validated_base_sha,
+                        self.base_sha,
+                        "--",
+                    ).stdout.splitlines(),
+                )
+            )
+        )
+        candidate_changed = _patch_paths(self.path, Path(patch))
+        overlap = sorted(set(upstream_changed) & set(candidate_changed))
+        if overlap:
+            raise GitWorkspaceError(
+                "recovered patch overlaps target changes: "
+                + ", ".join(overlap)
+            )
+        self.apply_patch(patch)
+        return RecoveredPatchEvidence(
+            validated_base_sha=validated_base_sha,
+            current_base_sha=self.base_sha,
+            upstream_changed_paths=upstream_changed,
+            candidate_changed_paths=candidate_changed,
+        )
 
     def commit_candidate(self, *, branch: str, message: str) -> str:
         if not branch.startswith("auto/"):

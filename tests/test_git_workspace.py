@@ -195,3 +195,125 @@ def test_workspace_opens_existing_checkout_only_at_declared_base(tmp_path):
             branch="master",
             base_sha="a" * 40,
         )
+
+
+def _candidate_patch(upstream, tmp_path, relative_path="Database/kvrocks/README.md"):
+    from scripts.lib.git_workspace import TargetWorkspace
+
+    generated = TargetWorkspace.clone(
+        str(upstream),
+        tmp_path / f"generated-{len(list(tmp_path.iterdir()))}",
+        branch="master",
+    )
+    candidate = generated.path / relative_path
+    candidate.parent.mkdir(parents=True, exist_ok=True)
+    candidate.write_text("candidate\n")
+    patch = tmp_path / f"candidate-{len(list(tmp_path.iterdir()))}.patch"
+    generated.create_patch(patch)
+    return patch
+
+
+def test_workspace_replays_candidate_after_disjoint_base_advance(tmp_path):
+    from scripts.lib.git_workspace import TargetWorkspace
+
+    upstream = _upstream(tmp_path)
+    validated_base = _git(upstream, "rev-parse", "HEAD")
+    patch = _candidate_patch(upstream, tmp_path)
+    (upstream / "Security").mkdir()
+    (upstream / "Security" / "scan.md").write_text("new scan\n")
+    _git(upstream, "add", "Security/scan.md")
+    _git(upstream, "commit", "-m", "unrelated target update")
+
+    replay = TargetWorkspace.clone(
+        str(upstream),
+        tmp_path / "replay",
+        branch="master",
+    )
+    evidence = replay.apply_recovered_patch(
+        patch,
+        validated_base_sha=validated_base,
+    )
+
+    assert evidence.validated_base_sha == validated_base
+    assert evidence.current_base_sha == replay.base_sha
+    assert evidence.upstream_changed_paths == ("Security/scan.md",)
+    assert evidence.candidate_changed_paths == (
+        "Database/kvrocks/README.md",
+    )
+    assert (replay.path / "Database/kvrocks/README.md").read_text() == (
+        "candidate\n"
+    )
+
+
+def test_workspace_rejects_recovered_patch_when_upstream_touched_same_path(
+    tmp_path,
+):
+    from scripts.lib.git_workspace import GitWorkspaceError, TargetWorkspace
+
+    upstream = _upstream(tmp_path)
+    validated_base = _git(upstream, "rev-parse", "HEAD")
+    patch = _candidate_patch(upstream, tmp_path, "README.md")
+    (upstream / "README.md").write_text("upstream changed\n")
+    _git(upstream, "add", "README.md")
+    _git(upstream, "commit", "-m", "overlapping target update")
+
+    replay = TargetWorkspace.clone(
+        str(upstream),
+        tmp_path / "replay",
+        branch="master",
+    )
+
+    with pytest.raises(GitWorkspaceError, match="overlap"):
+        replay.apply_recovered_patch(
+            patch,
+            validated_base_sha=validated_base,
+        )
+
+
+def test_workspace_rejects_recovery_from_non_ancestor_base(tmp_path):
+    from scripts.lib.git_workspace import GitWorkspaceError, TargetWorkspace
+
+    upstream = _upstream(tmp_path)
+    validated_base = _git(upstream, "rev-parse", "HEAD")
+    patch = _candidate_patch(upstream, tmp_path)
+    _git(upstream, "checkout", "--orphan", "replacement")
+    _git(upstream, "rm", "-rf", ".")
+    (upstream / "replacement.txt").write_text("replacement\n")
+    _git(upstream, "add", "replacement.txt")
+    _git(upstream, "commit", "-m", "replace target history")
+    _git(upstream, "branch", "-M", "master")
+
+    replay = TargetWorkspace.clone(
+        str(upstream),
+        tmp_path / "replay",
+        branch="master",
+    )
+
+    with pytest.raises(GitWorkspaceError, match="ancestor"):
+        replay.apply_recovered_patch(
+            patch,
+            validated_base_sha=validated_base,
+        )
+
+
+def test_workspace_rejects_recovered_patch_that_no_longer_applies(tmp_path):
+    from scripts.lib.git_workspace import GitWorkspaceError, TargetWorkspace
+
+    upstream = _upstream(tmp_path)
+    validated_base = _git(upstream, "rev-parse", "HEAD")
+    patch = _candidate_patch(upstream, tmp_path, "README.md")
+    (upstream / "README.md").write_text("conflicting upstream content\n")
+    _git(upstream, "add", "README.md")
+    _git(upstream, "commit", "-m", "conflict with candidate")
+
+    replay = TargetWorkspace.clone(
+        str(upstream),
+        tmp_path / "replay",
+        branch="master",
+    )
+
+    with pytest.raises(GitWorkspaceError):
+        replay.apply_recovered_patch(
+            patch,
+            validated_base_sha=validated_base,
+        )

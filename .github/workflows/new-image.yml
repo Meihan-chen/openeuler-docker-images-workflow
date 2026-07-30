@@ -18,10 +18,15 @@ on:
           - resume_arm
           - resume_revalidate_x86
           - resume_package
+          - recover_package
           - fork_pr
           - failure_issue_contract_test
       source_run_id:
         description: "Failed validation run ID required by resume operations"
+        required: false
+        type: string
+      generation_run_id:
+        description: "Generation run ID required by recover_package"
         required: false
         type: string
       validated_run_id:
@@ -716,19 +721,45 @@ jobs:
           (((inputs.operation == 'pipeline_smoke' ||
              inputs.operation == 'validate_only') &&
             needs.revalidate_x86.result == 'success') ||
-           inputs.operation == 'resume_package') }}
+           inputs.operation == 'resume_package' ||
+           inputs.operation == 'recover_package') }}
     needs: revalidate_x86
     runs-on: [self-hosted, Linux, X64, oe-image-x86]
     timeout-minutes: 60
     steps:
       - name: Require the source run ID
-        if: ${{ inputs.operation == 'resume_package' }}
+        if: >-
+          ${{ inputs.operation == 'resume_package' ||
+              inputs.operation == 'recover_package' }}
         env:
           SOURCE_RUN_ID: ${{ inputs.source_run_id }}
         run: |
           case "${SOURCE_RUN_ID}" in
             ''|*[!0-9]*|0) echo "source_run_id must be a positive integer" >&2; exit 2 ;;
           esac
+
+      - name: Require the generation run ID
+        if: ${{ inputs.operation == 'recover_package' }}
+        env:
+          GENERATION_RUN_ID: ${{ inputs.generation_run_id }}
+        run: |
+          case "${GENERATION_RUN_ID}" in
+            ''|*[!0-9]*|0) echo "generation_run_id must be a positive integer" >&2; exit 2 ;;
+          esac
+
+      # TODO(test-recovery-cleanup): remove this one-time historical lineage
+      # allowlist after the phase-one GitCode PR has been created.
+      - name: Confirm the reviewed historical lineage
+        if: ${{ inputs.operation == 'recover_package' }}
+        env:
+          GENERATION_RUN_ID: ${{ inputs.generation_run_id }}
+          VALIDATION_RUN_ID: ${{ inputs.source_run_id }}
+        run: |
+          if [ "${GENERATION_RUN_ID}" != "30478803960" ] ||
+             [ "${VALIDATION_RUN_ID}" != "30483501656" ]; then
+            echo "recover_package only accepts the reviewed historical lineage" >&2
+            exit 2
+          fi
 
       - name: Check out workflow source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -754,13 +785,17 @@ jobs:
         with:
           name: >-
             phase1-generation-${{
+            inputs.operation == 'recover_package' &&
+            inputs.generation_run_id ||
             inputs.operation == 'resume_package' &&
             inputs.source_run_id || github.run_id }}
           path: ${{ runner.temp }}/generation
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
           run-id: >-
-            ${{ inputs.operation == 'resume_package' &&
+            ${{ inputs.operation == 'recover_package' &&
+            inputs.generation_run_id ||
+            inputs.operation == 'resume_package' &&
             inputs.source_run_id || github.run_id }}
 
       - name: Download x86 repair evidence
@@ -768,13 +803,15 @@ jobs:
         with:
           name: >-
             phase1-x86-${{
-            inputs.operation == 'resume_package' &&
+            (inputs.operation == 'resume_package' ||
+            inputs.operation == 'recover_package') &&
             inputs.source_run_id || github.run_id }}
           path: ${{ runner.temp }}/x86
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
           run-id: >-
-            ${{ inputs.operation == 'resume_package' &&
+            ${{ (inputs.operation == 'resume_package' ||
+            inputs.operation == 'recover_package') &&
             inputs.source_run_id || github.run_id }}
 
       - name: Download ARM final patch and evidence
@@ -782,13 +819,15 @@ jobs:
         with:
           name: >-
             phase1-arm-${{
-            inputs.operation == 'resume_package' &&
+            (inputs.operation == 'resume_package' ||
+            inputs.operation == 'recover_package') &&
             inputs.source_run_id || github.run_id }}
           path: ${{ runner.temp }}/arm
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
           run-id: >-
-            ${{ inputs.operation == 'resume_package' &&
+            ${{ (inputs.operation == 'resume_package' ||
+            inputs.operation == 'recover_package') &&
             inputs.source_run_id || github.run_id }}
 
       - name: Download final x86 evidence
@@ -796,16 +835,65 @@ jobs:
         with:
           name: >-
             phase1-final-x86-${{
-            inputs.operation == 'resume_package' &&
+            (inputs.operation == 'resume_package' ||
+            inputs.operation == 'recover_package') &&
             inputs.source_run_id || github.run_id }}
           path: ${{ runner.temp }}/final-x86
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
           run-id: >-
-            ${{ inputs.operation == 'resume_package' &&
+            ${{ (inputs.operation == 'resume_package' ||
+            inputs.operation == 'recover_package') &&
             inputs.source_run_id || github.run_id }}
 
+      - name: Verify recovered artifact identity
+        if: ${{ inputs.operation == 'recover_package' }}
+        run: |
+          cmp "${RUNNER_TEMP}/generation/task-spec.json" \
+            "${RUNNER_TEMP}/x86/task-spec.json"
+          cmp "${RUNNER_TEMP}/generation/task-spec.json" \
+            "${RUNNER_TEMP}/arm/task-spec.json"
+          cmp "${RUNNER_TEMP}/generation/base-sha.txt" \
+            "${RUNNER_TEMP}/x86/base-sha.txt"
+          cmp "${RUNNER_TEMP}/generation/base-sha.txt" \
+            "${RUNNER_TEMP}/arm/base-sha.txt"
+          {
+            printf '%s  %s\n' \
+              3b9579c664c1a699121156d48384d43647a8ac6671490469d1189d788308a56f \
+              "${RUNNER_TEMP}/generation/changes.patch"
+            printf '%s  %s\n' \
+              65682e11649b4e992ee000872317f2b4d04786e1c56a233549dd2c8b2222fc37 \
+              "${RUNNER_TEMP}/arm/changes.patch"
+            printf '%s  %s\n' \
+              afad06c7206854c432cba89c1a19ffd9836a79281763cd1736f01f3e0aae729d \
+              "${RUNNER_TEMP}/final-x86/x86_64.json"
+            printf '%s  %s\n' \
+              8b046be0392a36dccb28b1d14f2c504c5b95fb6e3f518809731639d5e2c7ce86 \
+              "${RUNNER_TEMP}/arm/aarch64.json"
+          } | sha256sum --check --strict
+          "${{ steps.tools.outputs.jq_path }}" -e \
+            '.status == "passed" and
+             .architecture == "x86_64" and
+             .checks == {
+               "native_build": true,
+               "dgoss": true,
+               "shared_tests": true,
+               "restart_persistence": true
+             }' \
+            "${RUNNER_TEMP}/final-x86/x86_64.json" > /dev/null
+          "${{ steps.tools.outputs.jq_path }}" -e \
+            '.status == "passed" and
+             .architecture == "aarch64" and
+             .checks == {
+               "native_build": true,
+               "dgoss": true,
+               "shared_tests": true,
+               "restart_persistence": true
+             }' \
+            "${RUNNER_TEMP}/arm/aarch64.json" > /dev/null
+
       - name: Replay final validated patch
+        if: ${{ inputs.operation != 'recover_package' }}
         run: |
           base_sha="$(tr -d '\n' < "${RUNNER_TEMP}/arm/base-sha.txt")"
           "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
@@ -821,9 +909,45 @@ jobs:
             --branch master \
             --base-sha "${base_sha}" \
             --patch "${RUNNER_TEMP}/arm/changes.patch"
+          printf '%s\n' "${base_sha}" \
+            > "${RUNNER_TEMP}/package-base-sha.txt"
+
+      - name: Replay recovered patch on current target master
+        if: ${{ inputs.operation == 'recover_package' }}
+        run: |
+          clone_result="$(
+            "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
+              target-clone \
+              --source \
+                https://gitcode.com/openeuler/openeuler-docker-images.git \
+              --destination "${RUNNER_TEMP}/phase1-target" \
+              --branch master
+          )"
+          printf '%s\n' "${clone_result}"
+          current_base="$(
+            printf '%s\n' "${clone_result}" |
+              "${{ steps.tools.outputs.jq_path }}" -r .base_sha
+          )"
+          validated_base="$(
+            tr -d '\n' < "${RUNNER_TEMP}/arm/base-sha.txt"
+          )"
+          printf '%s\n' "${current_base}" \
+            > "${RUNNER_TEMP}/package-base-sha.txt"
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
+            target-apply-recovered-patch \
+            --workspace "${RUNNER_TEMP}/phase1-target" \
+            --branch master \
+            --current-base-sha "${current_base}" \
+            --validated-base-sha "${validated_base}" \
+            --patch "${RUNNER_TEMP}/arm/changes.patch" \
+            --output "${RUNNER_TEMP}/recovery-evidence.json"
 
       - name: Aggregate dual-architecture result evidence
         run: |
+          evidence_run_id="${{ github.run_id }}"
+          if [ "${{ inputs.operation }}" = "recover_package" ]; then
+            evidence_run_id="${{ inputs.source_run_id }}"
+          fi
           mkdir -p "${RUNNER_TEMP}/native-reports"
           cp "${RUNNER_TEMP}/final-x86/x86_64.json" \
             "${RUNNER_TEMP}/native-reports/x86_64.json"
@@ -837,13 +961,17 @@ jobs:
             aggregate-native \
             --workspace "${RUNNER_TEMP}/phase1-target" \
             --task-spec "${RUNNER_TEMP}/arm/task-spec.json" \
-            --run-id "${{ github.run_id }}" \
+            --run-id "${evidence_run_id}" \
             --run-url \
-              "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+              "https://github.com/${{ github.repository }}/actions/runs/${evidence_run_id}" \
             --report-dir "${RUNNER_TEMP}/native-reports"
 
       - name: Enforce final target gates and lint
         run: |
+          evidence_run_id="${{ github.run_id }}"
+          if [ "${{ inputs.operation }}" = "recover_package" ]; then
+            evidence_run_id="${{ inputs.source_run_id }}"
+          fi
           app="$("${{ steps.tools.outputs.jq_path }}" \
             -r .app "${RUNNER_TEMP}/arm/task-spec.json")"
           version="$("${{ steps.tools.outputs.jq_path }}" \
@@ -852,7 +980,9 @@ jobs:
             -r .os_version "${RUNNER_TEMP}/arm/task-spec.json")"
           domain="$("${{ steps.tools.outputs.jq_path }}" \
             -r .domain "${RUNNER_TEMP}/arm/task-spec.json")"
-          base_sha="$(tr -d '\n' < "${RUNNER_TEMP}/arm/base-sha.txt")"
+          base_sha="$(
+            tr -d '\n' < "${RUNNER_TEMP}/package-base-sha.txt"
+          )"
           mkdir -p "${RUNNER_TEMP}/candidate/reports/agents"
           "${{ steps.tools.outputs.hadolint_path }}" \
             --ignore DL3041 \
@@ -863,12 +993,14 @@ jobs:
             --workspace "${RUNNER_TEMP}/phase1-target" \
             --task-spec "${RUNNER_TEMP}/arm/task-spec.json" \
             --base-sha "${base_sha}" \
-            --expected-run-id "${{ github.run_id }}" \
+            --expected-run-id "${evidence_run_id}" \
             > "${RUNNER_TEMP}/candidate/reports/gates.json"
 
       - name: Seal immutable candidate bundle
         run: |
-          base_sha="$(tr -d '\n' < "${RUNNER_TEMP}/arm/base-sha.txt")"
+          base_sha="$(
+            tr -d '\n' < "${RUNNER_TEMP}/package-base-sha.txt"
+          )"
           cp "${RUNNER_TEMP}/native-reports/x86_64.json" \
             "${RUNNER_TEMP}/candidate/reports/x86_64.json"
           cp "${RUNNER_TEMP}/native-reports/aarch64.json" \
@@ -885,6 +1017,23 @@ jobs:
               "${{ inputs.source_run_id }}" \
               "${{ github.run_id }}" \
               > "${RUNNER_TEMP}/candidate/reports/resume-provenance.json"
+          fi
+          if [ "${{ inputs.operation }}" = "recover_package" ]; then
+            # shellcheck disable=SC2016
+            "${{ steps.tools.outputs.jq_path }}" \
+              --arg generation_run_id "${{ inputs.generation_run_id }}" \
+              --arg validation_run_id "${{ inputs.source_run_id }}" \
+              --arg packaging_run_id "${{ github.run_id }}" \
+              '. + {
+                schema_version: 1,
+                mode: "recover_package",
+                generation_run_id: $generation_run_id,
+                validation_run_id: $validation_run_id,
+                packaging_run_id: $packaging_run_id,
+                promotable: true
+              }' \
+              "${RUNNER_TEMP}/recovery-evidence.json" \
+              > "${RUNNER_TEMP}/candidate/reports/recovery-provenance.json"
           fi
           "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
             target-create-patch \
@@ -955,6 +1104,19 @@ jobs:
             printf -- '- The source run must contain all four phase artifacts.\n'
             printf -- '- This cross-run candidate is diagnostic only.\n'
             printf -- '- Run a fresh validate_only before fork_pr.\n'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Publish recovered candidate handoff
+        if: ${{ inputs.operation == 'recover_package' }}
+        run: |
+          {
+            printf '## Recovered package passed\n\n'
+            printf -- "- Candidate artifact: \`phase1-candidate-%s\`\n" \
+              "${{ github.run_id }}"
+            printf -- "- Promotion input \`validated_run_id\`: \`%s\`\n" \
+              "${{ github.run_id }}"
+            printf -- '- Native validation was reused only after a '
+            printf 'non-overlapping target-base advance.\n'
           } >> "${GITHUB_STEP_SUMMARY}"
 
   deliver_fork_pr:

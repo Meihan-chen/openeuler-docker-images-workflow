@@ -37,11 +37,13 @@ def test_phase1_is_manual_only_with_explicit_operations():
         "resume_arm",
         "resume_revalidate_x86",
         "resume_package",
+        "recover_package",
         "fork_pr",
         "failure_issue_contract_test",
     ]
     assert "validated_run_id" in trigger["workflow_dispatch"]["inputs"]
     assert "source_run_id" in trigger["workflow_dispatch"]["inputs"]
+    assert "generation_run_id" in trigger["workflow_dispatch"]["inputs"]
 
 
 def test_phase1_task_defaults_are_the_confirmed_kvrocks_contract():
@@ -173,6 +175,53 @@ def test_resume_operations_reuse_failed_stage_artifacts():
     )
     assert "always()" in jobs["package_candidate"]["if"]
     assert "resume-candidate" not in _job_text(jobs["deliver_fork_pr"])
+
+
+def test_recover_package_combines_generation_and_validation_runs():
+    jobs = _workflow()["jobs"]
+    package = jobs["package_candidate"]
+    text = _job_text(package)
+
+    assert "recover_package" in package["if"]
+    assert "inputs.generation_run_id" in text
+    assert "inputs.source_run_id" in text
+    assert "target-apply-recovered-patch" in text
+    assert "recovery-provenance.json" in text
+    assert text.count("cmp ") == 4
+    assert "generation/task-spec.json" in text
+    assert "generation/base-sha.txt" in text
+    assert "promotable: true" in WORKFLOW_PATH.read_text()
+    assert "phase1-candidate-" in text
+    assert "phase1-resume-candidate-" in text
+    assert "DEEPSEEK_API_KEY" not in text
+    assert "phase1-native-repair" not in text
+    assert "phase1-native-validate" not in text
+
+
+def test_recover_package_only_accepts_confirmed_full_validation_lineage():
+    package = _job_text(_workflow()["jobs"]["package_candidate"])
+    workflow_text = WORKFLOW_PATH.read_text()
+
+    assert "30478803960" in package
+    assert "30483501656" in package
+    for digest in (
+        "3b9579c664c1a699121156d48384d43647a8ac6671490469d1189d788308a56f",
+        "65682e11649b4e992ee000872317f2b4d04786e1c56a233549dd2c8b2222fc37",
+        "afad06c7206854c432cba89c1a19ffd9836a79281763cd1736f01f3e0aae729d",
+        "8b046be0392a36dccb28b1d14f2c504c5b95fb6e3f518809731639d5e2c7ce86",
+    ):
+        assert digest in package
+    assert package.count(".checks == {") >= 2
+    for check in (
+        "native_build",
+        "dgoss",
+        "shared_tests",
+        "restart_persistence",
+    ):
+        assert workflow_text.count(f'"{check}": true') >= 2
+    assert 'evidence_run_id="${{ inputs.source_run_id }}"' in workflow_text
+    assert '--run-id "${evidence_run_id}"' in workflow_text
+    assert '--expected-run-id "${evidence_run_id}"' in workflow_text
 
 
 def test_validate_only_jobs_have_no_gitcode_credential_or_write_command():
