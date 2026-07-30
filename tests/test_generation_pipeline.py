@@ -1123,7 +1123,7 @@ def test_generation_rejects_unsupported_phase1_task_before_agent_call(
     assert agent.calls == []
 
 
-def test_phase1_prompts_pin_kvrocks_paths_and_forbid_scope_escape():
+def test_phase1_prompts_pin_task_paths_without_injecting_app_implementation():
     from scripts.lib.generation_pipeline import build_role_prompt
 
     prompt = build_role_prompt(
@@ -1136,19 +1136,20 @@ def test_phase1_prompts_pin_kvrocks_paths_and_forbid_scope_escape():
     assert "2.16.0/24.03-lts-sp4/Dockerfile" in prompt
     assert "Database/image-list.yml" in prompt
     assert "Do not modify any other path" in prompt
-    assert "./x.py build" in prompt
-    assert "-j 4" in prompt
-    assert "UID/GID 999" in prompt
-    assert "TCP 6666" in prompt
-    assert "Redis-protocol PING" in prompt
-    assert "ENTRYPOINT" in prompt
-    assert "redis-cli -p 6666 PING" in prompt
-    assert "/dev/tcp" in prompt
-    assert "restart persistence" in prompt
-    assert "LICENSE and NOTICE" in prompt
-    assert "base image may already contain UID/GID 999" in prompt
-    assert "--non-unique" in prompt
-    assert "libatomic" in prompt
+    assert "official upstream" in prompt
+    for fragment in (
+        "./x.py build",
+        "-j 4",
+        "UID/GID 999",
+        "TCP 6666",
+        "Redis-protocol PING",
+        "redis-cli -p 6666 PING",
+        "/dev/tcp",
+        "restart persistence",
+        "--non-unique",
+        "libatomic",
+    ):
+        assert fragment not in prompt
     assert "Do not install or upgrade host tools or packages" in prompt
     assert "Do not run Docker builds or invoke linters" in prompt
     assert "Your final response MUST be exactly one JSON object" in prompt
@@ -1164,12 +1165,12 @@ def test_phase1_prompts_pin_kvrocks_paths_and_forbid_scope_escape():
     assert "already-running container" in testcase_prompt
     assert "must not invoke Docker" in testcase_prompt
     assert "Database/kvrocks/tests/test.sh" in testcase_prompt
-    assert "stdout` must be a YAML list" in testcase_prompt
-    assert "redis-cli -p 6666 PING" in testcase_prompt
     assert "available in the runtime image" in testcase_prompt
     assert "`ss`" in testcase_prompt
     assert "image-list, Dockerfile, metadata" in testcase_prompt
     assert "read-only" in testcase_prompt
+    for fragment in ("redis-cli", "6666", "UID 999", "kvrocks --version"):
+        assert fragment not in testcase_prompt
 
     fixer_prompt = build_role_prompt(
         role="fixer",

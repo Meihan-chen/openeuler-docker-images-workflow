@@ -61,3 +61,22 @@ def test_image_prompts_define_generic_auxiliary_file_policy():
     assert "persistent data directory" in image_creator
     assert "auxiliary files" in image_qa
     assert "configuration provenance" in image_qa
+
+
+def test_shared_prompts_derive_application_behavior_instead_of_assuming_it():
+    image_creator = (AGENTS_DIR / "image-creator.md").read_text().lower()
+    image_qa = (AGENTS_DIR / "image-qa.md").read_text().lower()
+    testcase_creator = (AGENTS_DIR / "testcase-creator.md").read_text().lower()
+    testcase_qa = (AGENTS_DIR / "testcase-qa.md").read_text().lower()
+    prompts = "\n".join(
+        (image_creator, image_qa, testcase_creator, testcase_qa)
+    )
+
+    assert "official upstream" in image_creator
+    assert "if the application or task requires" in image_qa
+    assert "dockerfile 与 official upstream" in " ".join(
+        testcase_creator.split()
+    )
+    assert "if the image requires" in testcase_qa
+    for fragment in ("uid 999", "tcp 6666", "redis-cli", "./x.py build"):
+        assert fragment not in prompts

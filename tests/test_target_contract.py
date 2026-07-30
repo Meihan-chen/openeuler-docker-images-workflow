@@ -259,12 +259,15 @@ def test_generated_contract_uses_only_the_app_shared_test_entrypoint(tmp_path):
         "unbraced_base_variable",
         "alternative_builder_alias",
         "named_runtime_user",
+        "numeric_runtime_user_with_group",
         "git_clone_source",
         "fixed_binary_variable",
         "defaulted_binary_variable",
+        "application_selected_build_and_runtime",
+        "application_selected_test_strategy",
     ],
 )
-def test_generated_contract_accepts_historical_equivalent_syntax(
+def test_generated_contract_does_not_gate_application_implementation_syntax(
     tmp_path,
     variant,
 ):
@@ -291,6 +294,10 @@ def test_generated_contract_accepts_historical_equivalent_syntax(
                 "FROM ${BASE}\nRUN groupadd",
                 "FROM openeuler/openeuler:24.03-lts-sp4\nRUN groupadd",
             ).replace("USER 999", "USER kvrocks")
+        )
+    elif variant == "numeric_runtime_user_with_group":
+        dockerfile.write_text(
+            dockerfile_text.replace("USER 999", "USER 999:999")
         )
     elif variant == "git_clone_source":
         dockerfile.write_text(
@@ -321,6 +328,33 @@ def test_generated_contract_accepts_historical_equivalent_syntax(
                 assignment,
             )
         )
+    elif variant == "application_selected_build_and_runtime":
+        dockerfile.write_text(
+            "ARG BASE=\"openeuler/openeuler:24.03-lts-sp4\"\n"
+            "FROM ${BASE}\n"
+            "ARG VERSION=\"2.16.0\"\n"
+            "RUN printf '%s\\n' \"${VERSION}\" >/requested-version\n"
+            "USER 1000:1000\n"
+            "CMD [\"sh\"]\n"
+        )
+    elif variant == "application_selected_test_strategy":
+        (app / "tests" / "goss.yaml").write_text(
+            "command:\n"
+            "  application-check:\n"
+            "    exec: /usr/local/bin/application check\n"
+            "    exit-status: 0\n"
+        )
+        (app / "tests" / "goss_wait.yaml").write_text(
+            "command:\n"
+            "  application-ready:\n"
+            "    exec: /usr/local/bin/application ready\n"
+            "    exit-status: 0\n"
+        )
+        (app / "tests" / "test.sh").write_text(
+            "#!/bin/bash\n"
+            "set -euo pipefail\n"
+            "/usr/local/bin/application check\n"
+        )
     report = validate_generated_target(
         repo=repo,
         task=_task(),
@@ -330,8 +364,8 @@ def test_generated_contract_accepts_historical_equivalent_syntax(
     assert report["status"] == "passed"
 
 
-def test_contract_rejects_named_runtime_user_without_uid_999(tmp_path):
-    from scripts.harness.gate_diff import TargetContractError, validate_generated_target
+def test_contract_does_not_require_one_application_runtime_uid(tmp_path):
+    from scripts.harness.gate_diff import validate_generated_target
 
     repo, base_sha = _repo(tmp_path)
     _write_valid_generated_candidate(repo)
@@ -349,8 +383,13 @@ def test_contract_rejects_named_runtime_user_without_uid_999(tmp_path):
         .replace("USER 999", "USER kvrocks")
     )
 
-    with pytest.raises(TargetContractError, match="UID 999"):
-        validate_generated_target(repo=repo, task=_task(), base_sha=base_sha)
+    report = validate_generated_target(
+        repo=repo,
+        task=_task(),
+        base_sha=base_sha,
+    )
+
+    assert report["status"] == "passed"
 
 
 def test_contract_rejects_change_outside_task_scope(tmp_path):
@@ -392,7 +431,7 @@ def test_contract_rejects_image_list_rewrite(tmp_path):
         validate_generated_target(repo=repo, task=_task(), base_sha=base_sha)
 
 
-def test_contract_rejects_single_arch_meta_and_unbounded_build_parallelism(tmp_path):
+def test_contract_rejects_single_arch_meta_without_gating_build_command(tmp_path):
     from scripts.harness.gate_diff import TargetContractError, validate_generated_target
 
     repo, base_sha = _repo(tmp_path)
@@ -411,7 +450,7 @@ def test_contract_rejects_single_arch_meta_and_unbounded_build_parallelism(tmp_p
 
     message = str(error.value)
     assert "dual-architecture" in message
-    assert "-j 4" in message
+    assert "-j 4" not in message
 
 
 def test_contract_rejects_non_list_goss_stdout_matcher(tmp_path):
@@ -475,11 +514,8 @@ def test_contract_rejects_command_timeout_on_goss_port_resource(tmp_path):
         )
 
 
-def test_contract_requires_goss_wait_tcp_port_resource(tmp_path):
-    from scripts.harness.gate_diff import (
-        TargetContractError,
-        validate_generated_target,
-    )
+def test_contract_accepts_application_selected_goss_wait_resource(tmp_path):
+    from scripts.harness.gate_diff import validate_generated_target
 
     repo, base_sha = _repo(tmp_path)
     _write_valid_generated_candidate(repo)
@@ -492,15 +528,53 @@ def test_contract_requires_goss_wait_tcp_port_resource(tmp_path):
         "    exit-status: 0\n"
     )
 
-    with pytest.raises(
-        TargetContractError,
-        match="goss_wait.yaml.*tcp:6666.*listening",
-    ):
-        validate_generated_target(
-            repo=repo,
-            task=_task(),
-            base_sha=base_sha,
-        )
+    report = validate_generated_target(
+        repo=repo,
+        task=_task(),
+        base_sha=base_sha,
+    )
+
+    assert report["status"] == "passed"
+
+
+def test_contract_derives_documented_tag_from_task_os_version(tmp_path):
+    from scripts.harness.gate_diff import validate_generated_target
+    from scripts.lib.task_spec import TaskSpec
+
+    repo, base_sha = _repo(tmp_path)
+    _write_valid_generated_candidate(repo)
+    app = repo / "Database" / "kvrocks"
+    old_image = app / "2.16.0" / "24.03-lts-sp4"
+    new_image = app / "2.16.0" / "24.03-lts-sp2"
+    old_image.rename(new_image)
+    task = TaskSpec.from_workflow_dispatch(
+        {
+            "app": "kvrocks",
+            "version": "2.16.0",
+            "os_version": "24.03-lts-sp2",
+            "domain": "Database",
+            "source_url": "https://github.com/apache/kvrocks/tree/v2.16.0",
+        }
+    )
+    (app / "meta.yml").write_text(
+        "2.16.0-oe2403sp2:\n"
+        "  path: 2.16.0/24.03-lts-sp2/Dockerfile\n"
+    )
+    for relative in ("README.md", "doc/image-info.yml"):
+        path = app / relative
+        path.write_text(path.read_text().replace("oe2403sp4", "oe2403sp2"))
+    dockerfile = new_image / "Dockerfile"
+    dockerfile.write_text(
+        dockerfile.read_text().replace("24.03-lts-sp4", "24.03-lts-sp2")
+    )
+
+    report = validate_generated_target(
+        repo=repo,
+        task=task,
+        base_sha=base_sha,
+    )
+
+    assert report["status"] == "passed"
 
 
 def test_final_contract_requires_and_accepts_bounded_dual_arch_results(tmp_path):

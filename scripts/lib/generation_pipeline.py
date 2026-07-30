@@ -110,49 +110,6 @@ def _require_phase1_task(task: TaskSpec) -> None:
         )
 
 
-def _phase1_kvrocks_contract(task: TaskSpec, role: str) -> tuple[str, ...]:
-    if task.app != "kvrocks":
-        return ()
-    contract = [
-        f"- Source tag: `v{task.version}` from `{task.source_url}`.",
-        "- Use the official `./x.py build` command with `-j 4`.",
-        "- Kvrocks runtime contract: UID/GID 999, TCP 6666, writable "
-        "`/var/lib/kvrocks`, Redis-protocol PING, restart persistence, "
-        "configuration, LICENSE and NOTICE.",
-        "- The locked openEuler base image may already contain UID/GID 999; "
-        "use `groupadd --non-unique` and `useradd --non-unique` so the "
-        "Kvrocks runtime identity remains exactly 999:999.",
-        "- The runtime image must install the openEuler `redis` and "
-        "`libatomic` packages, start Kvrocks with `ENTRYPOINT`, and run "
-        "`redis-cli -p 6666 PING` in `HEALTHCHECK`; `/dev/tcp` probes or "
-        "CMD-only startup do not satisfy this phase-one contract.",
-    ]
-    if role in {"testcase_creator", "testcase_qa", "fixer"}:
-        contract.extend(
-            (
-                "- Required shared test files are `goss.yaml`, "
-                "`goss_wait.yaml`, `test_helpers.sh`, and executable "
-                "`test.sh`.",
-                "- Shared `tests/test.sh` must use injected "
-                "`EXPECTED_VERSION` and check exact `kvrocks --version`, "
-                "`redis-cli -p 6666 PING` behavior, and UID 999 without "
-                "hardcoding one version.",
-                "- `goss.yaml` must check TCP 6666, "
-                "`{{.Env.EXPECTED_VERSION}}`, and Redis PING/PONG; each "
-                "`stdout` must be a YAML list of expected output patterns, "
-                "not a `contains` mapping.",
-                "- `goss_wait.yaml` must use the Goss `port` resource for "
-                "`tcp:6666` with `listening: true`; do not put a `timeout` "
-                "field on the port resource because dGoss owns the retry "
-                "timeout.",
-                "- The native harness executes shared tests inside an "
-                "already-running container; test scripts must not invoke "
-                "Docker or own container lifecycle.",
-            )
-        )
-    return tuple(contract)
-
-
 def _candidate_paths(
     *,
     workspace: Path,
@@ -207,6 +164,9 @@ def build_role_prompt(
         f"- Meta tag: `{_tag(task)}`",
         f"- Pinned source URL: `{task.source_url}`",
         f"- Existing list allowed to change: `{task.domain}/image-list.yml`",
+        "- Derive application-specific build and runtime behavior from the "
+        "official upstream and the candidate files; do not assume a fixed "
+        "user, port, health command, build command or persistence path.",
         "- Do not modify any other path.",
     ]
     if role in {"testcase_creator", "testcase_qa", "fixer"}:
@@ -215,6 +175,12 @@ def build_role_prompt(
                 "- Every in-container readiness probe must use commands "
                 "available in the runtime image; infer availability from "
                 "the Dockerfile and do not assume host diagnostic tools.",
+                "- Derive application-specific tests from the Dockerfile and "
+                "official upstream behavior; do not copy another "
+                "application's commands, ports or user assertions.",
+                "- The native harness executes shared tests inside an "
+                "already-running container; test scripts must not invoke "
+                "Docker or own the container lifecycle.",
                 f"- Shared tests: `{app_root}/tests/`",
                 f"- Shared test entrypoint: `{app_root}/tests/test.sh`",
             )
@@ -254,7 +220,6 @@ def build_role_prompt(
                 *(f"- `{path}`" for path in fixer_whitelist),
             )
         )
-    contract_lines.extend(_phase1_kvrocks_contract(task, role))
     contract_lines.extend(
         (
             "- Do not install or upgrade host tools or packages with brew, "

@@ -31,7 +31,9 @@ Challenge from these angles:
   data-volume mount cannot hide required startup configuration?
 - For compiled apps: is multi-stage build used correctly?
 - Can the same Dockerfile build natively on both amd64 and arm64?
-- Are the required non-root identity, persistent paths and health check functional rather than cosmetic?
+- If the application or task requires a non-root identity, persistent paths
+  or a health check, are they supported by upstream behavior and functional
+  rather than cosmetic?
 - Are required LICENSE and NOTICE files preserved?
 
 ### Metadata Consistency

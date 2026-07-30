@@ -22,7 +22,8 @@ Challenge from these angles:
 - For HTTP services: are both port and endpoint tested?
 - For non-HTTP services: is a real application protocol and data path tested?
 - For CLI tools: is exact version/help output verified?
-- Are required non-root identity and writable persistent paths verified?
+- If the image requires a non-root identity or writable persistent paths,
+  are those application-specific behaviors verified?
 - Are edge cases covered? (missing config, wrong permissions, etc.)
 
 ### False Positive Risk

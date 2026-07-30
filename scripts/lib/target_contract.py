@@ -41,6 +41,11 @@ _VERSION_INFO_FIELDS = {
 }
 
 
+def _image_tag(version: str, os_version: str) -> str:
+    suffix = os_version.replace("-lts-sp", "sp").replace("-lts", "lts")
+    return f"{version}-oe{suffix.replace('.', '').replace('-', '')}"
+
+
 def validate_meta_file(meta_path: str | Path) -> list[str]:
     """Validate the shared meta.yml schema against its local Dockerfiles."""
     path = Path(meta_path)
@@ -96,10 +101,7 @@ def validate_task_meta_file(
 
     version = str(getattr(task, "version"))
     os_version = str(getattr(task, "os_version"))
-    expected_tag = (
-        f"{version}-oe"
-        f"{os_version.replace('.', '').replace('-lts-sp', 'sp')}"
-    )
+    expected_tag = _image_tag(version, os_version)
     if set(data) != {expected_tag}:
         errors.append(f"meta.yml must contain only tag {expected_tag}")
         return errors
@@ -231,85 +233,12 @@ def _validate_meta(repo: Path, task: TaskSpec, app_root: str, errors: list[str])
     )
 
 
-def _validate_dockerfile(
-    repo: Path,
-    task: TaskSpec,
-    app_root: str,
-    errors: list[str],
-) -> None:
-    path = repo / app_root / task.version / task.os_version / "Dockerfile"
-    text = path.read_text()
-    required_fragments = {
-        f"ARG BASE=openeuler/openeuler:{task.os_version}": "locked openEuler base",
-        f"ARG VERSION={task.version}": "locked application version",
-        "./x.py build": "official Kvrocks build command",
-        "-j 4": "bounded Kvrocks build parallelism (-j 4)",
-        "EXPOSE 6666": "Kvrocks port",
-        "HEALTHCHECK": "runtime health check",
-        "redis-cli -p 6666 PING": "Redis protocol health probe",
-        "ENTRYPOINT": "Kvrocks entrypoint",
-    }
-    for fragment, label in required_fragments.items():
-        if fragment not in text:
-            errors.append(f"Dockerfile is missing {label}: {fragment}")
-    base_reference = r"(?:\$\{BASE\}|\$BASE)"
-    if not re.search(
-        rf"^\s*FROM\s+{base_reference}\s+AS\s+[A-Za-z0-9_.-]+\s*$",
-        text,
-        re.IGNORECASE | re.MULTILINE,
-    ):
-        errors.append("Dockerfile is missing a named build stage using BASE")
-    runtime_reference = (
-        rf"(?:{base_reference}|"
-        rf"openeuler/openeuler:{re.escape(task.os_version)})"
-    )
-    if not re.search(
-        rf"^\s*FROM\s+{runtime_reference}\s*$",
-        text,
-        re.IGNORECASE | re.MULTILINE,
-    ):
-        errors.append("Dockerfile is missing the locked openEuler runtime stage")
-    runtime_user = re.search(
-        r"^\s*USER\s+(?:999|([A-Za-z_][A-Za-z0-9_-]*))\s*$",
-        text,
-        re.MULTILINE,
-    )
-    if runtime_user and runtime_user.group(1):
-        name = re.escape(runtime_user.group(1))
-        uid_999_user = re.search(
-            rf"\buseradd\b[^\n]*"
-            rf"(?:--uid(?:=|\s+)|-u\s*)999\b[^\n]*\b{name}\b",
-            text,
-        )
-        if not uid_999_user:
-            runtime_user = None
-    if not runtime_user:
-        errors.append("Dockerfile is missing a runtime user with UID 999")
-    version_reference = r"v\$(?:\{VERSION\}|VERSION)"
-    if not re.search(
-        rf"(?:--branch|-b)\s+[\"']?{version_reference}[\"']?"
-        rf"|refs/tags/{version_reference}\.tar\.gz",
-        text,
-    ):
-        errors.append(
-            "Dockerfile must lock the upstream source to v${VERSION}"
-        )
-    if "latest" in text.lower():
-        errors.append("Dockerfile must not use an unpinned latest source or image")
-    if "$(nproc)" in text or "-j$(nproc)" in text:
-        errors.append("Dockerfile must use -j 4, not unbounded nproc parallelism")
-    if text.count("FROM ") < 2:
-        errors.append("Dockerfile must use separate builder and runtime stages")
-
-
 def _validate_tests(
     repo: Path,
-    task: TaskSpec,
     app_root: str,
     errors: list[str],
 ) -> None:
     shared = repo / app_root / "tests"
-    shared_text = (shared / "test.sh").read_text()
     goss_text = (shared / "goss.yaml").read_text()
     goss_wait_text = (shared / "goss_wait.yaml").read_text()
     try:
@@ -328,6 +257,8 @@ def _validate_tests(
                         f"goss command {name} stdout must be a string or "
                         "YAML list"
                     )
+    elif goss_data is not None:
+        errors.append("goss.yaml must contain a YAML mapping")
     try:
         goss_wait_data = yaml.safe_load(goss_wait_text)
     except yaml.YAMLError:
@@ -335,41 +266,21 @@ def _validate_tests(
         errors.append("goss_wait.yaml must be valid YAML")
     if isinstance(goss_wait_data, dict):
         port = goss_wait_data.get("port", {})
-        assertion = port.get("tcp:6666", {}) if isinstance(port, dict) else {}
-        if not isinstance(assertion, dict) or assertion.get("listening") is not True:
-            errors.append(
-                "goss_wait.yaml must check tcp:6666 with listening: true"
-            )
-        elif "timeout" in assertion:
-            errors.append(
-                "goss_wait.yaml port tcp:6666 does not support timeout; "
-                "the native harness controls the readiness retry"
-            )
+        if port and not isinstance(port, dict):
+            errors.append("goss_wait.yaml port resource must be a YAML mapping")
+        elif isinstance(port, dict):
+            for name, assertion in port.items():
+                if not isinstance(assertion, dict):
+                    errors.append(
+                        f"goss_wait.yaml port {name} must be a YAML mapping"
+                    )
+                elif "timeout" in assertion:
+                    errors.append(
+                        f"goss_wait.yaml port {name} does not support timeout; "
+                        "the native harness controls the readiness retry"
+                    )
     elif goss_wait_data is not None:
         errors.append("goss_wait.yaml must contain a YAML mapping")
-    if task.version in shared_text:
-        errors.append("app-level shared tests must not hardcode one application version")
-    version_command = re.search(r"\bkvrocks\s+--version\b", shared_text)
-    variable_version_command = (
-        re.search(
-            r"^\s*BINARY\s*=\s*(?:[\"']?kvrocks[\"']?"
-            r"|[\"']?\$\{BINARY:-kvrocks\}[\"']?)\s*$",
-            shared_text,
-            re.MULTILINE,
-        )
-        and re.search(
-            r"[\"']?\$(?:\{BINARY\}|BINARY)[\"']?\s+--version\b",
-            shared_text,
-        )
-    )
-    if not (version_command or variable_version_command):
-        errors.append("shared test.sh is missing assertion: kvrocks --version")
-    for fragment in ("${EXPECTED_VERSION", "redis-cli", "id -u"):
-        if fragment not in shared_text:
-            errors.append(f"shared test.sh is missing assertion: {fragment}")
-    for fragment in ("tcp:6666", ".Env.EXPECTED_VERSION", "PING", "PONG"):
-        if fragment not in goss_text:
-            errors.append(f"goss.yaml is missing assertion: {fragment}")
     shared_entry = shared / "test.sh"
     if not shared_entry.stat().st_mode & 0o111:
         errors.append(f"{shared_entry.relative_to(repo)} must be executable")
@@ -398,7 +309,7 @@ def _validate_docs(
         errors.append(
             f"README.md is missing the {task.app} openEuler title"
         )
-    if f"{task.version}-oe2403sp4" not in readme:
+    if _image_tag(task.version, task.os_version) not in readme:
         errors.append("README.md is missing the generated image tag")
 
     info = _load_yaml(repo / app_root / "doc" / "image-info.yml", "image-info.yml")
@@ -488,10 +399,9 @@ def validate_generated_target(
 
     if not any(error.startswith("required generated file") for error in errors):
         _validate_meta(repo, task, app_root, errors)
-        _validate_dockerfile(repo, task, app_root, errors)
         _validate_docs(repo, task, app_root, errors)
         if phase == "full":
-            _validate_tests(repo, task, app_root, errors)
+            _validate_tests(repo, app_root, errors)
 
     if errors:
         raise TargetContractError("\n".join(errors))
