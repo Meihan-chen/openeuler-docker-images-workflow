@@ -69,6 +69,22 @@ def test_scenario_one_runs_full_validation_chain_and_delivers_same_run():
     assert "inputs.operation == 'fork_pr'" in delivery_text
     assert "github.run_id" in delivery_text
 
+    prepare_steps = {
+        step["name"]: step for step in jobs["prepare"]["steps"]
+    }
+    assert (
+        "scenario_one"
+        in prepare_steps["Generate and review candidate content"]["if"]
+    )
+
+    x86_steps = {
+        step["name"]: step for step in jobs["validate_x86"]["steps"]
+    }
+    assert (
+        "scenario_one"
+        in x86_steps["Download generation artifact"]["if"]
+    )
+
 
 def test_phase1_task_defaults_are_the_confirmed_kvrocks_contract():
     inputs = _trigger(_workflow())["workflow_dispatch"]["inputs"]

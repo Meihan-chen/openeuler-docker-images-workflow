@@ -147,7 +147,9 @@ jobs:
           printf 'sha=%s\n' "${base_sha}" >> "${GITHUB_OUTPUT}"
 
       - name: Generate and review candidate content
-        if: ${{ inputs.operation == 'validate_only' }}
+        if: >-
+          ${{ inputs.operation == 'validate_only' ||
+              inputs.operation == 'scenario_one' }}
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
         run: |
@@ -265,7 +267,8 @@ jobs:
       - name: Download generation artifact
         if: >-
           ${{ inputs.operation == 'pipeline_smoke' ||
-              inputs.operation == 'validate_only' }}
+              inputs.operation == 'validate_only' ||
+              inputs.operation == 'scenario_one' }}
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: phase1-generation-${{ github.run_id }}
