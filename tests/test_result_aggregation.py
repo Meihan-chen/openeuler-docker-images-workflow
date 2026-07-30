@@ -255,3 +255,60 @@ def test_rejects_a_report_that_does_not_name_the_validated_candidate(tmp_path):
             run_url="https://github.com/Meihan-chen/repo/actions/runs/123456",
             report_dir=reports,
         )
+
+
+def test_legacy_evidence_is_accepted_only_when_explicitly_allowed(tmp_path):
+    from scripts.utils.artifacts import (
+        ResultAggregationError,
+        aggregate_native_results,
+    )
+
+    def _legacy_reports(root):
+        reports = _reports(root)
+        for architecture in ("x86_64", "aarch64"):
+            path = reports / f"{architecture}.json"
+            payload = json.loads(path.read_text())
+            del payload["validated_patch_sha256"]
+            path.write_text(json.dumps(payload))
+        return reports
+
+    def _aggregate(root, **kwargs):
+        return aggregate_native_results(
+            workspace=_workspace(root),
+            task=_task(),
+            run_id="123456",
+            run_url="https://github.com/Meihan-chen/repo/actions/runs/123456",
+            report_dir=_legacy_reports(root),
+            **kwargs,
+        )
+
+    denied = tmp_path / "denied"
+    denied.mkdir()
+    with pytest.raises(ResultAggregationError, match="validated"):
+        _aggregate(denied)
+
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    assert _aggregate(allowed, allow_legacy_evidence=True)["status"] == "passed"
+
+
+def test_legacy_allowance_never_excuses_a_real_mismatch(tmp_path):
+    from scripts.utils.artifacts import (
+        ResultAggregationError,
+        aggregate_native_results,
+    )
+
+    workspace = _workspace(tmp_path)
+    reports = _reports(tmp_path)
+    _write_report(reports, "aarch64", validated_patch_sha256="b" * 64)
+
+    # The escape hatch covers absent evidence, never contradictory evidence.
+    with pytest.raises(ResultAggregationError, match="different candidate"):
+        aggregate_native_results(
+            workspace=workspace,
+            task=_task(),
+            run_id="123456",
+            run_url="https://github.com/Meihan-chen/repo/actions/runs/123456",
+            report_dir=reports,
+            allow_legacy_evidence=True,
+        )

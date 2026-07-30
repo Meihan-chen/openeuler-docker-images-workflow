@@ -792,8 +792,13 @@ jobs:
       - name: Aggregate dual-architecture result evidence
         run: |
           evidence_run_id="${{ github.run_id }}"
+          legacy_evidence=""
           if [ "${{ inputs.operation }}" = "recover_package" ]; then
             evidence_run_id="${{ inputs.source_run_id }}"
+            # TODO(test-recovery-cleanup): drop with the lineage allowlist.
+            # The reviewed run predates validated_patch_sha256; its two report
+            # files are already pinned byte-for-byte by SHA256 above.
+            legacy_evidence="--allow-legacy-evidence"
           fi
           mkdir -p "${RUNNER_TEMP}/native-reports"
           cp "${RUNNER_TEMP}/final-x86/x86_64.json" \
@@ -811,7 +816,8 @@ jobs:
             --run-id "${evidence_run_id}" \
             --run-url \
               "https://github.com/${{ github.repository }}/actions/runs/${evidence_run_id}" \
-            --report-dir "${RUNNER_TEMP}/native-reports"
+            --report-dir "${RUNNER_TEMP}/native-reports" \
+            ${legacy_evidence}
 
       - name: Enforce final target gates and lint
         run: |

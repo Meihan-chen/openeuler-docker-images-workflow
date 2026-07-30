@@ -364,6 +364,23 @@ def test_actions_are_commit_pinned_and_python_install_requires_hashes():
     assert ".github/python-phase1.lock.txt" in setup
 
 
+def test_legacy_evidence_is_allowed_only_on_the_reviewed_recovery_path():
+    workflow_text = WORKFLOW_PATH.read_text()
+    aggregate = next(
+        step
+        for step in _workflow()["jobs"]["package_candidate"]["steps"]
+        if step.get("name") == "Aggregate dual-architecture result evidence"
+    )["run"]
+
+    # Reports predating validated_patch_sha256 may only be accepted for the
+    # one reviewed run whose report bytes are already pinned by SHA256.
+    assert workflow_text.count("--allow-legacy-evidence") == 1
+    assert 'legacy_evidence=""' in aggregate
+    assert '"${{ inputs.operation }}" = "recover_package"' in aggregate
+    assert "TODO(test-recovery-cleanup)" in aggregate
+    assert "${legacy_evidence}" in aggregate
+
+
 def test_each_architecture_hands_its_run_builder_back_exactly_once():
     jobs = _workflow()["jobs"]
     workflow_text = WORKFLOW_PATH.read_text()
