@@ -11,6 +11,9 @@
 - **禁止修改 whitelist 之外的任何文件**
 - **禁用 lint 规则、删除/弱化测试、修改 CI 配置**
 - **架构一致性**：不得用模拟或单架构产物规避 x86_64/aarch64 原生失败
+- **运行契约一致性**：如果修改 observable runtime contract（运行身份、端口、
+  路径、二进制、入口、配置、健康检查或持久化行为），必须 re-read 并同步所有
+  dependent candidate files；测试必须与最终实现一致，但 must not weaken 断言
 - **写操作隔离**：不得运行 `git commit`、`git push` 或任何仓库/API 写操作
 - **密钥安全**：不得读取、输出、复制或提及环境中的凭据和密钥
 

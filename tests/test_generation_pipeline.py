@@ -1169,6 +1169,9 @@ def test_phase1_prompts_pin_task_paths_without_injecting_app_implementation():
     assert "`ss`" in testcase_prompt
     assert "image-list, Dockerfile, metadata" in testcase_prompt
     assert "read-only" in testcase_prompt
+    assert "order-independent" in testcase_prompt
+    assert "stateful sequence" in testcase_prompt
+    assert "final Dockerfile" in testcase_prompt
     for fragment in ("redis-cli", "6666", "UID 999", "kvrocks --version"):
         assert fragment not in testcase_prompt
 
@@ -1178,6 +1181,8 @@ def test_phase1_prompts_pin_task_paths_without_injecting_app_implementation():
         base_sha="1" * 40,
     )
     assert "available in the runtime image" in fixer_prompt
+    assert "observable runtime contract" in fixer_prompt
+    assert "dependent candidate files" in fixer_prompt
 
 
 def test_shared_prompt_contract_does_not_inject_kvrocks_rules():

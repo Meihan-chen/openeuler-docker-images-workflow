@@ -79,6 +79,12 @@ retry() {
 
 具体断言必须按 Dockerfile 和任务契约替换这些通用示例；非 HTTP 应用不得照搬 HTTP 断言。容器内的就绪探测只能使用 runtime image 已确认安装的命令，并优先调用应用协议客户端，不得假设 `ss`、`netstat` 或 `curl` 存在。
 
+Every Goss resource must be order-independent. Do not split a stateful
+sequence such as write-then-read across separate Goss resources, because
+their execution order is not guaranteed; put the ordered flow in `test.sh`.
+All identity, port, path, binary and command expectations must match the
+final Dockerfile rather than an earlier candidate snapshot.
+
 ### 步骤 4：生成共享 test.sh
 
 在 `{category}/{package_name}/tests/test.sh` 创建唯一的功能测试入口。原生验证流程会将该目录挂载到已经启动的容器内，注入 `EXPECTED_VERSION` 后执行脚本。脚本不得自行 build、run、stop 或删除容器。

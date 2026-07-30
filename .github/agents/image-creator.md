@@ -68,6 +68,11 @@ gh api repos/{owner}/{repo}/readme --jq '.content' | base64 -d | head -60
 
 使用 `dnf` (openEuler 24.03)，Go 下载用 `https://golang.google.cn/dl/`，最后 `dnf clean all`。支持 amd64 和 arm64，不得下载或硬编码单一架构产物。编译型应用优先使用多阶段构建，构建阶段和运行阶段都使用任务指定的 openEuler 基础镜像，并将构建工具和源码留在运行镜像之外。
 
+Avoid a fixed numeric UID/GID unless the upstream or task contract requires
+that stable identity. When it is required, account for identities that the
+base image or installed packages may already create; do not assume an
+arbitrary number is unused.
+
 **openEuler 包名映射（Debian→RPM）：** libssl-dev→openssl-devel, build-essential→gcc gcc-c++ make, shadow→shadow-utils, python3-dev→python3-devel, libcurl4-openssl-dev→libcurl-devel, libffi-dev→libffi-devel
 
 **禁止使用的包：** clang-tools-extra, gmock-devel, gtest-devel, libdwarf-devel, gperftools-devel

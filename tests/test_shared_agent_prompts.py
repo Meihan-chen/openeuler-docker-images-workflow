@@ -80,3 +80,35 @@ def test_shared_prompts_derive_application_behavior_instead_of_assuming_it():
     assert "if the image requires" in testcase_qa
     for fragment in ("uid 999", "tcp 6666", "redis-cli", "./x.py build"):
         assert fragment not in prompts
+
+
+def test_image_prompts_treat_fixed_numeric_identity_as_a_collision_risk():
+    image_creator = (AGENTS_DIR / "image-creator.md").read_text().lower()
+    image_qa = (AGENTS_DIR / "image-qa.md").read_text().lower()
+
+    for prompt in (image_creator, image_qa):
+        assert "fixed numeric uid/gid" in prompt
+        assert "base image or installed packages" in prompt
+        assert "upstream or task contract" in prompt
+
+
+def test_testcase_prompts_keep_goss_order_independent_and_tests_in_sync():
+    testcase_creator = (AGENTS_DIR / "testcase-creator.md").read_text().lower()
+    testcase_qa = (AGENTS_DIR / "testcase-qa.md").read_text().lower()
+
+    for prompt in (testcase_creator, testcase_qa):
+        normalized = " ".join(prompt.split())
+        assert "order-independent" in normalized
+        assert "final dockerfile" in normalized
+        assert "test.sh" in normalized
+    assert "stateful sequence" in " ".join(testcase_creator.split())
+    assert "cross-resource ordering" in " ".join(testcase_qa.split())
+
+
+def test_fixer_prompt_synchronizes_observable_runtime_contract_consumers():
+    fixer = (AGENTS_DIR / "code-fixer.md").read_text().lower()
+
+    assert "observable runtime contract" in fixer
+    assert "dependent candidate files" in fixer
+    assert "re-read" in fixer
+    assert "must not weaken" in fixer

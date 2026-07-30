@@ -42,8 +42,12 @@ Challenge from these angles:
 
 ### Test Correctness
 - Are goss assertions syntactically valid?
+- Is every Goss resource order-independent, with no cross-resource ordering
+  assumed for a stateful flow that belongs in `test.sh`?
 - Do file paths exist in the Dockerfile?
 - Are command assertions using the correct binary name?
+- Do identity, port, path, binary and command expectations match the final
+  Dockerfile rather than an earlier candidate?
 - Does `test.sh` respect the execution/lifecycle model in the task contract?
 
 ## Output

@@ -181,6 +181,11 @@ def build_role_prompt(
                 "- The native harness executes shared tests inside an "
                 "already-running container; test scripts must not invoke "
                 "Docker or own the container lifecycle.",
+                "- Every Goss resource must be order-independent. Put any "
+                "stateful sequence in the shared test.sh instead of relying "
+                "on ordering between Goss resources.",
+                "- Identity, port, path, binary and command expectations must "
+                "match the final Dockerfile, not an earlier candidate.",
                 f"- Shared tests: `{app_root}/tests/`",
                 f"- Shared test entrypoint: `{app_root}/tests/test.sh`",
             )
@@ -218,6 +223,9 @@ def build_role_prompt(
             (
                 "## Fixer whitelist (only these files may be modified)",
                 *(f"- `{path}`" for path in fixer_whitelist),
+                "- If a fix changes the observable runtime contract, re-read "
+                "and synchronize all dependent candidate files without "
+                "weakening tests.",
             )
         )
     contract_lines.extend(

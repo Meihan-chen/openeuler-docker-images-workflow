@@ -34,6 +34,8 @@ Challenge from these angles:
 - If the application or task requires a non-root identity, persistent paths
   or a health check, are they supported by upstream behavior and functional
   rather than cosmetic?
+- Does any fixed numeric UID/GID come from the upstream or task contract, and
+  is it safe from identities created by the base image or installed packages?
 - Are required LICENSE and NOTICE files preserved?
 
 ### Metadata Consistency
