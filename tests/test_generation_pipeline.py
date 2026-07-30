@@ -1116,7 +1116,7 @@ def test_phase1_prompts_pin_kvrocks_paths_and_forbid_scope_escape():
     assert "Database/kvrocks/tests/test.sh" in testcase_prompt
     assert "stdout` must be a YAML list" in testcase_prompt
     assert "redis-cli -p 6666 PING" in testcase_prompt
-    assert "guaranteed by the runtime image" in testcase_prompt
+    assert "available in the runtime image" in testcase_prompt
     assert "`ss`" in testcase_prompt
     assert "image-list, Dockerfile, metadata" in testcase_prompt
     assert "read-only" in testcase_prompt
@@ -1126,7 +1126,50 @@ def test_phase1_prompts_pin_kvrocks_paths_and_forbid_scope_escape():
         task=_task(),
         base_sha="1" * 40,
     )
-    assert "guaranteed by the runtime image" in fixer_prompt
+    assert "available in the runtime image" in fixer_prompt
+
+
+def test_shared_prompt_contract_does_not_inject_kvrocks_rules():
+    from scripts.lib.generation_pipeline import build_role_prompt
+    from scripts.lib.task_spec import TaskSpec
+
+    task = TaskSpec.from_workflow_dispatch(
+        {
+            "app": "clickhouse",
+            "version": "25.7.5.34",
+            "os_version": "24.03-lts-sp2",
+            "domain": "Database",
+            "source_url": (
+                "https://github.com/ClickHouse/ClickHouse/"
+                "tree/v25.7.5.34-stable"
+            ),
+        }
+    )
+
+    image_prompt = build_role_prompt(
+        role="image_creator",
+        task=task,
+        base_sha="1" * 40,
+    )
+    assert f"Pinned source URL: `{task.source_url}`" in image_prompt
+    for fragment in (
+        "Kvrocks",
+        "redis-cli",
+        "6666",
+        "./x.py build",
+        "UID/GID 999",
+    ):
+        assert fragment not in image_prompt
+
+    for role in ("testcase_creator", "testcase_qa", "fixer"):
+        prompt = build_role_prompt(
+            role=role,
+            task=task,
+            base_sha="1" * 40,
+        )
+        assert "available in the runtime image" in prompt
+        for fragment in ("Kvrocks", "redis-cli", "6666", "./x.py build"):
+            assert fragment not in prompt
 
 
 def test_fixer_prompt_whitelists_generated_candidate_files():

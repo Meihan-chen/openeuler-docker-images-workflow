@@ -110,10 +110,12 @@ def _require_phase1_task(task: TaskSpec) -> None:
         )
 
 
-def _application_contract(task: TaskSpec, role: str) -> tuple[str, ...]:
+def _phase1_kvrocks_contract(task: TaskSpec, role: str) -> tuple[str, ...]:
     if task.app != "kvrocks":
         return ()
     contract = [
+        f"- Source tag: `v{task.version}` from `{task.source_url}`.",
+        "- Use the official `./x.py build` command with `-j 4`.",
         "- Kvrocks runtime contract: UID/GID 999, TCP 6666, writable "
         "`/var/lib/kvrocks`, Redis-protocol PING, restart persistence, "
         "configuration, LICENSE and NOTICE.",
@@ -149,10 +151,6 @@ def _application_contract(task: TaskSpec, role: str) -> tuple[str, ...]:
                 "- The native harness executes shared tests inside an "
                 "already-running container; test scripts must not invoke "
                 "Docker or own container lifecycle.",
-                "- Every in-container readiness probe must use commands "
-                "guaranteed by the runtime image. For Kvrocks, use "
-                "`redis-cli -p 6666 PING` and require PONG; do not assume "
-                "host diagnostics such as `ss` or `netstat` are installed.",
             )
         )
     return tuple(contract)
@@ -180,14 +178,16 @@ def build_role_prompt(
         f"- Dockerfile: `{image_root}/Dockerfile`",
         f"- Future result root: `{app_root}/results/{task.version}/{task.os_version}/`",
         f"- Meta tag: `{_tag(task)}`",
-        f"- Source tag: `v{task.version}` from `{task.source_url}`",
+        f"- Pinned source URL: `{task.source_url}`",
         f"- Existing list allowed to change: `{task.domain}/image-list.yml`",
         "- Do not modify any other path.",
-        "- Use the official `./x.py build` command with `-j 4`.",
     ]
     if role in {"testcase_creator", "testcase_qa", "fixer"}:
         contract_lines.extend(
             (
+                "- Every in-container readiness probe must use commands "
+                "available in the runtime image; infer availability from "
+                "the Dockerfile and do not assume host diagnostic tools.",
                 f"- Dockerfile test entrypoint: `{image_root}/test.sh`",
                 f"- Shared tests: `{app_root}/tests/`",
                 f"- Shared test entrypoint: `{app_root}/tests/test.sh`",
@@ -219,7 +219,7 @@ def build_role_prompt(
                 *(f"- `{path}`" for path in fixer_whitelist),
             )
         )
-    contract_lines.extend(_application_contract(task, role))
+    contract_lines.extend(_phase1_kvrocks_contract(task, role))
     contract_lines.extend(
         (
             "- Do not install or upgrade host tools or packages with brew, "

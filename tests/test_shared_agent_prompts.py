@@ -46,3 +46,5 @@ def test_shared_qa_prompts_preserve_findings_for_local_validation():
     assert "ss -tlnp" not in testcase_creator
     assert "runtime image" in testcase_creator
     assert "runtime image" in testcase_qa
+    assert "test-ai-result.json" not in testcase_creator
+    assert "container_name" not in testcase_creator

@@ -84,7 +84,6 @@ retry() {
 #!/bin/bash
 set -e; set -o pipefail
 
-CONTAINER_NAME="test-${PACKAGE_NAME:-{package_name}}"
 BINARY="{binary_name}"
 EXPECTED_VERSION="{version}"
 
@@ -122,9 +121,9 @@ main() {
 main "$@"
 ```
 
-### 步骤 5：输出结构化结果
+### 步骤 5：返回结构化结果
 
-默认只向 stdout 返回一个 JSON 对象；只有追加的任务契约明确允许时，才在指定位置写入 `test-ai-result.json`：
+不要在目标仓写入 Agent 控制文件。直接返回一个 JSON 对象，最终字段以 Harness 追加的响应契约为准：
 
 ```json
 {
