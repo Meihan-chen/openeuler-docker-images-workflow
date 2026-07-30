@@ -119,10 +119,11 @@ def test_issue_trigger_reuses_scenario_one_and_finalizes_the_source_issue():
     finalizer = jobs["finalize_trigger_issue"]
     assert "always()" in finalizer["if"]
     assert "scenario_one" in finalizer["if"]
-    assert "source_run_id" in finalizer["if"]
+    assert "startsWith(inputs.source_run_id, 'issue:')" in finalizer["if"]
     assert "deliver_fork_pr" in finalizer["needs"]
     text = _job_text(finalizer)
     assert "issue-finalize" in text
+    assert '${SOURCE_ISSUE#issue:}' in text
     assert "needs.deliver_fork_pr.outputs.pr_url" in text
     assert "GITCODE_TOKEN" in text
 

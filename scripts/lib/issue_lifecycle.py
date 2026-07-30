@@ -115,7 +115,7 @@ def _workflow_inputs(task: TaskSpec, issue_number: int) -> dict[str, str]:
         "os_version": task.os_version,
         "domain": task.domain,
         "source_url": task.source_url,
-        "source_run_id": str(issue_number),
+        "source_run_id": f"issue:{issue_number}",
     }
 
 

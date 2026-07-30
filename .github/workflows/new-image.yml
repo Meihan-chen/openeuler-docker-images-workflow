@@ -21,7 +21,7 @@ on:
           - fork_pr
           - failure_issue_contract_test
       source_run_id:
-        description: "Resume Run ID, or source Issue number for scenario_one"
+        description: "Resume Run ID, or Issue number as issue:<number>"
         required: false
         type: string
       resume_from_round:
@@ -981,7 +981,7 @@ jobs:
     if: >-
       ${{ always() &&
           inputs.operation == 'scenario_one' &&
-          inputs.source_run_id != '' }}
+          startsWith(inputs.source_run_id, 'issue:') }}
     needs:
       - prepare
       - seed_resume
@@ -1006,7 +1006,7 @@ jobs:
       - name: Report scenario result to source Issue
         env:
           GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
-          ISSUE_NUMBER: ${{ inputs.source_run_id }}
+          SOURCE_ISSUE: ${{ inputs.source_run_id }}
           OUTCOME: >-
             ${{ needs.deliver_fork_pr.result == 'success' &&
                 'success' || 'failure' }}
@@ -1030,7 +1030,7 @@ jobs:
           python3 scripts/harness/flow.py \
             issue-finalize \
             --target-repo openeuler/openeuler-docker-images \
-            --issue-number "${ISSUE_NUMBER}" \
+            --issue-number "${SOURCE_ISSUE#issue:}" \
             --outcome "${OUTCOME}" \
             --run-url "${RUN_URL}" \
             --pr-url "${PR_URL}" \

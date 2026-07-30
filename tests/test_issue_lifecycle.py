@@ -400,7 +400,7 @@ def test_new_issue_is_claimed_before_dispatch_and_cannot_dispatch_twice():
         "os_version": "24.03-lts-sp4",
         "domain": "Database",
         "source_url": "https://github.com/apache/kvrocks/tree/v2.16.0",
-        "source_run_id": "64",
+        "source_run_id": "issue:64",
     }
     assert [name for name, _ in client.calls[:4]] == [
         "get",
