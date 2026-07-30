@@ -14,7 +14,7 @@ class GitWorkspaceError(RuntimeError):
 
 
 BOT_NAME = "openEuler Docker Autopilot Bot"
-BOT_EMAIL = "openeuler-docker-autopilot@users.noreply.github.com"
+BOT_EMAIL = "jcccx.cmh@gmail.com"
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 

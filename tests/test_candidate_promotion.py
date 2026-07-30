@@ -106,7 +106,7 @@ def test_promotes_exact_candidate_to_one_bot_commit_on_deterministic_branch(
         "openEuler Docker Autopilot Bot"
     )
     assert _git(workspace.path, "show", "-s", "--format=%ae", "HEAD") == (
-        "openeuler-docker-autopilot@users.noreply.github.com"
+        "jcccx.cmh@gmail.com"
     )
     assert _git(workspace.path, "status", "--porcelain") == ""
     assert (

@@ -119,7 +119,7 @@ def test_workspace_configures_confirmed_bot_identity(tmp_path):
         "openEuler Docker Autopilot Bot"
     )
     assert _git(workspace.path, "config", "user.email") == (
-        "openeuler-docker-autopilot@users.noreply.github.com"
+        "jcccx.cmh@gmail.com"
     )
 
 
