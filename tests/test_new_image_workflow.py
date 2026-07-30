@@ -6,6 +6,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_PATH = ROOT / ".github" / "workflows" / "new-image.yml"
+WATCH_PATH = ROOT / ".github" / "workflows" / "watch-issues.yml"
 ROUND_PATH = ROOT / ".github" / "workflows" / "phase1-round.yml"
 DECIDE_PATH = ROOT / ".github" / "workflows" / "phase1-decide.yml"
 ROUNDS = ("round1", "round2", "round3", "round4")
@@ -64,6 +65,7 @@ def test_phase1_is_manual_only_with_explicit_operations():
     assert "source_run_id" in trigger["workflow_dispatch"]["inputs"]
     assert "generation_run_id" in trigger["workflow_dispatch"]["inputs"]
     assert "resume_from_round" in trigger["workflow_dispatch"]["inputs"]
+    assert len(trigger["workflow_dispatch"]["inputs"]) <= 10
 
 
 
@@ -100,6 +102,53 @@ def test_scenario_one_runs_full_validation_chain_and_delivers_same_run():
     )
     # Rounds are operation-agnostic: they validate whatever prepare staged.
     assert jobs["round1"]["with"]["operation"] == "${{ inputs.operation }}"
+
+
+def test_issue_trigger_reuses_scenario_one_and_finalizes_the_source_issue():
+    data = _workflow()
+    inputs = _trigger(data)["workflow_dispatch"]["inputs"]
+    jobs = data["jobs"]
+
+    assert "Issue number" in inputs["source_run_id"]["description"]
+
+    delivery = jobs["deliver_fork_pr"]
+    assert delivery["outputs"]["pr_url"] == (
+        "${{ steps.delivery.outputs.pr_url }}"
+    )
+
+    finalizer = jobs["finalize_trigger_issue"]
+    assert "always()" in finalizer["if"]
+    assert "scenario_one" in finalizer["if"]
+    assert "source_run_id" in finalizer["if"]
+    assert "deliver_fork_pr" in finalizer["needs"]
+    text = _job_text(finalizer)
+    assert "issue-finalize" in text
+    assert "needs.deliver_fork_pr.outputs.pr_url" in text
+    assert "GITCODE_TOKEN" in text
+
+
+def test_issue_watcher_is_lightweight_serial_and_test_allowlisted():
+    data = _workflow(WATCH_PATH)
+    trigger = _trigger(data)
+
+    assert set(trigger) == {"schedule", "workflow_dispatch"}
+    assert data["permissions"] == {
+        "actions": "write",
+        "contents": "read",
+    }
+    assert data["concurrency"]["cancel-in-progress"] is False
+    assert len(data["jobs"]) == 1
+
+    job = data["jobs"]["watch"]
+    text = _job_text(job)
+    assert job["runs-on"] == "ubuntu-latest"
+    assert "PHASE1_TEST_ISSUE_NUMBER" in job["if"]
+    assert "PHASE1_TEST_ISSUE_NUMBER" in text
+    assert "issue-watch" in text
+    assert "GITCODE_TOKEN" in text
+    assert "github.token" in text
+    assert "DEEPSEEK_API_KEY" not in text
+    assert "self-hosted" not in text
 
 
 def test_phase1_task_defaults_are_the_confirmed_kvrocks_contract():
@@ -527,6 +576,7 @@ def test_jobs_and_run_have_readable_display_names():
         "release_x86_builders": "Release x86_64 run builders",
         "release_arm_builders": "Release aarch64 run builders",
         "deliver_fork_pr": "Promote validated candidate to fork PR",
+        "finalize_trigger_issue": "Update source Issue",
         "issue_contract_test": "Exercise failure Issue lifecycle",
     }
     assert {

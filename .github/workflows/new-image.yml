@@ -21,7 +21,7 @@ on:
           - fork_pr
           - failure_issue_contract_test
       source_run_id:
-        description: "Failed validation run ID required by resume operations"
+        description: "Resume Run ID, or source Issue number for scenario_one"
         required: false
         type: string
       resume_from_round:
@@ -908,6 +908,8 @@ jobs:
       - release_arm_builders
     runs-on: [self-hosted, Linux, X64, oe-image-x86]
     timeout-minutes: 30
+    outputs:
+      pr_url: ${{ steps.delivery.outputs.pr_url }}
     steps:
       - name: Require the validated run ID
         if: ${{ inputs.operation == 'fork_pr' }}
@@ -939,9 +941,12 @@ jobs:
             github.run_id || inputs.validated_run_id }}
 
       - name: Promote candidate and create fork PR
+        id: delivery
         env:
           GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
         run: |
+          set -o pipefail
+          result_file="${RUNNER_TEMP}/fork-delivery.jsonl"
           "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
             fork-deliver \
             --candidate-dir "${RUNNER_TEMP}/candidate" \
@@ -952,7 +957,84 @@ jobs:
             --delivery-run-attempt "${{ github.run_attempt }}" \
             --workspace \
               "${RUNNER_TEMP}/promotion-${{ github.run_id }}-${{ github.run_attempt }}" \
-            --gitcode-username qq_42020325
+            --gitcode-username qq_42020325 | tee "${result_file}"
+          "${RUNNER_TEMP}/phase1-venv/bin/python" - "${result_file}" \
+            >> "${GITHUB_OUTPUT}" <<'PY'
+          import json
+          import sys
+
+          lines = [
+              line.strip()
+              for line in open(sys.argv[1], encoding="utf-8")
+              if line.strip().startswith("{")
+          ]
+          if not lines:
+              raise SystemExit("fork delivery did not emit a JSON result")
+          url = str(json.loads(lines[-1]).get("url", ""))
+          if not url.startswith("https://gitcode.com/"):
+              raise SystemExit("fork delivery did not emit a GitCode PR URL")
+          print(f"pr_url={url}")
+          PY
+
+  finalize_trigger_issue:
+    name: Update source Issue
+    if: >-
+      ${{ always() &&
+          inputs.operation == 'scenario_one' &&
+          inputs.source_run_id != '' }}
+    needs:
+      - prepare
+      - seed_resume
+      - round1
+      - decide1
+      - round2
+      - decide2
+      - round3
+      - decide3
+      - round4
+      - decide4
+      - package_candidate
+      - release_x86_builders
+      - release_arm_builders
+      - deliver_fork_pr
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out workflow source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Report scenario result to source Issue
+        env:
+          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+          ISSUE_NUMBER: ${{ inputs.source_run_id }}
+          OUTCOME: >-
+            ${{ needs.deliver_fork_pr.result == 'success' &&
+                'success' || 'failure' }}
+          RUN_URL: >-
+            ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{
+                github.run_id }}
+          PR_URL: ${{ needs.deliver_fork_pr.outputs.pr_url }}
+          FAILURE_SUMMARY: >-
+            prepare=${{ needs.prepare.result }},
+            round1=${{ needs.round1.result }},
+            decide1=${{ needs.decide1.result }},
+            round2=${{ needs.round2.result }},
+            decide2=${{ needs.decide2.result }},
+            round3=${{ needs.round3.result }},
+            decide3=${{ needs.decide3.result }},
+            round4=${{ needs.round4.result }},
+            decide4=${{ needs.decide4.result }},
+            package=${{ needs.package_candidate.result }},
+            delivery=${{ needs.deliver_fork_pr.result }}
+        run: |
+          python3 scripts/harness/flow.py \
+            issue-finalize \
+            --target-repo openeuler/openeuler-docker-images \
+            --issue-number "${ISSUE_NUMBER}" \
+            --outcome "${OUTCOME}" \
+            --run-url "${RUN_URL}" \
+            --pr-url "${PR_URL}" \
+            --failure-summary "${FAILURE_SUMMARY}"
 
   issue_contract_test:
     name: Exercise failure Issue lifecycle
