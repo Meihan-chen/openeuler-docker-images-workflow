@@ -333,6 +333,48 @@ def test_update_and_close_issue_use_official_owner_endpoint():
     }
 
 
+def test_get_issue_and_update_its_workflow_status():
+    from scripts.utils.gitcode import GitCodeClient, GitCodeResponse
+
+    issue = {
+        "number": 64,
+        "title": "【new-image】add kvrocks",
+        "body": "request",
+        "state": "open",
+        "issue_state": "新建",
+    }
+    transport = RecordingTransport(
+        [
+            GitCodeResponse(status=200, payload=issue),
+            GitCodeResponse(status=200, payload={**issue, "issue_state": "已接纳"}),
+        ]
+    )
+    client = GitCodeClient(token="top-secret", transport=transport)
+
+    assert client.get_issue(target_repo=TARGET_REPO, number=64) == issue
+    client.update_issue(
+        target_repo=TARGET_REPO,
+        number=64,
+        title=issue["title"],
+        body=issue["body"],
+        state="open",
+        issue_status="已接纳",
+    )
+
+    get_request, update_request = transport.requests
+    assert get_request.method == "GET"
+    assert get_request.path == (
+        "/repos/openeuler/openeuler-docker-images/issues/64"
+    )
+    assert update_request.json_body == {
+        "repo": "openeuler-docker-images",
+        "title": "【new-image】add kvrocks",
+        "body": "request",
+        "state": "open",
+        "status": "已接纳",
+    }
+
+
 def test_get_retries_transient_failures_but_post_does_not():
     from scripts.utils.gitcode import GitCodeAPIError, GitCodeClient, GitCodeResponse
 

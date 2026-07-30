@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import os
 import re
+import subprocess
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
-from scripts.lib.task_spec import TaskSpec
 from scripts.lib.gitcode_client import GitCodeResource
+from scripts.lib.task_spec import TaskSpec
 
 
 class IssueLifecycleError(RuntimeError):
@@ -19,6 +21,14 @@ class IssueOperationForbiddenError(IssueLifecycleError):
 
 
 _SAFE_DYNAMIC_VALUE = re.compile(r"^[A-Za-z0-9._-]+$")
+_NEW_IMAGE_TITLE = "【new-image】"
+
+
+@dataclass(frozen=True)
+class ClaimedIssue:
+    number: int
+    url: str
+    task: TaskSpec
 
 
 @dataclass(frozen=True)
@@ -48,6 +58,252 @@ class FailureIssueReport:
 
 def _marker(idempotency_key: str) -> str:
     return f"<!-- oe-autopilot-task:{idempotency_key} -->"
+
+
+def _issue_number(issue: Mapping[str, object]) -> int:
+    raw_number = issue.get("number", issue.get("iid"))
+    try:
+        number = int(raw_number)
+    except (TypeError, ValueError) as error:
+        raise IssueLifecycleError("Issue has no valid number") from error
+    if number <= 0:
+        raise IssueLifecycleError("Issue number must be positive")
+    return number
+
+
+def _issue_status(issue: Mapping[str, object]) -> str:
+    detail = issue.get("issue_state_detail")
+    if isinstance(detail, Mapping):
+        title = str(detail.get("title", "")).strip()
+        if title:
+            return title
+    return str(issue.get("issue_state", "")).strip()
+
+
+def _issue_url(issue: Mapping[str, object]) -> str:
+    return str(
+        issue.get("html_url")
+        or issue.get("web_url")
+        or issue.get("url")
+        or ""
+    )
+
+
+def _update_source_issue(
+    *,
+    client: Any,
+    target_repo: str,
+    issue: Mapping[str, object],
+    issue_status: str,
+    state: str,
+) -> Any:
+    return client.update_issue(
+        target_repo=target_repo,
+        number=_issue_number(issue),
+        title=str(issue.get("title", "")),
+        body=str(issue.get("body", "") or ""),
+        state=state,
+        issue_status=issue_status,
+    )
+
+
+def _workflow_inputs(task: TaskSpec, issue_number: int) -> dict[str, str]:
+    return {
+        "operation": "scenario_one",
+        "app": task.app,
+        "version": task.version,
+        "os_version": task.os_version,
+        "domain": task.domain,
+        "source_url": task.source_url,
+        "source_run_id": str(issue_number),
+    }
+
+
+def claim_new_image_issue(
+    *,
+    client: Any,
+    target_repo: str,
+    issue_number: int | None,
+    dispatch: Callable[[Mapping[str, str]], None],
+    parse_task: Callable[[Mapping[str, object]], TaskSpec],
+) -> ClaimedIssue | None:
+    """Claim one new Issue by status, then dispatch the canonical workflow."""
+
+    if issue_number is None:
+        issues = client.list_issues(
+            target_repo=target_repo,
+            state="open",
+            search=_NEW_IMAGE_TITLE,
+        )
+        issue = next(
+            (
+                candidate
+                for candidate in issues
+                if str(candidate.get("title", "")).strip().startswith(
+                    _NEW_IMAGE_TITLE
+                )
+                and _issue_status(candidate) == "新建"
+            ),
+            None,
+        )
+        if issue is None:
+            return None
+    else:
+        issue = client.get_issue(
+            target_repo=target_repo,
+            number=issue_number,
+        )
+    if str(issue.get("state", "")).lower() not in {"open", "opened"}:
+        return None
+    if _issue_status(issue) != "新建":
+        return None
+
+    number = _issue_number(issue)
+    try:
+        task = parse_task(issue)
+    except ValueError as error:
+        client.create_issue_comment(
+            target_repo=target_repo,
+            number=number,
+            body=f"自动处理未启动：{error}",
+        )
+        _update_source_issue(
+            client=client,
+            target_repo=target_repo,
+            issue=issue,
+            issue_status="已拒绝",
+            state="closed",
+        )
+        return None
+
+    _update_source_issue(
+        client=client,
+        target_repo=target_repo,
+        issue=issue,
+        issue_status="已接纳",
+        state="open",
+    )
+    try:
+        dispatch(_workflow_inputs(task, number))
+    except Exception as error:
+        try:
+            _update_source_issue(
+                client=client,
+                target_repo=target_repo,
+                issue=issue,
+                issue_status="新建",
+                state="open",
+            )
+        except Exception as rollback_error:
+            raise IssueLifecycleError(
+                "workflow dispatch and Issue claim rollback both failed"
+            ) from rollback_error
+        raise IssueLifecycleError(f"workflow dispatch failed: {error}") from error
+
+    client.create_issue_comment(
+        target_repo=target_repo,
+        number=number,
+        body="该请求已接纳，自动镜像流水线已经触发。",
+    )
+    return ClaimedIssue(number=number, url=_issue_url(issue), task=task)
+
+
+def finalize_new_image_issue(
+    *,
+    client: Any,
+    target_repo: str,
+    issue_number: int,
+    outcome: str,
+    run_url: str,
+    pr_url: str = "",
+    failure_summary: str = "",
+) -> Any | None:
+    """Write the terminal scenario-one result back to its source Issue."""
+
+    if outcome not in {"success", "failure"}:
+        raise ValueError("outcome must be success or failure")
+    if not run_url.startswith("https://"):
+        raise ValueError("run_url must be an HTTPS URL")
+    if outcome == "success" and not pr_url.startswith("https://"):
+        raise ValueError("successful outcome requires an HTTPS PR URL")
+
+    issue = client.get_issue(
+        target_repo=target_repo,
+        number=issue_number,
+    )
+    target_status = "已完成" if outcome == "success" else "已挂起"
+    target_state = "closed" if outcome == "success" else "open"
+    if _issue_status(issue) == target_status:
+        return None
+    if _issue_status(issue) != "已接纳":
+        raise IssueLifecycleError(
+            f"cannot finalize Issue in {_issue_status(issue)!r} status"
+        )
+
+    if outcome == "success":
+        comment = "\n".join(
+            (
+                "自动镜像流水线已完成。",
+                "",
+                f"- Workflow: {run_url}",
+                f"- Pull request: {pr_url}",
+            )
+        )
+    else:
+        comment = "\n".join(
+            (
+                "自动镜像流水线未完成，Issue 已挂起等待人工处理。",
+                "",
+                f"- Workflow: {run_url}",
+                f"- Failure summary: {failure_summary or 'see workflow run'}",
+            )
+        )
+    client.create_issue_comment(
+        target_repo=target_repo,
+        number=issue_number,
+        body=comment,
+    )
+    return _update_source_issue(
+        client=client,
+        target_repo=target_repo,
+        issue=issue,
+        issue_status=target_status,
+        state=target_state,
+    )
+
+
+def dispatch_github_workflow(
+    *,
+    github_token: str,
+    github_repository: str,
+    workflow: str,
+    ref: str,
+    inputs: Mapping[str, str],
+    run: Callable[..., Any] = subprocess.run,
+) -> None:
+    """Dispatch a workflow through GitHub CLI without exposing its token."""
+
+    if not github_token:
+        raise IssueLifecycleError("GITHUB_TOKEN is required")
+    command = [
+        "gh",
+        "workflow",
+        "run",
+        workflow,
+        "--repo",
+        github_repository,
+        "--ref",
+        ref,
+    ]
+    for key, value in sorted(inputs.items()):
+        command.extend(("-f", f"{key}={value}"))
+    environment = os.environ.copy()
+    environment["GH_TOKEN"] = github_token
+    run(
+        command,
+        check=True,
+        env=environment,
+    )
 
 
 def _default_title(report: FailureIssueReport) -> str:

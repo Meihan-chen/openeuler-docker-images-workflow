@@ -35,6 +35,9 @@ from scripts.lib.gitcode_client import (
 )
 from scripts.lib.issue_lifecycle import (
     IssueLifecycleError,
+    claim_new_image_issue,
+    dispatch_github_workflow,
+    finalize_new_image_issue,
     run_controlled_issue_probe,
 )
 from scripts.lib.native_repair import (
@@ -60,6 +63,7 @@ from scripts.lib.target_contract import (
     TargetContractError,
     validate_generated_target,
 )
+from scripts.harness.parse_issue import parse_issue_request
 
 
 def _write_json(path: Path, value: dict) -> None:
@@ -198,6 +202,75 @@ def _issue_contract_test(args: argparse.Namespace) -> None:
             "number": resource.number,
             "state": "closed",
             "url": resource.url,
+        }
+    )
+
+
+def _issue_watch(args: argparse.Namespace) -> None:
+    gitcode_token = os.environ.get("GITCODE_TOKEN", "")
+    github_token = os.environ.get("GITHUB_TOKEN", "")
+    if not gitcode_token:
+        raise IssueLifecycleError("GITCODE_TOKEN is required")
+    if not github_token:
+        raise IssueLifecycleError("GITHUB_TOKEN is required")
+
+    def dispatch(inputs: dict[str, str]) -> None:
+        dispatch_github_workflow(
+            github_token=github_token,
+            github_repository=args.github_repository,
+            workflow=args.workflow,
+            ref=args.github_ref,
+            inputs=inputs,
+        )
+
+    def parse_task(issue: dict[str, object]) -> TaskSpec:
+        fields = parse_issue_request(
+            str(issue.get("title", "")),
+            str(issue.get("body", "") or ""),
+        )
+        return TaskSpec.from_workflow_dispatch(
+            {
+                "app": fields["package_name"],
+                "version": fields["app_version"],
+                "os_version": fields["os_version"],
+                "domain": fields["domain"],
+                "source_url": fields["source_repo_url"],
+            }
+        )
+
+    claimed = claim_new_image_issue(
+        client=GitCodeClient(token=gitcode_token),
+        target_repo=args.target_repo,
+        issue_number=args.issue_number,
+        dispatch=dispatch,
+        parse_task=parse_task,
+    )
+    _print_json(
+        {
+            "dispatched": claimed is not None,
+            "issue_number": claimed.number if claimed else args.issue_number,
+            "issue_url": claimed.url if claimed else "",
+        }
+    )
+
+
+def _issue_finalize(args: argparse.Namespace) -> None:
+    token = os.environ.get("GITCODE_TOKEN", "")
+    if not token:
+        raise IssueLifecycleError("GITCODE_TOKEN is required")
+    finalize_new_image_issue(
+        client=GitCodeClient(token=token),
+        target_repo=args.target_repo,
+        issue_number=args.issue_number,
+        outcome=args.outcome,
+        run_url=args.run_url,
+        pr_url=args.pr_url,
+        failure_summary=args.failure_summary,
+    )
+    _print_json(
+        {
+            "issue_number": args.issue_number,
+            "outcome": args.outcome,
         }
     )
 
@@ -505,6 +578,35 @@ def _add_delivery_commands(commands: argparse._SubParsersAction) -> None:
     issue_probe.add_argument("--github-run-id", required=True)
     issue_probe.add_argument("--failure-stage", required=True)
     issue_probe.set_defaults(handler=_issue_contract_test)
+
+    issue_watch = commands.add_parser(
+        "issue-watch",
+        description=(
+            "Claim one new GitCode image request and dispatch scenario_one."
+        ),
+    )
+    issue_watch.add_argument("--target-repo", required=True)
+    issue_watch.add_argument("--issue-number", type=int)
+    issue_watch.add_argument("--github-repository", required=True)
+    issue_watch.add_argument("--github-ref", required=True)
+    issue_watch.add_argument("--workflow", default="new-image.yml")
+    issue_watch.set_defaults(handler=_issue_watch)
+
+    issue_finalize = commands.add_parser(
+        "issue-finalize",
+        description="Write a scenario_one result back to its source Issue.",
+    )
+    issue_finalize.add_argument("--target-repo", required=True)
+    issue_finalize.add_argument("--issue-number", required=True, type=int)
+    issue_finalize.add_argument(
+        "--outcome",
+        required=True,
+        choices=("success", "failure"),
+    )
+    issue_finalize.add_argument("--run-url", required=True)
+    issue_finalize.add_argument("--pr-url", default="")
+    issue_finalize.add_argument("--failure-summary", default="")
+    issue_finalize.set_defaults(handler=_issue_finalize)
 
 
 def _add_generation_commands(commands: argparse._SubParsersAction) -> None:

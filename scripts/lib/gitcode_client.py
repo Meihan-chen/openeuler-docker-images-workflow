@@ -389,6 +389,23 @@ class GitCodeClient:
                 return issues
             page += 1
 
+    def get_issue(
+        self,
+        *,
+        target_repo: str,
+        number: int,
+    ) -> Mapping[str, object]:
+        if number <= 0:
+            raise ValueError("issue number must be positive")
+        owner, repo = self._split_repo(target_repo)
+        payload = self._request(
+            "GET",
+            f"/repos/{owner}/{repo}/issues/{number}",
+        )
+        if not isinstance(payload, Mapping):
+            raise GitCodeAPIError("GitCode issue response must be an object")
+        return payload
+
     def update_issue(
         self,
         *,
@@ -398,6 +415,7 @@ class GitCodeClient:
         body: str,
         state: str,
         labels: str = "",
+        issue_status: str = "",
     ) -> GitCodeResource:
         if number <= 0:
             raise ValueError("issue number must be positive")
@@ -412,6 +430,8 @@ class GitCodeClient:
         }
         if labels:
             json_body["labels"] = labels
+        if issue_status:
+            json_body["status"] = issue_status
         payload = self._request(
             "PATCH",
             f"/repos/{owner}/issues/{number}",
