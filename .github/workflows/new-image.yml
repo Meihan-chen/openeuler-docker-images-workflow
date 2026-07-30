@@ -87,29 +87,12 @@ jobs:
       - name: Check out workflow source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
-      - name: Create locked Python environment
-        run: |
-          python3 -m venv "${RUNNER_TEMP}/phase1-venv"
-          "${RUNNER_TEMP}/phase1-venv/bin/python" -m pip install \
-            --require-hashes \
-            -r .github/python-phase1.lock.txt
-
-      - name: Bootstrap locked runner tools
+      - name: Set up native x86 runner
         id: tools
-        run: |
-          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/bootstrap_tools.py \
-            --cache-root /opt/oe-image-tools \
-            --arch x86_64 \
-            --output-json "${RUNNER_TEMP}/toolchain.json" \
-            --github-output "${GITHUB_OUTPUT}"
-
-      - name: Enforce native x86 runner preflight
-        run: |
-          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/runner_preflight.py \
-            --expected-arch x86_64 \
-            --workspace "${GITHUB_WORKSPACE}" \
-            --toolchain-json "${RUNNER_TEMP}/toolchain.json" \
-            --output-json "${RUNNER_TEMP}/preflight-x86.json"
+        uses: ./.github/actions/phase1-setup
+        with:
+          arch: x86_64
+          preflight: "true"
 
       - name: Normalize TaskSpec
         env:
@@ -187,24 +170,21 @@ jobs:
             "${RUNNER_TEMP}/phase1-target/${DOMAIN}/${APP}/${VERSION}/${OS_VERSION}/Dockerfile"
 
       - name: Create generation patch
-        run: |
-          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
-            target-create-patch \
-            --workspace "${RUNNER_TEMP}/phase1-target" \
-            --branch master \
-            --base-sha "${{ steps.base.outputs.sha }}" \
-            --output "${RUNNER_TEMP}/phase1-prepare/changes.patch"
+        uses: ./.github/actions/phase1-emit-patch
+        with:
+          workspace: ${{ runner.temp }}/phase1-target
+          input-dir: ${{ runner.temp }}/phase1-prepare
+          output-dir: ${{ runner.temp }}/phase1-prepare
 
       - name: Create failure diagnostic patch
         if: ${{ failure() && steps.base.outputs.sha != '' }}
         continue-on-error: true
-        run: |
-          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
-            target-create-patch \
-            --workspace "${RUNNER_TEMP}/phase1-target" \
-            --branch master \
-            --base-sha "${{ steps.base.outputs.sha }}" \
-            --output "${RUNNER_TEMP}/phase1-prepare/changes.patch"
+        uses: ./.github/actions/phase1-emit-patch
+        with:
+          workspace: ${{ runner.temp }}/phase1-target
+          input-dir: ${{ runner.temp }}/phase1-prepare
+          output-dir: ${{ runner.temp }}/phase1-prepare
+          tolerate-missing: "true"
 
       - name: Upload generation artifact
         if: ${{ always() && steps.base.outputs.sha != '' }}
@@ -241,28 +221,12 @@ jobs:
       - name: Check out workflow source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
-      - name: Create locked Python environment
-        run: |
-          python3 -m venv "${RUNNER_TEMP}/phase1-venv"
-          "${RUNNER_TEMP}/phase1-venv/bin/python" -m pip install \
-            --require-hashes \
-            -r .github/python-phase1.lock.txt
-
-      - name: Bootstrap locked runner tools
+      - name: Set up native x86 runner
         id: tools
-        run: |
-          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/bootstrap_tools.py \
-            --cache-root /opt/oe-image-tools \
-            --arch x86_64 \
-            --output-json "${RUNNER_TEMP}/toolchain.json" \
-            --github-output "${GITHUB_OUTPUT}"
-
-      - name: Enforce native x86 runner preflight
-        run: |
-          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/runner_preflight.py \
-            --expected-arch x86_64 \
-            --workspace "${GITHUB_WORKSPACE}" \
-            --toolchain-json "${RUNNER_TEMP}/toolchain.json"
+        uses: ./.github/actions/phase1-setup
+        with:
+          arch: x86_64
+          preflight: "true"
 
       - name: Download generation artifact
         if: >-
@@ -285,22 +249,10 @@ jobs:
           run-id: ${{ inputs.source_run_id }}
 
       - name: Replay exact generation candidate
-        run: |
-          base_sha="$(tr -d '\n' \
-            < "${RUNNER_TEMP}/phase1-input/base-sha.txt")"
-          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
-            target-clone \
-            --source \
-              https://gitcode.com/openeuler/openeuler-docker-images.git \
-            --destination "${RUNNER_TEMP}/phase1-target" \
-            --branch master \
-            --expected-sha "${base_sha}"
-          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
-            target-apply-patch \
-            --workspace "${RUNNER_TEMP}/phase1-target" \
-            --branch master \
-            --base-sha "${base_sha}" \
-            --patch "${RUNNER_TEMP}/phase1-input/changes.patch"
+        uses: ./.github/actions/phase1-replay
+        with:
+          input-dir: ${{ runner.temp }}/phase1-input
+          workspace: ${{ runner.temp }}/phase1-target
 
       - name: Build, test, and repair on x86_64 (max 3)
         if: ${{ inputs.operation != 'pipeline_smoke' }}
@@ -343,39 +295,21 @@ jobs:
               "${RUNNER_TEMP}/phase1-x86/x86-repair-agents"
 
       - name: Create x86-converged patch
-        run: |
-          base_sha="$(tr -d '\n' \
-            < "${RUNNER_TEMP}/phase1-input/base-sha.txt")"
-          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
-            target-create-patch \
-            --workspace "${RUNNER_TEMP}/phase1-target" \
-            --branch master \
-            --base-sha "${base_sha}" \
-            --output "${RUNNER_TEMP}/phase1-x86/changes.patch"
-          cp "${RUNNER_TEMP}/phase1-input/task-spec.json" \
-            "${RUNNER_TEMP}/phase1-x86/task-spec.json"
-          cp "${RUNNER_TEMP}/phase1-input/base-sha.txt" \
-            "${RUNNER_TEMP}/phase1-x86/base-sha.txt"
+        uses: ./.github/actions/phase1-emit-patch
+        with:
+          workspace: ${{ runner.temp }}/phase1-target
+          input-dir: ${{ runner.temp }}/phase1-input
+          output-dir: ${{ runner.temp }}/phase1-x86
 
       - name: Create x86 failure diagnostic patch
         if: ${{ failure() }}
         continue-on-error: true
-        run: |
-          mkdir -p "${RUNNER_TEMP}/phase1-x86"
-          if [ -f "${RUNNER_TEMP}/phase1-input/base-sha.txt" ]; then
-            cp "${RUNNER_TEMP}/phase1-input/task-spec.json" \
-              "${RUNNER_TEMP}/phase1-x86/task-spec.json"
-            cp "${RUNNER_TEMP}/phase1-input/base-sha.txt" \
-              "${RUNNER_TEMP}/phase1-x86/base-sha.txt"
-            base_sha="$(tr -d '\n' \
-              < "${RUNNER_TEMP}/phase1-input/base-sha.txt")"
-            "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
-              target-create-patch \
-              --workspace "${RUNNER_TEMP}/phase1-target" \
-              --branch master \
-              --base-sha "${base_sha}" \
-              --output "${RUNNER_TEMP}/phase1-x86/changes.patch"
-          fi
+        uses: ./.github/actions/phase1-emit-patch
+        with:
+          workspace: ${{ runner.temp }}/phase1-target
+          input-dir: ${{ runner.temp }}/phase1-input
+          output-dir: ${{ runner.temp }}/phase1-x86
+          tolerate-missing: "true"
 
       - name: Upload x86-converged artifact
         if: ${{ always() }}
@@ -413,28 +347,12 @@ jobs:
       - name: Check out workflow source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
-      - name: Create locked Python environment
-        run: |
-          python3 -m venv "${RUNNER_TEMP}/phase1-venv"
-          "${RUNNER_TEMP}/phase1-venv/bin/python" -m pip install \
-            --require-hashes \
-            -r .github/python-phase1.lock.txt
-
-      - name: Bootstrap locked runner tools
+      - name: Set up native ARM runner
         id: tools
-        run: |
-          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/bootstrap_tools.py \
-            --cache-root /opt/oe-image-tools \
-            --arch aarch64 \
-            --output-json "${RUNNER_TEMP}/toolchain.json" \
-            --github-output "${GITHUB_OUTPUT}"
-
-      - name: Enforce native ARM runner preflight
-        run: |
-          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/runner_preflight.py \
-            --expected-arch aarch64 \
-            --workspace "${GITHUB_WORKSPACE}" \
-            --toolchain-json "${RUNNER_TEMP}/toolchain.json"
+        uses: ./.github/actions/phase1-setup
+        with:
+          arch: aarch64
+          preflight: "true"
 
       - name: Download x86-converged artifact
         if: ${{ inputs.operation != 'resume_arm' }}
@@ -454,22 +372,10 @@ jobs:
           run-id: ${{ inputs.source_run_id }}
 
       - name: Replay exact x86-converged candidate
-        run: |
-          base_sha="$(tr -d '\n' \
-            < "${RUNNER_TEMP}/phase1-input/base-sha.txt")"
-          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
-            target-clone \
-            --source \
-              https://gitcode.com/openeuler/openeuler-docker-images.git \
-            --destination "${RUNNER_TEMP}/phase1-target" \
-            --branch master \
-            --expected-sha "${base_sha}"
-          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
-            target-apply-patch \
-            --workspace "${RUNNER_TEMP}/phase1-target" \
-            --branch master \
-            --base-sha "${base_sha}" \
-            --patch "${RUNNER_TEMP}/phase1-input/changes.patch"
+        uses: ./.github/actions/phase1-replay
+        with:
+          input-dir: ${{ runner.temp }}/phase1-input
+          workspace: ${{ runner.temp }}/phase1-target
 
       - name: Build, test, and repair on aarch64 (max 3)
         if: ${{ inputs.operation != 'pipeline_smoke' }}
@@ -512,39 +418,21 @@ jobs:
               "${RUNNER_TEMP}/phase1-arm/arm-repair-agents"
 
       - name: Create ARM-converged final patch
-        run: |
-          base_sha="$(tr -d '\n' \
-            < "${RUNNER_TEMP}/phase1-input/base-sha.txt")"
-          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
-            target-create-patch \
-            --workspace "${RUNNER_TEMP}/phase1-target" \
-            --branch master \
-            --base-sha "${base_sha}" \
-            --output "${RUNNER_TEMP}/phase1-arm/changes.patch"
-          cp "${RUNNER_TEMP}/phase1-input/task-spec.json" \
-            "${RUNNER_TEMP}/phase1-arm/task-spec.json"
-          cp "${RUNNER_TEMP}/phase1-input/base-sha.txt" \
-            "${RUNNER_TEMP}/phase1-arm/base-sha.txt"
+        uses: ./.github/actions/phase1-emit-patch
+        with:
+          workspace: ${{ runner.temp }}/phase1-target
+          input-dir: ${{ runner.temp }}/phase1-input
+          output-dir: ${{ runner.temp }}/phase1-arm
 
       - name: Create ARM failure diagnostic patch
         if: ${{ failure() }}
         continue-on-error: true
-        run: |
-          mkdir -p "${RUNNER_TEMP}/phase1-arm"
-          if [ -f "${RUNNER_TEMP}/phase1-input/base-sha.txt" ]; then
-            cp "${RUNNER_TEMP}/phase1-input/task-spec.json" \
-              "${RUNNER_TEMP}/phase1-arm/task-spec.json"
-            cp "${RUNNER_TEMP}/phase1-input/base-sha.txt" \
-              "${RUNNER_TEMP}/phase1-arm/base-sha.txt"
-            base_sha="$(tr -d '\n' \
-              < "${RUNNER_TEMP}/phase1-input/base-sha.txt")"
-            "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
-              target-create-patch \
-              --workspace "${RUNNER_TEMP}/phase1-target" \
-              --branch master \
-              --base-sha "${base_sha}" \
-              --output "${RUNNER_TEMP}/phase1-arm/changes.patch"
-          fi
+        uses: ./.github/actions/phase1-emit-patch
+        with:
+          workspace: ${{ runner.temp }}/phase1-target
+          input-dir: ${{ runner.temp }}/phase1-input
+          output-dir: ${{ runner.temp }}/phase1-arm
+          tolerate-missing: "true"
 
       - name: Upload ARM-converged artifact
         if: ${{ always() }}
@@ -582,28 +470,12 @@ jobs:
       - name: Check out workflow source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
-      - name: Create locked Python environment
-        run: |
-          python3 -m venv "${RUNNER_TEMP}/phase1-venv"
-          "${RUNNER_TEMP}/phase1-venv/bin/python" -m pip install \
-            --require-hashes \
-            -r .github/python-phase1.lock.txt
-
-      - name: Bootstrap locked runner tools
+      - name: Set up native x86 runner
         id: tools
-        run: |
-          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/bootstrap_tools.py \
-            --cache-root /opt/oe-image-tools \
-            --arch x86_64 \
-            --output-json "${RUNNER_TEMP}/toolchain.json" \
-            --github-output "${GITHUB_OUTPUT}"
-
-      - name: Enforce native x86 runner preflight
-        run: |
-          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/runner_preflight.py \
-            --expected-arch x86_64 \
-            --workspace "${GITHUB_WORKSPACE}" \
-            --toolchain-json "${RUNNER_TEMP}/toolchain.json"
+        uses: ./.github/actions/phase1-setup
+        with:
+          arch: x86_64
+          preflight: "true"
 
       - name: Download ARM-converged artifact
         if: ${{ inputs.operation != 'resume_revalidate_x86' }}
@@ -637,22 +509,10 @@ jobs:
             "${RUNNER_TEMP}/phase1-input/aarch64.json" > /dev/null
 
       - name: Replay final patch
-        run: |
-          base_sha="$(tr -d '\n' \
-            < "${RUNNER_TEMP}/phase1-input/base-sha.txt")"
-          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
-            target-clone \
-            --source \
-              https://gitcode.com/openeuler/openeuler-docker-images.git \
-            --destination "${RUNNER_TEMP}/phase1-target" \
-            --branch master \
-            --expected-sha "${base_sha}"
-          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
-            target-apply-patch \
-            --workspace "${RUNNER_TEMP}/phase1-target" \
-            --branch master \
-            --base-sha "${base_sha}" \
-            --patch "${RUNNER_TEMP}/phase1-input/changes.patch"
+        uses: ./.github/actions/phase1-replay
+        with:
+          input-dir: ${{ runner.temp }}/phase1-input
+          workspace: ${{ runner.temp }}/phase1-target
 
       - name: Enforce resumed candidate gate
         if: ${{ inputs.operation == 'resume_revalidate_x86' }}
@@ -773,21 +633,11 @@ jobs:
       - name: Check out workflow source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
-      - name: Create locked Python environment
-        run: |
-          python3 -m venv "${RUNNER_TEMP}/phase1-venv"
-          "${RUNNER_TEMP}/phase1-venv/bin/python" -m pip install \
-            --require-hashes \
-            -r .github/python-phase1.lock.txt
-
-      - name: Bootstrap locked runner tools
+      - name: Set up phase-one tooling
         id: tools
-        run: |
-          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/bootstrap_tools.py \
-            --cache-root /opt/oe-image-tools \
-            --arch x86_64 \
-            --output-json "${RUNNER_TEMP}/toolchain.json" \
-            --github-output "${GITHUB_OUTPUT}"
+        uses: ./.github/actions/phase1-setup
+        with:
+          arch: x86_64
 
       - name: Download generation evidence
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
@@ -903,23 +753,11 @@ jobs:
 
       - name: Replay final validated patch
         if: ${{ inputs.operation != 'recover_package' }}
-        run: |
-          base_sha="$(tr -d '\n' < "${RUNNER_TEMP}/arm/base-sha.txt")"
-          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
-            target-clone \
-            --source \
-              https://gitcode.com/openeuler/openeuler-docker-images.git \
-            --destination "${RUNNER_TEMP}/phase1-target" \
-            --branch master \
-            --expected-sha "${base_sha}"
-          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
-            target-apply-patch \
-            --workspace "${RUNNER_TEMP}/phase1-target" \
-            --branch master \
-            --base-sha "${base_sha}" \
-            --patch "${RUNNER_TEMP}/arm/changes.patch"
-          printf '%s\n' "${base_sha}" \
-            > "${RUNNER_TEMP}/package-base-sha.txt"
+        uses: ./.github/actions/phase1-replay
+        with:
+          input-dir: ${{ runner.temp }}/arm
+          workspace: ${{ runner.temp }}/phase1-target
+          base-sha-output: ${{ runner.temp }}/package-base-sha.txt
 
       - name: Replay recovered patch on current target master
         if: ${{ inputs.operation == 'recover_package' }}
@@ -1151,12 +989,8 @@ jobs:
       - name: Check out workflow source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
-      - name: Create locked Python environment
-        run: |
-          python3 -m venv "${RUNNER_TEMP}/phase1-venv"
-          "${RUNNER_TEMP}/phase1-venv/bin/python" -m pip install \
-            --require-hashes \
-            -r .github/python-phase1.lock.txt
+      - name: Set up phase-one Python environment
+        uses: ./.github/actions/phase1-setup
 
       - name: Download exact validated candidate
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
@@ -1197,12 +1031,8 @@ jobs:
       - name: Check out workflow source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
-      - name: Create locked Python environment
-        run: |
-          python3 -m venv "${RUNNER_TEMP}/phase1-venv"
-          "${RUNNER_TEMP}/phase1-venv/bin/python" -m pip install \
-            --require-hashes \
-            -r .github/python-phase1.lock.txt
+      - name: Set up phase-one Python environment
+        uses: ./.github/actions/phase1-setup
 
       - name: Normalize controlled probe TaskSpec
         env:

@@ -7,12 +7,28 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_PATH = ROOT / ".github" / "workflows" / "new-image.yml"
 ACTIONLINT_CONFIG = ROOT / ".github" / "actionlint.yaml"
+ACTIONS_DIR = ROOT / ".github" / "actions"
+PHASE1_ACTIONS = ("phase1-setup", "phase1-replay", "phase1-emit-patch")
 
 
 def _workflow():
     data = yaml.safe_load(WORKFLOW_PATH.read_text())
     assert isinstance(data, dict)
     return data
+
+
+def _action_path(name):
+    return ACTIONS_DIR / name / "action.yml"
+
+
+def _action(name):
+    data = yaml.safe_load(_action_path(name).read_text())
+    assert isinstance(data, dict)
+    return data
+
+
+def _action_text(name):
+    return _action_path(name).read_text()
 
 
 def _trigger(data):
@@ -278,6 +294,11 @@ def test_validate_only_jobs_have_no_gitcode_credential_or_write_command():
         assert "GITCODE_TOKEN" not in text
         assert "fork-deliver" not in text
         assert "issue-contract-test" not in text
+    for name in PHASE1_ACTIONS:
+        text = _action_text(name)
+        assert "GITCODE_TOKEN" not in text
+        assert "fork-deliver" not in text
+        assert "issue-contract-test" not in text
     assert _workflow()["permissions"] == {
         "actions": "read",
         "contents": "read",
@@ -312,19 +333,35 @@ def test_issue_probe_is_isolated_and_explicit():
 
 
 def test_actions_are_commit_pinned_and_python_install_requires_hashes():
-    data = _workflow()
     uses = [
         step["uses"]
-        for job in data["jobs"].values()
+        for job in _workflow()["jobs"].values()
         for step in job.get("steps", [])
         if "uses" in step
     ]
+    for name in PHASE1_ACTIONS:
+        uses.extend(
+            step["uses"]
+            for step in _action(name)["runs"]["steps"]
+            if "uses" in step
+        )
 
     assert uses
-    assert all(re.fullmatch(r"actions/[^@]+@[0-9a-f]{40}", use) for use in uses)
-    text = WORKFLOW_PATH.read_text()
-    assert "--require-hashes" in text
-    assert ".github/python-phase1.lock.txt" in text
+    external = [use for use in uses if not use.startswith("./")]
+    local = [use for use in uses if use.startswith("./")]
+    assert external
+    assert all(
+        re.fullmatch(r"actions/[^@]+@[0-9a-f]{40}", use) for use in external
+    )
+    assert local
+    assert all(
+        (ROOT / use.removeprefix("./") / "action.yml").is_file()
+        for use in local
+    )
+
+    setup = _action_text("phase1-setup")
+    assert "--require-hashes" in setup
+    assert ".github/python-phase1.lock.txt" in setup
 
 
 def test_test_duplicate_pr_skip_has_an_explicit_production_removal_marker():
@@ -405,8 +442,8 @@ def test_prepare_uploads_reports_and_diagnostic_patch_after_generation_failure()
     assert "failure()" in diagnostic_patch["if"]
     assert "steps.base.outputs.sha != ''" in diagnostic_patch["if"]
     assert diagnostic_patch["continue-on-error"] is True
-    assert "target-create-patch" in diagnostic_patch["run"]
-    assert "changes.patch" in diagnostic_patch["run"]
+    assert diagnostic_patch["uses"] == "./.github/actions/phase1-emit-patch"
+    assert diagnostic_patch["with"]["tolerate-missing"] == "true"
 
     upload = steps["Upload generation artifact"]
     assert "always()" in upload["if"]
@@ -457,8 +494,11 @@ def test_native_jobs_upload_reports_and_diagnostic_patch_after_failure():
         diagnostic = steps[f"Create {label} failure diagnostic patch"]
         assert "failure()" in diagnostic["if"]
         assert diagnostic["continue-on-error"] is True
-        assert "target-create-patch" in diagnostic["run"]
-        assert "changes.patch" in diagnostic["run"]
+        assert diagnostic["uses"] == "./.github/actions/phase1-emit-patch"
+        assert diagnostic["with"]["tolerate-missing"] == "true"
+        assert diagnostic["with"]["output-dir"] == (
+            f"${{{{ runner.temp }}}}/{directory}"
+        )
 
         upload_name = (
             "Upload x86-converged artifact"
@@ -477,3 +517,99 @@ def test_summary_markdown_does_not_trigger_single_quote_shellcheck_warning():
 
     assert "printf -- '- Candidate artifact:" not in text
     assert "printf -- '- Promotion input" not in text
+
+
+def test_shared_stage_steps_live_in_one_composite_action_each():
+    workflow_text = WORKFLOW_PATH.read_text()
+
+    for name in PHASE1_ACTIONS:
+        assert _action(name)["runs"]["using"] == "composite"
+
+    # Every shared step body exists exactly once, inside its action.
+    for fragment in (
+        "python3 -m venv",
+        "scripts/bootstrap_tools.py",
+        "scripts/runner_preflight.py",
+        "target-apply-patch",
+    ):
+        assert fragment not in workflow_text
+
+    setup = _action_text("phase1-setup")
+    assert "python3 -m venv" in setup
+    assert "scripts/bootstrap_tools.py" in setup
+    assert "scripts/runner_preflight.py" in setup
+    assert "target-apply-patch" in _action_text("phase1-replay")
+    assert "target-create-patch" in _action_text("phase1-emit-patch")
+
+
+def _delegated_setup_step(job):
+    steps = job["steps"]
+    checkout = next(
+        index
+        for index, step in enumerate(steps)
+        if step.get("uses", "").startswith("actions/checkout@")
+    )
+    # A local action is only resolvable after the repository is checked out,
+    # so checkout must stay in the job and precede every local action. Cheap
+    # input guards may run first so bad input fails before any provisioning.
+    assert all(
+        not step.get("uses", "").startswith("./") for step in steps[:checkout]
+    )
+    setup = steps[checkout + 1]
+    assert setup["uses"] == "./.github/actions/phase1-setup"
+    return setup
+
+
+def test_every_native_job_delegates_setup_and_keeps_checkout_in_the_job():
+    jobs = _workflow()["jobs"]
+
+    for name, arch, preflight in (
+        ("prepare", "x86_64", True),
+        ("validate_x86", "x86_64", True),
+        ("validate_arm", "aarch64", True),
+        ("revalidate_x86", "x86_64", True),
+        ("package_candidate", "x86_64", False),
+    ):
+        setup = _delegated_setup_step(jobs[name])
+        assert setup["id"] == "tools"
+        assert setup["with"]["arch"] == arch
+        assert setup["with"].get("preflight", "false") == str(preflight).lower()
+
+    for name in ("deliver_fork_pr", "issue_contract_test"):
+        setup = _delegated_setup_step(jobs[name])
+        assert "with" not in setup
+
+
+def test_replay_action_always_pins_the_exact_validated_base_sha():
+    replay = _action_text("phase1-replay")
+
+    assert "--expected-sha" in replay
+    assert "--branch master" in replay
+    # A plain clone would silently drift onto a newer target master.
+    assert replay.count("target-clone") == 1
+
+    for job, step_name, input_dir in (
+        ("validate_x86", "Replay exact generation candidate", "phase1-input"),
+        ("validate_arm", "Replay exact x86-converged candidate", "phase1-input"),
+        ("revalidate_x86", "Replay final patch", "phase1-input"),
+        ("package_candidate", "Replay final validated patch", "arm"),
+    ):
+        steps = {
+            step["name"]: step
+            for step in _workflow()["jobs"][job]["steps"]
+        }
+        replay_step = steps[step_name]
+        assert replay_step["uses"] == "./.github/actions/phase1-replay"
+        assert replay_step["with"]["input-dir"] == (
+            f"${{{{ runner.temp }}}}/{input_dir}"
+        )
+
+
+def test_emit_patch_action_refuses_a_missing_base_sha_by_default():
+    emit = _action(_action_path("phase1-emit-patch").parent.name)
+    body = emit["runs"]["steps"][0]["run"]
+
+    assert emit["inputs"]["tolerate-missing"]["default"] == "false"
+    assert "exit 2" in body
+    assert "exit 0" in body
+    assert 'if [ "${TOLERATE_MISSING}" = "true" ]' in body

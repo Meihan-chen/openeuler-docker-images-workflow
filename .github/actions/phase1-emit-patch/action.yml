@@ -1,0 +1,53 @@
+name: Emit stage candidate patch
+description: >-
+  Record the stage TaskSpec, base SHA and patch that the next stage must
+  replay. Diagnostic callers may tolerate a missing base SHA.
+
+inputs:
+  workspace:
+    description: "Target repository workspace to diff"
+    required: true
+  input-dir:
+    description: "Directory holding the incoming task-spec.json and base-sha.txt"
+    required: true
+  output-dir:
+    description: "Directory that receives the stage candidate files"
+    required: true
+  tolerate-missing:
+    description: >-
+      Exit successfully when the incoming base SHA is absent, so failure
+      diagnostics never mask the original error.
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Emit stage candidate
+      shell: bash
+      env:
+        WORKSPACE: ${{ inputs.workspace }}
+        INPUT_DIR: ${{ inputs.input-dir }}
+        OUTPUT_DIR: ${{ inputs.output-dir }}
+        TOLERATE_MISSING: ${{ inputs.tolerate-missing }}
+      run: |
+        mkdir -p "${OUTPUT_DIR}"
+        if [ ! -f "${INPUT_DIR}/base-sha.txt" ]; then
+          if [ "${TOLERATE_MISSING}" = "true" ]; then
+            echo "no base SHA recorded yet; skipping stage patch" >&2
+            exit 0
+          fi
+          echo "missing ${INPUT_DIR}/base-sha.txt" >&2
+          exit 2
+        fi
+        if [ "${INPUT_DIR}" != "${OUTPUT_DIR}" ]; then
+          cp "${INPUT_DIR}/task-spec.json" "${OUTPUT_DIR}/task-spec.json"
+          cp "${INPUT_DIR}/base-sha.txt" "${OUTPUT_DIR}/base-sha.txt"
+        fi
+        base_sha="$(tr -d '\n' < "${INPUT_DIR}/base-sha.txt")"
+        "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
+          target-create-patch \
+          --workspace "${WORKSPACE}" \
+          --branch master \
+          --base-sha "${base_sha}" \
+          --output "${OUTPUT_DIR}/changes.patch"

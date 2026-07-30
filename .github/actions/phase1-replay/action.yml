@@ -1,0 +1,44 @@
+name: Replay validated target candidate
+description: >-
+  Clone the target repository at an exact base SHA and apply one candidate
+  patch, so every stage validates byte-identical content.
+
+inputs:
+  input-dir:
+    description: "Directory holding base-sha.txt and changes.patch"
+    required: true
+  workspace:
+    description: "Destination target repository workspace"
+    required: true
+  base-sha-output:
+    description: "Optional file that records the replayed base SHA"
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Replay exact candidate
+      shell: bash
+      env:
+        INPUT_DIR: ${{ inputs.input-dir }}
+        WORKSPACE: ${{ inputs.workspace }}
+        BASE_SHA_OUTPUT: ${{ inputs.base-sha-output }}
+      run: |
+        base_sha="$(tr -d '\n' < "${INPUT_DIR}/base-sha.txt")"
+        "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
+          target-clone \
+          --source \
+            https://gitcode.com/openeuler/openeuler-docker-images.git \
+          --destination "${WORKSPACE}" \
+          --branch master \
+          --expected-sha "${base_sha}"
+        "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
+          target-apply-patch \
+          --workspace "${WORKSPACE}" \
+          --branch master \
+          --base-sha "${base_sha}" \
+          --patch "${INPUT_DIR}/changes.patch"
+        if [ -n "${BASE_SHA_OUTPUT}" ]; then
+          printf '%s\n' "${base_sha}" > "${BASE_SHA_OUTPUT}"
+        fi

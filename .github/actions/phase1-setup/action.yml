@@ -1,0 +1,69 @@
+name: Phase-one runner setup
+description: >-
+  Create the locked Python environment, bootstrap the locked runner
+  toolchain, and enforce the native runner preflight.
+
+inputs:
+  arch:
+    description: >-
+      Native architecture whose locked toolchain is bootstrapped.
+      Leave empty to only create the Python environment.
+    required: false
+    default: ""
+  preflight:
+    description: "Enforce the native runner preflight check"
+    required: false
+    default: "false"
+
+outputs:
+  dgoss_path:
+    description: "Absolute path to the locked dgoss"
+    value: ${{ steps.tools.outputs.dgoss_path }}
+  goss_path:
+    description: "Absolute path to the locked goss"
+    value: ${{ steps.tools.outputs.goss_path }}
+  hadolint_path:
+    description: "Absolute path to the locked hadolint"
+    value: ${{ steps.tools.outputs.hadolint_path }}
+  jq_path:
+    description: "Absolute path to the locked jq"
+    value: ${{ steps.tools.outputs.jq_path }}
+  opencode_path:
+    description: "Absolute path to the locked OpenCode"
+    value: ${{ steps.tools.outputs.opencode_path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Create locked Python environment
+      shell: bash
+      run: |
+        python3 -m venv "${RUNNER_TEMP}/phase1-venv"
+        "${RUNNER_TEMP}/phase1-venv/bin/python" -m pip install \
+          --require-hashes \
+          -r .github/python-phase1.lock.txt
+
+    - name: Bootstrap locked runner tools
+      id: tools
+      if: ${{ inputs.arch != '' }}
+      shell: bash
+      env:
+        ARCH: ${{ inputs.arch }}
+      run: |
+        "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/bootstrap_tools.py \
+          --cache-root /opt/oe-image-tools \
+          --arch "${ARCH}" \
+          --output-json "${RUNNER_TEMP}/toolchain.json" \
+          --github-output "${GITHUB_OUTPUT}"
+
+    - name: Enforce native runner preflight
+      if: ${{ inputs.preflight == 'true' }}
+      shell: bash
+      env:
+        ARCH: ${{ inputs.arch }}
+      run: |
+        "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/runner_preflight.py \
+          --expected-arch "${ARCH}" \
+          --workspace "${GITHUB_WORKSPACE}" \
+          --toolchain-json "${RUNNER_TEMP}/toolchain.json" \
+          --output-json "${RUNNER_TEMP}/preflight-${ARCH}.json"
