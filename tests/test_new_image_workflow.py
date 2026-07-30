@@ -253,6 +253,10 @@ def test_fork_pr_reuses_named_artifact_from_exact_validated_run():
     assert "phase1-candidate-" in text
     assert "run-id" in text
     assert "fork-deliver" in text
+    assert "--delivery-run-id" in text
+    assert "github.run_id" in text
+    assert "--delivery-run-attempt" in text
+    assert "github.run_attempt" in text
     assert "GITCODE_TOKEN" in text
     assert "--token" not in text
 

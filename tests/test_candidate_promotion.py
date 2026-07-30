@@ -143,6 +143,31 @@ def test_run_id_mismatch_fails_before_patch_is_applied(tmp_path):
     assert _git(workspace.path, "status", "--porcelain") == ""
 
 
+def test_test_delivery_can_override_only_the_candidate_branch(tmp_path):
+    from scripts.lib.candidate_bundle import promote_candidate
+    from scripts.lib.git_workspace import TargetWorkspace
+
+    upstream = _upstream(tmp_path)
+    candidate, base_sha = _candidate(tmp_path, upstream)
+    workspace = TargetWorkspace.clone(
+        str(upstream),
+        tmp_path / "promotion",
+        branch="master",
+    )
+    branch = f"{_task().branch}-e2e-654321-a2"
+
+    result = promote_candidate(
+        candidate_dir=candidate,
+        expected_run_id="123456",
+        workspace=workspace,
+        branch=branch,
+    )
+
+    assert result.branch == branch
+    assert _git(workspace.path, "branch", "--show-current") == branch
+    assert _git(workspace.path, "rev-parse", "HEAD^") == base_sha
+
+
 def test_changed_target_base_requires_new_validation_run(tmp_path):
     from scripts.lib.candidate_bundle import (
         CandidatePromotionError,

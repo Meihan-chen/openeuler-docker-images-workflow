@@ -168,6 +168,8 @@ def _fork_deliver(args: argparse.Namespace) -> None:
         config=config,
         username=args.gitcode_username,
         token=token,
+        delivery_run_id=args.delivery_run_id,
+        delivery_run_attempt=args.delivery_run_attempt,
     )
     _print_json(
         {
@@ -442,6 +444,8 @@ def _add_delivery_commands(commands: argparse._SubParsersAction) -> None:
     )
     fork.add_argument("--candidate-dir", required=True, type=Path)
     fork.add_argument("--expected-run-id", required=True)
+    fork.add_argument("--delivery-run-id", required=True)
+    fork.add_argument("--delivery-run-attempt", required=True)
     fork.add_argument("--workspace", required=True, type=Path)
     fork.add_argument(
         "--gitcode-username",

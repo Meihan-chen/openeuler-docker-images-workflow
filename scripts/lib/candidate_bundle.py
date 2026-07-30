@@ -202,6 +202,7 @@ def promote_candidate(
     candidate_dir: Path,
     expected_run_id: str,
     workspace: TargetWorkspace,
+    branch: str | None = None,
 ) -> CandidatePromotion:
     bundle = CandidateBundle.verify(
         candidate_dir,
@@ -213,15 +214,16 @@ def promote_candidate(
         )
 
     workspace.apply_patch(bundle.root / "changes.patch")
+    delivery_branch = branch or bundle.task.branch
     commit_sha = workspace.commit_candidate(
-        branch=bundle.task.branch,
+        branch=delivery_branch,
         message=(
             f"feat: add {bundle.task.app} {bundle.task.version} image "
             f"for openEuler {bundle.task.os_version}"
         ),
     )
     return CandidatePromotion(
-        branch=bundle.task.branch,
+        branch=delivery_branch,
         base_sha=bundle.manifest.base_sha,
         commit_sha=commit_sha,
         candidate_sha256=bundle.manifest.content_sha256,

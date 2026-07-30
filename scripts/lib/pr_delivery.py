@@ -515,6 +515,8 @@ def deliver_validated_candidate(
     config: DeliveryConfig,
     username: str,
     token: str,
+    delivery_run_id: str,
+    delivery_run_attempt: str,
     clone: Callable[..., TargetWorkspace] = TargetWorkspace.clone,
     promote: Callable[..., Any] = promote_candidate,
     client_factory: Callable[..., Any] = GitCodeClient,
@@ -528,10 +530,22 @@ def deliver_validated_candidate(
         raise ForkPRPipelineError("GitCode token is required")
     if not username:
         raise ForkPRPipelineError("GitCode username is required")
+    if (
+        not delivery_run_id.isdigit()
+        or int(delivery_run_id) < 1
+        or not delivery_run_attempt.isdigit()
+        or int(delivery_run_attempt) < 1
+    ):
+        raise ForkPRPipelineError(
+            "delivery run ID and attempt must be positive integers"
+        )
 
     bundle = CandidateBundle.verify(
         candidate_dir,
         expected_run_id=expected_run_id,
+    )
+    delivery_branch = (
+        f"{bundle.task.branch}-e2e-{delivery_run_id}-a{delivery_run_attempt}"
     )
     workspace = clone(
         target_source,
@@ -546,6 +560,7 @@ def deliver_validated_candidate(
         candidate_dir=candidate_dir,
         expected_run_id=expected_run_id,
         workspace=workspace,
+        branch=delivery_branch,
     )
     content = compose_pull_request(bundle)
     return deliver(

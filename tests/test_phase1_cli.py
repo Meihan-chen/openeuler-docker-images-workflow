@@ -409,6 +409,8 @@ def test_fork_delivery_reads_token_only_from_environment():
     assert result.returncode == 0, result.stderr
     assert "--token" not in result.stdout
     assert "GITCODE_TOKEN" in result.stdout
+    assert "--delivery-run-id" in result.stdout
+    assert "--delivery-run-attempt" in result.stdout
 
 
 def test_issue_contract_test_is_explicit_and_reads_environment_token():

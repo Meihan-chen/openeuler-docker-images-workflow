@@ -1160,6 +1160,8 @@ jobs:
             fork-deliver \
             --candidate-dir "${RUNNER_TEMP}/candidate" \
             --expected-run-id "${{ inputs.validated_run_id }}" \
+            --delivery-run-id "${{ github.run_id }}" \
+            --delivery-run-attempt "${{ github.run_attempt }}" \
             --workspace \
               "${RUNNER_TEMP}/promotion-${{ github.run_id }}-${{ github.run_attempt }}" \
             --gitcode-username qq_42020325

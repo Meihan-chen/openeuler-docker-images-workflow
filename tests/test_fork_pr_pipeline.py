@@ -105,7 +105,7 @@ def test_replays_exact_validated_base_then_promotes_and_delivers(tmp_path):
 
     def promote(**kwargs):
         events.append(("promote", kwargs))
-        return Promotion()
+        return Promotion(branch=kwargs["branch"])
 
     def deliver(**kwargs):
         events.append(("deliver", kwargs))
@@ -119,6 +119,8 @@ def test_replays_exact_validated_base_then_promotes_and_delivers(tmp_path):
         config=_config(),
         username="qq_42020325",
         token="secret",
+        delivery_run_id="654321",
+        delivery_run_attempt="2",
         clone=clone,
         promote=promote,
         client_factory=lambda **kwargs: client,
@@ -129,9 +131,13 @@ def test_replays_exact_validated_base_then_promotes_and_delivers(tmp_path):
     assert [event[0] for event in events] == ["clone", "promote", "deliver"]
     assert events[0][3] == "master"
     assert events[1][1]["expected_run_id"] == "123456"
+    assert events[1][1]["branch"] == (
+        "auto/new-image/kvrocks/2.16.0-oe2403sp4-e2e-654321-a2"
+    )
     delivery = events[2][1]
     assert delivery["repo"] == workspace.path
     assert delivery["client"] is client
+    assert delivery["promotion"].branch == events[1][1]["branch"]
     assert bundle.manifest.content_sha256 in delivery["body"]
     assert delivery["title"].startswith("[New Image] Add Apache Kvrocks")
 
@@ -152,6 +158,8 @@ def test_wrong_validated_run_stops_before_clone_or_delivery(tmp_path):
             config=_config(),
             username="qq_42020325",
             token="secret",
+            delivery_run_id="654321",
+            delivery_run_attempt="1",
             clone=lambda *args, **kwargs: events.append("clone"),
             promote=lambda **kwargs: events.append("promote"),
             client_factory=lambda **kwargs: events.append("client"),
@@ -179,6 +187,8 @@ def test_changed_target_master_stops_before_promotion_or_delivery(tmp_path):
             config=_config(),
             username="qq_42020325",
             token="secret",
+            delivery_run_id="654321",
+            delivery_run_attempt="1",
             clone=lambda *args, **kwargs: Workspace(
                 tmp_path / "promotion",
                 base_sha="9" * 40,
@@ -205,6 +215,8 @@ def test_validate_only_and_missing_token_stop_before_clone(tmp_path):
         "workspace_dir": tmp_path / "promotion",
         "target_source": "https://gitcode.com/upstream.git",
         "username": "qq_42020325",
+        "delivery_run_id": "654321",
+        "delivery_run_attempt": "1",
         "clone": lambda *args, **kwargs: events.append("clone"),
         "promote": lambda **kwargs: events.append("promote"),
         "client_factory": lambda **kwargs: events.append("client"),
@@ -222,6 +234,39 @@ def test_validate_only_and_missing_token_stop_before_clone(tmp_path):
             **common,
             config=_config(),
             token="",
+        )
+
+    assert events == []
+
+
+@pytest.mark.parametrize(
+    ("run_id", "attempt"),
+    (("", "1"), ("0", "1"), ("abc", "1"), ("123", "0"), ("123", "x")),
+)
+def test_invalid_delivery_identity_stops_before_clone(tmp_path, run_id, attempt):
+    from scripts.lib.pr_delivery import (
+        ForkPRPipelineError,
+        deliver_validated_candidate,
+    )
+
+    bundle = _candidate(tmp_path)
+    events = []
+
+    with pytest.raises(ForkPRPipelineError, match="delivery run"):
+        deliver_validated_candidate(
+            candidate_dir=bundle.root,
+            expected_run_id="123456",
+            workspace_dir=tmp_path / "promotion",
+            target_source="https://gitcode.com/upstream.git",
+            config=_config(),
+            username="qq_42020325",
+            token="secret",
+            delivery_run_id=run_id,
+            delivery_run_attempt=attempt,
+            clone=lambda *args, **kwargs: events.append("clone"),
+            promote=lambda **kwargs: events.append("promote"),
+            client_factory=lambda **kwargs: events.append("client"),
+            deliver=lambda **kwargs: events.append("deliver"),
         )
 
     assert events == []
