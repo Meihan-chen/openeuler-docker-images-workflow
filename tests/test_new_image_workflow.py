@@ -129,10 +129,19 @@ def test_issue_trigger_reuses_scenario_one_and_finalizes_the_source_issue():
 
 
 def test_issue_watcher_is_lightweight_serial_and_test_allowlisted():
+    """Polling stays parked while the watcher is allowlisted to one Issue.
+
+    `83173d8` commented the cron out so the watcher cannot fire at real GitCode
+    Issues on its own during the testing phase, but left this assertion on the
+    old two-trigger shape, so that commit shipped red. Asserting the parked
+    line still exists keeps re-enabling a deliberate one-line change instead of
+    a silent drift in either direction.
+    """
     data = _workflow(WATCH_PATH)
     trigger = _trigger(data)
 
-    assert set(trigger) == {"schedule", "workflow_dispatch"}
+    assert set(trigger) == {"workflow_dispatch"}
+    assert '#   - cron: "*/5 * * * *"' in WATCH_PATH.read_text()
     assert data["permissions"] == {
         "actions": "write",
         "contents": "read",
