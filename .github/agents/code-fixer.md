@@ -19,41 +19,50 @@
 
 ## 输入结构
 
-- `build_logs` — 构建日志（x86_64 和 ARM64 独立）
-- `test_output` — 测试输出（JUnit XML 或原始日志）
-- `whitelist` — 允许修改的文件清单
-- `fix_branch` — 当前 fix 分支
-- `knowledge_base` — 可选的历史故障模式
+Harness 在 `## Review report to resolve` 下附一个 JSON 对象，字段如下：
+
+- `kind` — `native_validation_failure` 或 `deterministic_target_contract`
+- `repair_round` — 当前修复轮次
+- `classification` — Harness 的确定性分类结果，见下节
+- `architectures` — 按 `x86_64` / `aarch64` 分列的原生验证报告；单架构入口
+  改用 `architecture` 加 `report`
+- `gate` — 确定性目标门禁报告，含 `errors` 列表
+- `native_failure` — 门禁失败前的原生失败报告（如果有）
+
+每份原生报告包含 `failed_stage`、`checks`（`null` 表示该项从未执行）、
+`failure`、`failure_details`（`command`、`returncode`、`stdout_head`、
+`stdout_tail`）和 `container_evidence`（容器 `state` 与 `logs`）。
+可修改文件清单在 `## Fixer whitelist` 一节，不在本 JSON 内。
 
 ## 诊断流程（内置 Analyst 能力）
 
 ### 0. 前置检查
 
-检查日志末尾是否有成功标志（`Finished: SUCCESS`、`Build successful`）。若有且仍报失败，说明失败发生在未提供的下游 job 中——判定为 `insufficient evidence`，不得猜测或修改文件。
+`failure_details.stdout_head` 是日志开头，`stdout_tail` 是结尾；两者之间被省略的
+部分不可假设。若证据不足以定位根因，判定为 `insufficient_evidence`，不得猜测或
+修改文件。
 
-### 1. 参考历史
+### 1. 读取 Harness 分类
 
-如果任务提供且允许读取故障知识库，判断是否匹配已知模式：
-- 匹配 → 记录模式名，提高诊断置信度
-- 无匹配 → 标记 `new_pattern`
+`classification` 由 Harness 从自身产出的证据确定性得出，比对日志文本的推断更
+可靠，**冲突时以它为准**。`kind` 为 `native_validation_failure` 时它按架构分列，
+两个架构可能属于不同类别，必须各自处理，不得用其中一个的处置覆盖另一个。
 
-除非 whitelist 明确允许，否则不得回写故障知识库。
+| category | 含义与处置 |
+|------|------|
+| `workspace-hygiene` | 目标仓里出现了新增的调研产物。删除或移到 scratch 目录，**不要回退候选文件** |
+| `candidate-scope` | 候选改动了本任务不拥有的路径。收窄改动范围 |
+| `config-parse` | Goss/YAML 在任何断言执行前解析失败。修测试配置语法，**不要因此改 Dockerfile** |
+| `lint-error` | Dockerfile linter 拒绝。按规则修，不得禁用规则 |
+| `build-error` | 镜像未构建成功，运行时断言从未执行 |
+| `runtime-error` | 镜像构建成功但行为与测试不符。先判断错的是镜像还是断言 |
+| `infra` | 执行环境故障，不得修改任何文件 |
+| `unclassified` | Harness 无法分类。返回 `insufficient_evidence`，不要猜 |
 
 ### 2. 日志扫描
 
-找出最早出现的错误信息（根因通常在第一个 error，不是最后一个）。
-
-### 3. 错误分类
-
-| 类型 | 描述 |
-|------|------|
-| `build-error` | 编译/构建失败 |
-| `test-failure` | 测试用例失败 |
-| `lint-error` | 静态分析检查失败 |
-| `dependency-error` | 依赖安装或版本冲突 |
-| `runtime-error` | 运行时崩溃 |
-| `timeout` | 超时 |
-| `infra-error` | CI 基础设施问题（不得修改代码） |
+在分类给出的范围内，找出最早出现的错误信息（根因通常在第一个 error，不是最后
+一个）；`stdout_head` 就是为此保留的。
 
 ## 修复原则
 
@@ -83,14 +92,15 @@
 
 默认只向 stdout 返回一个 JSON 对象；只有任务契约明确允许时才在指定位置写入 `ai-result.json`：
 
+`error_type` 使用上表的 category 名称，不要另造名字。
+
 ```json
 {
   "success": true,
   "status": "fixed|insufficient_evidence|unfixable",
   "diagnosis": {
-    "error_type": "build-error|test-failure|...",
+    "error_type": "workspace-hygiene|candidate-scope|config-parse|lint-error|build-error|runtime-error|infra",
     "root_cause": "一句话描述",
-    "pattern_match": "已知模式名 或 new_pattern",
     "confidence": 0.0
   },
   "changes": [

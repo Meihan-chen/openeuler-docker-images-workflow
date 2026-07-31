@@ -112,3 +112,30 @@ def test_fixer_prompt_synchronizes_observable_runtime_contract_consumers():
     assert "dependent candidate files" in fixer
     assert "re-read" in fixer
     assert "must not weaken" in fixer
+
+
+def test_fixer_prompt_documents_the_payload_the_harness_actually_sends():
+    """The declared inputs described a payload that never existed.
+
+    build_logs, test_output, fix_branch and knowledge_base were never sent, and
+    the prompt's own taxonomy used names the classifier does not produce, so
+    the Agent was reading a schema for a different harness.
+    """
+    from scripts.lib.failure_classification import _GUIDANCE
+
+    fixer = (AGENTS_DIR / "code-fixer.md").read_text()
+
+    for absent in ("build_logs", "test_output", "fix_branch", "knowledge_base"):
+        assert absent not in fixer
+    for field in (
+        "classification",
+        "repair_round",
+        "architectures",
+        "failed_stage",
+        "failure_details",
+        "container_evidence",
+        "stdout_head",
+    ):
+        assert field in fixer
+    for category in _GUIDANCE:
+        assert category in fixer
