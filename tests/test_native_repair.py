@@ -590,3 +590,66 @@ def test_a_round_decision_needs_both_architectures(tmp_path):
 
     with pytest.raises(NativeRepairError, match="aarch64"):
         _decide(tmp_path, {"x86_64": _report("x86_64")})
+
+
+def test_fixer_receives_the_deterministic_classification_of_the_failure(
+    tmp_path,
+):
+    """Run 30567356119 handed the Fixer 496 scope errors for one stray tarball.
+
+    The obvious repair for "change outside task scope" is to revert candidate
+    files, which is the opposite of the correct action, so the category and its
+    guidance have to travel with the evidence.
+    """
+    from scripts.lib.native_repair import validate_native_with_repairs
+
+    workspace = tmp_path / "target"
+    evidence = tmp_path / "evidence"
+    workspace.mkdir()
+    validator = NativeValidator(failures=0)
+    fixer = Fixer()
+    gates = iter(
+        (
+            {
+                "status": "failed",
+                "errors": [
+                    "change outside task scope or wrong status: A "
+                    "kvrocks-2.16.0/CMakeLists.txt",
+                    "change outside task scope or wrong status: A "
+                    "kvrocks-2.16.0/src/cli/main.cc",
+                ],
+            },
+            {"status": "passed"},
+        )
+    )
+
+    validate_native_with_repairs(
+        workspace=workspace,
+        task=_task(),
+        base_sha="1" * 40,
+        architecture="x86_64",
+        run_id="123456",
+        dgoss=tmp_path / "dgoss",
+        goss=tmp_path / "goss",
+        report_path=evidence / "x86_64.json",
+        junit_path=evidence / "x86_64.junit.xml",
+        repair_report_dir=evidence / "agents",
+        executable=tmp_path / "opencode",
+        api_key="deepseek-secret",
+        native_validator=validator,
+        agent_runner=fixer,
+        target_validator=lambda **_: next(gates),
+    )
+
+    prompt = fixer.calls[0]["prompt"]
+    assert "workspace-hygiene" in prompt
+    assert "do not revert candidate files" in prompt
+    report = json.loads(
+        (
+            evidence / "agents" / "fixer-native-x86_64-round1.json"
+        ).read_text()
+    )
+    assert (
+        report["_input_review"]["classification"]["category"]
+        == "workspace-hygiene"
+    )

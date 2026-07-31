@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Callable, Mapping
 
 from scripts.lib.agent_runtime import AgentResult, run_agent
+from scripts.lib.failure_classification import classify_failure
 from scripts.lib.generation_pipeline import build_role_prompt
 from scripts.lib.native_validation import (
     NativeValidationError,
@@ -114,6 +115,29 @@ def _passed(report: Mapping[str, object]) -> bool:
     return report.get("status") == "passed"
 
 
+def _classified(
+    review: Mapping[str, object],
+    *,
+    task: TaskSpec,
+    report: Mapping[str, object] | None = None,
+    gate: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    """Attach what the harness already knows about the failure to the review.
+
+    Without it the Fixer has to infer the repair from prose, which is how one
+    stray tarball became 496 "change outside task scope" errors whose obvious
+    reading pointed at the candidate instead of at the tarball.
+    """
+    return {
+        **review,
+        "classification": classify_failure(
+            report=report,
+            gate=gate,
+            allowed_roots=(task.domain,),
+        ),
+    }
+
+
 def decide_round(
     *,
     workspace: Path,
@@ -184,16 +208,24 @@ def decide_round(
         # Converging needs no model, so the key is only required once a repair
         # is actually about to run.
         raise NativeRepairError("DEEPSEEK_API_KEY is required to repair")
-    review: dict[str, object] = {
-        "kind": "native_validation_failure",
-        "repair_round": round_number,
-        # One Fixer sees both architectures, so a fix for one cannot silently
-        # regress the other.
-        "architectures": {
-            name: _redact(dict(reports[name]), api_key)
-            for name in _ARCHITECTURES
+    failed_first = next(
+        (reports[name] for name in _ARCHITECTURES if not _passed(reports[name])),
+        None,
+    )
+    review: dict[str, object] = _classified(
+        {
+            "kind": "native_validation_failure",
+            "repair_round": round_number,
+            # One Fixer sees both architectures, so a fix for one cannot
+            # silently regress the other.
+            "architectures": {
+                name: _redact(dict(reports[name]), api_key)
+                for name in _ARCHITECTURES
+            },
         },
-    }
+        task=task,
+        report=failed_first,
+    )
     for attempt in range(1, _GATE_REPAIR_ATTEMPTS + 1):
         log(stage, f"START fixer attempt={attempt}")
         fixed = agent_runner(
@@ -238,7 +270,7 @@ def decide_round(
                 validated_patch_sha256="",
             )
         log(stage, f"NEEDS_FIX target_contract attempt={attempt}")
-        review = {**review, "gate": gate}
+        review = _classified({**review, "gate": gate}, task=task, gate=gate)
 
     raise NativeRepairError(
         f"repaired candidate still fails the target contract in round "
@@ -294,11 +326,15 @@ def validate_native_with_repairs(
     )
     pending_review: Mapping[str, object] | None = None
     if initial_gate.get("status") != "passed":
-        pending_review = {
-            "kind": "deterministic_target_contract",
-            "architecture": architecture,
-            "gate": initial_gate,
-        }
+        pending_review = _classified(
+            {
+                "kind": "deterministic_target_contract",
+                "architecture": architecture,
+                "gate": initial_gate,
+            },
+            task=task,
+            gate=initial_gate,
+        )
     native_failure: object = None
     while True:
         if pending_review is None:
@@ -318,11 +354,19 @@ def validate_native_with_repairs(
                     _load_failure_report(report_path, error),
                     api_key,
                 )
-                pending_review = {
-                    "kind": "native_validation_failure",
-                    "architecture": architecture,
-                    "report": native_failure,
-                }
+                pending_review = _classified(
+                    {
+                        "kind": "native_validation_failure",
+                        "architecture": architecture,
+                        "report": native_failure,
+                    },
+                    task=task,
+                    report=(
+                        native_failure
+                        if isinstance(native_failure, Mapping)
+                        else None
+                    ),
+                )
             else:
                 if report.get("status") != "passed":
                     raise NativeRepairError(
@@ -404,12 +448,16 @@ def validate_native_with_repairs(
                     f"native:{architecture}",
                     f"NEEDS_FIX target_contract round={repair_attempts}",
                 )
-                pending_review = {
-                    "kind": "deterministic_target_contract",
-                    "architecture": architecture,
-                    "native_failure": native_failure,
-                    "gate": gate,
-                }
+                pending_review = _classified(
+                    {
+                        "kind": "deterministic_target_contract",
+                        "architecture": architecture,
+                        "native_failure": native_failure,
+                        "gate": gate,
+                    },
+                    task=task,
+                    gate=gate,
+                )
                 continue
             log(
                 f"native:{architecture}",

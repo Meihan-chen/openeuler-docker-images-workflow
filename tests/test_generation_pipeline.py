@@ -1152,6 +1152,10 @@ def test_phase1_prompts_pin_task_paths_without_injecting_app_implementation():
         assert fragment not in prompt
     assert "Do not install or upgrade host tools or packages" in prompt
     assert "Do not run Docker builds or invoke linters" in prompt
+    # Run 30567356119 unpacked an upstream tarball into the target repo, so
+    # every role must be told where research output belongs instead.
+    assert ".oe-scratch" in prompt
+    assert "downloads, archives and temporary files" in prompt
     assert "Your final response MUST be exactly one JSON object" in prompt
     assert "documented `success` and `files_created` keys" in prompt
     assert "tool output is not the final response" in prompt
@@ -1263,3 +1267,71 @@ def test_fixer_prompt_whitelists_generated_candidate_files(tmp_path):
     assert "Database/kvrocks/2.16.0/24.03-lts-sp4/test.sh" not in prompt
     assert "Database/kvrocks/tests/goss.yaml" in prompt
     assert "Database/kvrocks/results/results.json" not in prompt
+
+
+def test_generation_tells_the_creator_a_stray_tarball_is_not_a_candidate_revert(
+    tmp_path,
+):
+    """Run 30567356119 failed here, not in native repair.
+
+    The Creator unpacked an upstream tarball into the target repo and the gate
+    answered with 496 "change outside task scope" errors, whose obvious repair
+    is to revert the candidate rather than remove the tarball.
+    """
+    from scripts.lib.generation_pipeline import run_generation_pipeline
+
+    workspace = tmp_path / "target"
+    reports = tmp_path / "evidence"
+    workspace.mkdir()
+    created = {
+        "success": True,
+        "files_created": ["Database/kvrocks/meta.yml"],
+    }
+    agent = StubAgent(
+        {
+            "image_creator": [created, created],
+            "image_qa": [_approved_image()],
+            "testcase_creator": [
+                {
+                    "success": True,
+                    "files_created": ["Database/kvrocks/tests/goss.yaml"],
+                }
+            ],
+            "testcase_qa": [_approved_tests()],
+        }
+    )
+    image_results = iter(
+        (
+            {
+                "status": "failed",
+                "errors": [
+                    "change outside task scope or wrong status: A "
+                    "kvrocks-2.16.0/CMakeLists.txt",
+                    "change outside task scope or wrong status: A "
+                    "kvrocks-2.16.0/src/cli/main.cc",
+                ],
+            },
+            {"status": "passed"},
+        )
+    )
+
+    def validator(*, phase, **_):
+        if phase == "image":
+            return next(image_results)
+        return {"status": "passed"}
+
+    run_generation_pipeline(
+        workspace=workspace,
+        report_dir=reports,
+        task=_task(),
+        base_sha="1" * 40,
+        executable=tmp_path / "opencode",
+        api_key="deepseek-secret",
+        agent_runner=agent,
+        target_validator=validator,
+    )
+
+    repair_prompt = agent.calls[1]["prompt"]
+    assert "workspace-hygiene" in repair_prompt
+    assert "do not revert candidate files" in repair_prompt
+    assert "kvrocks-2.16.0" in repair_prompt

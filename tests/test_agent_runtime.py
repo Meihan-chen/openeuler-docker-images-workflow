@@ -457,3 +457,162 @@ def test_shared_legacy_adversarial_entrypoint_records_disagreement_and_continues
     run._run_adversarial_pair("image")
 
     assert responses == []
+
+
+def _git_workspace(tmp_path):
+    workspace = tmp_path / "target"
+    workspace.mkdir()
+    subprocess.run(["git", "init", "-q", str(workspace)], check=True)
+    return workspace
+
+
+def test_agent_gets_a_scratch_dir_the_candidate_gate_cannot_see(tmp_path):
+    """The target repo used to be the Agent's only writable place.
+
+    Run 30567356119 unpacked an upstream tarball there and the gate reported
+    496 out-of-scope files, so give research output somewhere legitimate.
+    """
+    from scripts.lib.agent_runtime import run_agent
+
+    executable = _executable(tmp_path)
+    workspace = _git_workspace(tmp_path)
+    payload = json.dumps({"success": True, "files_created": []})
+    runner = RecordingRunner(
+        _completed(
+            stdout=json.dumps({"type": "text", "part": {"text": payload}})
+        )
+    )
+
+    run_agent(
+        executable=executable,
+        role="image_creator",
+        prompt="Create the image.",
+        workspace=workspace,
+        api_key="deepseek-secret",
+        required_keys=("success", "files_created"),
+        runner=runner,
+    )
+
+    scratch = runner.calls[0]["env"]["OE_AGENT_SCRATCH"]
+    assert scratch.startswith(str(workspace))
+    (workspace / scratch[len(str(workspace)) + 1 :] / "upstream.tar").write_text(
+        "junk"
+    )
+    status = subprocess.run(
+        ["git", "-C", str(workspace), "status", "--porcelain"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert status.stdout == ""
+
+
+def test_scratch_dir_survives_a_workspace_without_git(tmp_path):
+    """Smoke and demo paths hand over plain directories."""
+    from scripts.lib.agent_runtime import run_agent
+
+    executable = _executable(tmp_path)
+    workspace = tmp_path / "plain"
+    workspace.mkdir()
+    payload = json.dumps({"success": True, "files_created": []})
+    runner = RecordingRunner(
+        _completed(
+            stdout=json.dumps({"type": "text", "part": {"text": payload}})
+        )
+    )
+
+    run_agent(
+        executable=executable,
+        role="image_creator",
+        prompt="Create the image.",
+        workspace=workspace,
+        api_key="deepseek-secret",
+        required_keys=("success", "files_created"),
+        runner=runner,
+    )
+
+    from pathlib import Path
+
+    assert Path(runner.calls[0]["env"]["OE_AGENT_SCRATCH"]).is_dir()
+
+
+class SequenceRunner:
+    def __init__(self, results):
+        self.results = list(results)
+        self.calls = []
+
+    def __call__(self, command, cwd, env, timeout):
+        self.calls.append({"command": list(command), "timeout": timeout})
+        return self.results.pop(0)
+
+
+def test_a_silent_timeout_is_retried_instead_of_failing_the_round(tmp_path):
+    """Run 30597380057: image QA produced messages=0 actions=0 for 180s.
+
+    Nothing was attempted, so this is the provider hanging rather than the
+    Agent overrunning its boundary, and failing the job made the run repay a
+    436s image_creator that had already succeeded.
+    """
+    from scripts.lib.agent_runtime import run_agent
+
+    executable = _executable(tmp_path)
+    workspace = tmp_path / "target"
+    workspace.mkdir()
+    payload = {"status": "approved", "issues": [], "summary": "fine"}
+    runner = SequenceRunner(
+        [
+            _completed(returncode=124, stdout=""),
+            _completed(
+                stdout=json.dumps(
+                    {"type": "text", "part": {"text": json.dumps(payload)}}
+                )
+            ),
+        ]
+    )
+
+    result = run_agent(
+        executable=executable,
+        role="image_qa",
+        prompt="Review the image.",
+        workspace=workspace,
+        api_key="deepseek-secret",
+        required_keys=("status", "issues", "summary"),
+        runner=runner,
+        timeout=180,
+    )
+
+    assert result.payload == payload
+    assert len(runner.calls) == 2
+
+
+def test_a_timeout_after_real_activity_is_not_retried(tmp_path):
+    """A stalled Agent that did work is a boundary problem, not a hang.
+
+    Retrying it would pay the same cost again for the same reason.
+    """
+    from scripts.lib.agent_runtime import AgentRuntimeError, run_agent
+
+    executable = _executable(tmp_path)
+    workspace = tmp_path / "target"
+    workspace.mkdir()
+    active = json.dumps(
+        {
+            "type": "tool_use",
+            "part": {"tool": "bash", "state": {"status": "completed"}},
+        }
+    )
+    runner = SequenceRunner([_completed(returncode=124, stdout=active)])
+
+    with pytest.raises(AgentRuntimeError, match="timed out"):
+        run_agent(
+            executable=executable,
+            role="image_qa",
+            prompt="Review the image.",
+            workspace=workspace,
+            api_key="deepseek-secret",
+            required_keys=("status", "issues", "summary"),
+            runner=runner,
+            timeout=180,
+        )
+
+    assert len(runner.calls) == 1

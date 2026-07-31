@@ -11,7 +11,13 @@ from typing import Callable, Mapping
 
 import yaml
 
-from scripts.lib.agent_runtime import AgentResult, AgentRuntimeError, run_agent
+from scripts.lib.agent_runtime import (
+    SCRATCH_DIR,
+    AgentResult,
+    AgentRuntimeError,
+    run_agent,
+)
+from scripts.lib.failure_classification import classify_failure
 from scripts.lib.progress import log
 from scripts.lib.task_spec import TaskSpec
 from scripts.lib.target_contract import TargetContractError, validate_generated_target
@@ -234,6 +240,9 @@ def build_role_prompt(
             "apt, dnf, yum, pip, or similar commands.",
             "- Do not run Docker builds or invoke linters; the harness runs "
             "those validations after your response.",
+            f"- Put all downloads, archives and temporary files under "
+            f"`{SCRATCH_DIR}/` (also in `$OE_AGENT_SCRATCH`). Never unpack or "
+            "write scratch content anywhere else in this repository.",
         )
     )
     contract_lines.append(
@@ -710,8 +719,14 @@ def run_generation_pipeline(
         report_name: str,
         findings: Mapping[str, object],
     ) -> None:
+        gate = findings.get("gate")
+        classification = classify_failure(
+            gate=gate if isinstance(gate, Mapping) else None,
+            allowed_roots=(task.domain,),
+        )
         validation_report = {
             "status": "needs_fix",
+            "classification": classification,
             "issues": [
                 {
                     "severity": "blocker",
@@ -721,7 +736,8 @@ def run_generation_pipeline(
             ],
             "summary": (
                 "Fix only the deterministic validation findings, "
-                "then return the required Creator result."
+                "then return the required Creator result. "
+                + str(classification["guidance"])
             ),
         }
         log("repair", f"START {creator_role} deterministic_validation")

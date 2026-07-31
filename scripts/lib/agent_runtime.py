@@ -33,6 +33,7 @@ _VISIBLE_ACTION_TOOLS = {
 _WRITE_ROLES = {"image_creator", "testcase_creator", "fixer"}
 _READ_ONLY_ROLES = {"image_qa", "testcase_qa"}
 _ROLES = _WRITE_ROLES | _READ_ONLY_ROLES
+SCRATCH_DIR = ".oe-scratch"
 
 AgentRunner = Callable[
     [Sequence[str], Path, Mapping[str, str], int],
@@ -217,6 +218,29 @@ def _default_runner(
     return result
 
 
+def prepare_scratch(workspace: Path) -> Path:
+    """Give the Agent a writable place that never reaches the candidate.
+
+    OpenCode denies external_directory, so the only writable location was the
+    target repo itself. Excluding the scratch path through .git/info/exclude
+    keeps it out of `git add --intent-to-add`, and therefore out of both the
+    deterministic gate and the candidate patch, without touching any tracked
+    ignore file in the target repository.
+    """
+    scratch = workspace / SCRATCH_DIR
+    scratch.mkdir(parents=True, exist_ok=True)
+    exclude = workspace / ".git" / "info" / "exclude"
+    if not (workspace / ".git").is_dir():
+        return scratch
+    entry = f"/{SCRATCH_DIR}/"
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    existing = exclude.read_text() if exclude.is_file() else ""
+    if entry not in existing.splitlines():
+        separator = "" if not existing or existing.endswith("\n") else "\n"
+        exclude.write_text(f"{existing}{separator}{entry}\n")
+    return scratch
+
+
 def _scan_json(text: str) -> Iterator[object]:
     decoder = json.JSONDecoder()
     for index, character in enumerate(text):
@@ -227,6 +251,14 @@ def _scan_json(text: str) -> Iterator[object]:
         except json.JSONDecodeError:
             continue
         yield value
+
+
+def _saw_any_event(stdout: str) -> bool:
+    """Whether OpenCode reported doing anything at all."""
+    return any(
+        isinstance(event, dict) and "type" in event
+        for event in _scan_json(stdout)
+    )
 
 
 def _parse_contract(
@@ -348,6 +380,7 @@ def run_agent(
     env = {
         "DEEPSEEK_API_KEY": api_key,
         "OE_AGENT_ROLE": role,
+        "OE_AGENT_SCRATCH": str(prepare_scratch(workspace)),
         "OPENCODE_CONFIG_CONTENT": _permission_config(role),
     }
     started = time.monotonic()
@@ -357,6 +390,16 @@ def run_agent(
         f"prompt_chars={len(prompt)} workspace={workspace}",
     )
     result = runner(command, workspace, env, timeout)
+    if result.returncode == 124 and not _saw_any_event(str(result.stdout or "")):
+        # Nothing was ever attempted, so the provider hung rather than the
+        # Agent overrunning its boundary. Failing here made the run repay the
+        # Creator calls that had already succeeded.
+        log(
+            f"agent:{role}",
+            f"RETRY reason=no_output elapsed={time.monotonic() - started:.1f}s",
+        )
+        started = time.monotonic()
+        result = runner(command, workspace, env, timeout)
     elapsed = time.monotonic() - started
     if result.returncode != 0:
         if result.returncode == 124:
