@@ -34,6 +34,8 @@ _WRITE_ROLES = {"image_creator", "testcase_creator", "fixer"}
 _READ_ONLY_ROLES = {"image_qa", "testcase_qa"}
 _ROLES = _WRITE_ROLES | _READ_ONLY_ROLES
 SCRATCH_DIR = ".oe-scratch"
+# The two event types emit() counts toward the ACTIVITY summary.
+_ACTIVITY_EVENTS = {"text", "tool_use"}
 
 AgentRunner = Callable[
     [Sequence[str], Path, Mapping[str, str], int],
@@ -253,10 +255,17 @@ def _scan_json(text: str) -> Iterator[object]:
         yield value
 
 
-def _saw_any_event(stdout: str) -> bool:
-    """Whether OpenCode reported doing anything at all."""
+def _saw_any_activity(stdout: str) -> bool:
+    """Whether the Agent did anything, using the same events ACTIVITY counts.
+
+    Lifecycle events such as step_start say the process started, not that the
+    model responded, so counting them would let a provider that hangs right
+    after one suppress the retry. Restricting this to text and tool calls also
+    makes retrying a write role safe: without a tool call there is no
+    half-finished edit in the workspace to repeat.
+    """
     return any(
-        isinstance(event, dict) and "type" in event
+        isinstance(event, dict) and event.get("type") in _ACTIVITY_EVENTS
         for event in _scan_json(stdout)
     )
 
@@ -390,7 +399,9 @@ def run_agent(
         f"prompt_chars={len(prompt)} workspace={workspace}",
     )
     result = runner(command, workspace, env, timeout)
-    if result.returncode == 124 and not _saw_any_event(str(result.stdout or "")):
+    if result.returncode == 124 and not _saw_any_activity(
+        str(result.stdout or "")
+    ):
         # Nothing was ever attempted, so the provider hung rather than the
         # Agent overrunning its boundary. Failing here made the run repay the
         # Creator calls that had already succeeded.

@@ -616,3 +616,48 @@ def test_a_timeout_after_real_activity_is_not_retried(tmp_path):
         )
 
     assert len(runner.calls) == 1
+
+
+def test_lifecycle_events_alone_do_not_count_as_agent_activity(tmp_path):
+    """Run 30597380057 reported messages=0 actions=0 tools=none.
+
+    Only text and tool_use feed that counter, so treating any event with a type
+    as activity would let a provider that hung right after step_start suppress
+    the retry this exists for. It also keeps the retry safe for write roles:
+    with no tool call there is no half-finished edit to repeat.
+    """
+    from scripts.lib.agent_runtime import run_agent
+
+    executable = _executable(tmp_path)
+    workspace = tmp_path / "target"
+    workspace.mkdir()
+    payload = {"success": True, "changes": []}
+    runner = SequenceRunner(
+        [
+            _completed(
+                returncode=124,
+                stdout=json.dumps(
+                    {"type": "step_start", "part": {"id": "step-1"}}
+                ),
+            ),
+            _completed(
+                stdout=json.dumps(
+                    {"type": "text", "part": {"text": json.dumps(payload)}}
+                )
+            ),
+        ]
+    )
+
+    result = run_agent(
+        executable=executable,
+        role="fixer",
+        prompt="Repair the candidate.",
+        workspace=workspace,
+        api_key="deepseek-secret",
+        required_keys=("success", "changes"),
+        runner=runner,
+        timeout=180,
+    )
+
+    assert result.payload == payload
+    assert len(runner.calls) == 2
