@@ -20,7 +20,20 @@ from scripts.lib.task_spec import TaskSpec
 
 
 class NativeValidationError(RuntimeError):
-    """Raised when native image validation fails."""
+    """Raised when native image validation fails.
+
+    Carries the structured failure so the caller can hand the Fixer a command,
+    an exit code and both ends of the log instead of one opaque string.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        details: Mapping[str, object] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.details: dict[str, object] = dict(details or {})
 
 
 CommandRunner = Callable[
@@ -33,6 +46,18 @@ _PLATFORMS = {
     "aarch64": "linux/arm64",
 }
 _RUN_ID_RE = re.compile(r"^[1-9][0-9]*$")
+# The Fixer prompt asks for the earliest error because that is usually the root
+# cause, so keeping only the tail hid exactly what it was told to look for.
+_LOG_HEAD_CHARS = 2000
+_LOG_TAIL_CHARS = 4000
+_CONTAINER_LOG_LINES = "200"
+_E2E_CHECKS = (
+    "native_build",
+    "dgoss",
+    "shared_tests",
+    "restart_persistence",
+)
+_SMOKE_CHECKS = ("native_build", "dgoss")
 
 
 def _default_runner(
@@ -51,6 +76,23 @@ def _default_runner(
     )
 
 
+def _merged_output(result: subprocess.CompletedProcess) -> str:
+    # run_streaming already folds stderr into stdout; injected runners may
+    # still populate them separately, so read both rather than guessing.
+    return "\n".join(
+        part.strip()
+        for part in (str(result.stdout or ""), str(result.stderr or ""))
+        if part.strip()
+    )
+
+
+def _clip(text: str) -> tuple[str, str]:
+    """Both ends of a failure log: the earliest error and the final error."""
+    if len(text) <= _LOG_HEAD_CHARS + _LOG_TAIL_CHARS:
+        return text, ""
+    return text[:_LOG_HEAD_CHARS], text[-_LOG_TAIL_CHARS:]
+
+
 def _run(
     runner: CommandRunner,
     command: Sequence[str],
@@ -62,9 +104,64 @@ def _run(
 ) -> subprocess.CompletedProcess:
     result = runner(command, cwd, env or {}, timeout)
     if check and result.returncode != 0:
-        detail = str(result.stderr or result.stdout or "command failed").strip()
-        raise NativeValidationError(detail[-4000:])
+        output = _merged_output(result) or "command failed"
+        head, tail = _clip(output)
+        omitted = len(output) - len(head) - len(tail)
+        message = head if not tail else f"{head}\n...[{omitted} chars omitted]...\n{tail}"
+        raise NativeValidationError(
+            message,
+            details={
+                "command": list(command),
+                "returncode": result.returncode,
+                "stdout_head": head,
+                "stdout_tail": tail,
+            },
+        )
     return result
+
+
+def _container_evidence(
+    runner: CommandRunner,
+    *,
+    workspace: Path,
+    containers: Sequence[str],
+) -> dict[str, object]:
+    """Read what the containers themselves reported, before cleanup removes them.
+
+    When an image builds but the application dies on startup, the container log
+    is the only place the reason exists; the harness used to force-remove the
+    container before anything read it.
+    """
+    evidence: dict[str, object] = {}
+    for name in containers:
+        inspected = _run(
+            runner,
+            [
+                "docker",
+                "inspect",
+                "--format",
+                "{{.State.Status}} {{.State.ExitCode}} {{.State.Error}}",
+                name,
+            ],
+            cwd=workspace,
+            timeout=60,
+            check=False,
+        )
+        if inspected.returncode != 0:
+            continue
+        logs = _run(
+            runner,
+            ["docker", "logs", "--tail", _CONTAINER_LOG_LINES, name],
+            cwd=workspace,
+            timeout=60,
+            check=False,
+        )
+        head, tail = _clip(_merged_output(logs))
+        evidence[name] = {
+            "state": _merged_output(inspected),
+            "logs": head if not tail else f"{head}\n...\n{tail}",
+        }
+    return evidence
 
 
 def _write_evidence(
@@ -362,10 +459,17 @@ def validate_native_image(
     start = time.monotonic()
     image_id = ""
     failure: str | None = None
+    failure_details: dict[str, object] = {}
+    container_evidence: dict[str, object] = {}
+    # None means the check was never reached. Sharing one boolean across all
+    # four made a dgoss failure look like a build failure to the Fixer.
+    checks: dict[str, bool | None] = {name: None for name in _E2E_CHECKS}
+    current_check = ""
     stage = f"native:{architecture}"
     log(stage, "START validation")
 
     try:
+        current_check = "native_build"
         log(stage, "START build")
         _ensure_builder(runner, builder, cwd=workspace)
         _run(
@@ -390,7 +494,9 @@ def validate_native_image(
             cwd=workspace,
             timeout=3600,
         )
+        checks["native_build"] = True
         log(stage, "PASS build")
+        current_check = "dgoss"
         log(stage, "START dgoss")
         _run(
             runner,
@@ -413,8 +519,10 @@ def validate_native_image(
             },
             timeout=300,
         )
+        checks["dgoss"] = True
         log(stage, "PASS dgoss")
-        log(stage, "START persistence")
+        current_check = "shared_tests"
+        log(stage, "START shared tests")
         _run(
             runner,
             ["docker", "volume", "create", volume],
@@ -457,6 +565,10 @@ def validate_native_image(
             cwd=workspace,
             timeout=300,
         )
+        checks["shared_tests"] = True
+        log(stage, "PASS shared tests")
+        current_check = "restart_persistence"
+        log(stage, "START persistence")
         _run(
             runner,
             [
@@ -518,9 +630,19 @@ def validate_native_image(
             cwd=workspace,
         )
         image_id = str(inspected.stdout or "").strip()
+        checks["restart_persistence"] = True
         log(stage, "PASS persistence")
     except NativeValidationError as error:
         failure = str(error)
+        failure_details = dict(error.details)
+        if current_check:
+            checks[current_check] = False
+        # Must run before the finally block force-removes the containers.
+        container_evidence = _container_evidence(
+            runner,
+            workspace=workspace,
+            containers=(dgoss_container, container),
+        )
     finally:
         # The builder outlives this call on purpose: repair rounds re-enter
         # validation and must keep the cached builder stage. It is released
@@ -549,15 +671,14 @@ def validate_native_image(
         "validated_patch_sha256": validated_patch_sha256,
         "duration_seconds": round(time.monotonic() - start, 3),
         "environment": _environment_evidence(task, architecture),
-        "checks": {
-            "native_build": failure is None,
-            "dgoss": failure is None,
-            "shared_tests": failure is None,
-            "restart_persistence": failure is None,
-        },
+        "checks": checks,
     }
     if failure:
         report["failure"] = failure
+        report["failed_stage"] = current_check
+        report["failure_details"] = failure_details
+        if container_evidence:
+            report["container_evidence"] = container_evidence
     _write_evidence(
         report_path=Path(report_path),
         junit_path=Path(junit_path),
@@ -627,8 +748,12 @@ def validate_native_smoke(
     start = time.monotonic()
     image_id = ""
     failure: str | None = None
+    failure_details: dict[str, object] = {}
+    checks: dict[str, bool | None] = {name: None for name in _SMOKE_CHECKS}
+    current_check = ""
     log(stage, "START native plumbing")
     try:
+        current_check = "native_build"
         _ensure_builder(runner, builder, cwd=workspace)
         _run(
             runner,
@@ -650,6 +775,8 @@ def validate_native_smoke(
             cwd=workspace,
             timeout=1800,
         )
+        checks["native_build"] = True
+        current_check = "dgoss"
         _run(
             runner,
             [str(dgoss), "run", "--name", container, image],
@@ -667,8 +794,12 @@ def validate_native_smoke(
             cwd=workspace,
         )
         image_id = str(inspected.stdout or "").strip()
+        checks["dgoss"] = True
     except NativeValidationError as error:
         failure = str(error)
+        failure_details = dict(error.details)
+        if current_check:
+            checks[current_check] = False
     finally:
         # Released once per run by release_run_builders, like the e2e builder.
         for command in (
@@ -692,13 +823,12 @@ def validate_native_smoke(
         "validated_patch_sha256": validated_patch_sha256,
         "duration_seconds": round(time.monotonic() - start, 3),
         "environment": _environment_evidence(task, architecture),
-        "checks": {
-            "native_build": failure is None,
-            "dgoss": failure is None,
-        },
+        "checks": checks,
     }
     if failure:
         report["failure"] = failure
+        report["failed_stage"] = current_check
+        report["failure_details"] = failure_details
     _write_evidence(
         report_path=report_path,
         junit_path=junit_path,

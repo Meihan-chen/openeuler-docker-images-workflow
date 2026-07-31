@@ -11,9 +11,15 @@ class DockerRunner:
         *,
         fail_build=False,
         failure_text="source compilation failed",
+        fail_dgoss=False,
+        container_logs="",
+        container_state="exited 1 kvrocks refused to start",
     ):
         self.fail_build = fail_build
         self.failure_text = failure_text
+        self.fail_dgoss = fail_dgoss
+        self.container_logs = container_logs
+        self.container_state = container_state
         self.builders = set()
         self.calls = []
 
@@ -27,6 +33,22 @@ class DockerRunner:
                 "timeout": timeout,
             }
         )
+        if command[:2] == ["docker", "logs"]:
+            return subprocess.CompletedProcess(
+                command, 0, self.container_logs, ""
+            )
+        if command[:2] == ["docker", "inspect"]:
+            return subprocess.CompletedProcess(
+                command, 0, f"{self.container_state}\n", ""
+            )
+        if (
+            self.fail_dgoss
+            and command[0] != "docker"
+            and command[1:2] == ["run"]
+        ):
+            return subprocess.CompletedProcess(
+                command, 1, "", self.failure_text
+            )
         if command[:3] == ["docker", "buildx", "inspect"]:
             present = command[3] in self.builders
             return subprocess.CompletedProcess(
@@ -247,7 +269,13 @@ def test_native_validation_failure_still_cleans_exact_resources(tmp_path):
     assert "docker buildx rm" not in flattened
 
 
-def test_native_validation_failure_keeps_root_cause_at_end_of_long_log(tmp_path):
+def test_native_validation_failure_keeps_both_ends_of_a_long_log(tmp_path):
+    """The Fixer prompt asks for the earliest error, so a tail is not enough.
+
+    Keeping only the tail hid exactly what the Fixer is told to look for, and
+    a bare string hid the exit code that separates a missing command from a
+    real compile failure.
+    """
     from scripts.lib.native_validation import (
         NativeValidationError,
         validate_native_image,
@@ -256,10 +284,13 @@ def test_native_validation_failure_keeps_root_cause_at_end_of_long_log(tmp_path)
     workspace = _workspace(tmp_path)
     dgoss, goss = _tools(tmp_path)
     report_path = tmp_path / "reports" / "x86_64.json"
+    first_error = "CMake Error: could not find libstdc++.a"
     root_cause = "groupadd: GID '999' already exists"
     runner = DockerRunner(
         fail_build=True,
-        failure_text=("package progress\n" * 500) + root_cause,
+        failure_text=(
+            first_error + "\n" + ("package progress\n" * 500) + root_cause
+        ),
     )
 
     with pytest.raises(NativeValidationError, match="GID '999'"):
@@ -276,9 +307,99 @@ def test_native_validation_failure_keeps_root_cause_at_end_of_long_log(tmp_path)
             sleep=lambda _: None,
         )
 
-    failure = json.loads(report_path.read_text())["failure"]
+    report = json.loads(report_path.read_text())
+    failure = report["failure"]
+    assert first_error in failure
     assert root_cause in failure
-    assert len(failure) <= 4000
+    details = report["failure_details"]
+    assert first_error in details["stdout_head"]
+    assert root_cause in details["stdout_tail"]
+    assert details["returncode"] == 1
+    assert "docker buildx build" in " ".join(details["command"])
+
+
+def test_native_validation_failure_records_the_stage_that_actually_failed(
+    tmp_path,
+):
+    """Every check sharing one boolean sent the Fixer after the wrong stage."""
+    from scripts.lib.native_validation import (
+        NativeValidationError,
+        validate_native_image,
+    )
+
+    workspace = _workspace(tmp_path)
+    dgoss, goss = _tools(tmp_path)
+    report_path = tmp_path / "reports" / "x86_64.json"
+    runner = DockerRunner(fail_dgoss=True, failure_text="goss: invalid Attribute")
+
+    with pytest.raises(NativeValidationError, match="invalid Attribute"):
+        validate_native_image(
+            workspace=workspace,
+            task=_task(),
+            architecture="x86_64",
+            run_id="123456",
+            dgoss=dgoss,
+            goss=goss,
+            report_path=report_path,
+            junit_path=tmp_path / "reports" / "x86_64.junit.xml",
+            runner=runner,
+            sleep=lambda _: None,
+        )
+
+    report = json.loads(report_path.read_text())
+    assert report["failed_stage"] == "dgoss"
+    assert report["checks"] == {
+        "native_build": True,
+        "dgoss": False,
+        "shared_tests": None,
+        "restart_persistence": None,
+    }
+
+
+def test_native_validation_failure_captures_container_state_before_cleanup(
+    tmp_path,
+):
+    """When the app dies on startup its own log is the only root-cause source."""
+    from scripts.lib.native_validation import (
+        NativeValidationError,
+        validate_native_image,
+    )
+
+    workspace = _workspace(tmp_path)
+    dgoss, goss = _tools(tmp_path)
+    report_path = tmp_path / "reports" / "x86_64.json"
+    runner = DockerRunner(
+        fail_dgoss=True,
+        failure_text="dgoss failed",
+        container_logs="FATAL: cannot bind 0.0.0.0:6666\n",
+    )
+
+    with pytest.raises(NativeValidationError):
+        validate_native_image(
+            workspace=workspace,
+            task=_task(),
+            architecture="x86_64",
+            run_id="123456",
+            dgoss=dgoss,
+            goss=goss,
+            report_path=report_path,
+            junit_path=tmp_path / "reports" / "x86_64.junit.xml",
+            runner=runner,
+            sleep=lambda _: None,
+        )
+
+    evidence = json.loads(report_path.read_text())["container_evidence"]
+    collected = "\n".join(
+        f"{entry['state']}\n{entry['logs']}" for entry in evidence.values()
+    )
+    assert "cannot bind 0.0.0.0:6666" in collected
+    assert "kvrocks refused to start" in collected
+    ordered = [" ".join(call["command"]) for call in runner.calls]
+    logs_at = next(i for i, c in enumerate(ordered) if c.startswith("docker logs"))
+    removed_at = next(
+        i for i, c in enumerate(ordered) if c.startswith("docker rm --force")
+    )
+    assert logs_at < removed_at
 
 
 def test_native_pipeline_smoke_builds_and_runs_dgoss_without_ai(
