@@ -110,3 +110,85 @@ def test_missing_evidence_is_reported_rather_than_guessed():
     from scripts.lib.failure_classification import classify_failure
 
     assert classify_failure()["category"] == "unclassified"
+
+
+def test_a_modified_tracked_file_is_scope_not_research_junk():
+    """`M README.md` must never produce "delete or move README.md".
+
+    Only an added, previously unknown path can be research output; a modified
+    or deleted tracked file is the candidate reaching outside its own scope.
+    """
+    from scripts.lib.failure_classification import classify_failure
+
+    gate = {
+        "status": "failed",
+        "errors": ["change outside task scope or wrong status: M README.md"],
+    }
+
+    result = classify_failure(gate=gate, allowed_roots=("Database",))
+
+    assert result["category"] == "candidate-scope"
+    assert "stray_paths" not in result
+
+
+def test_added_junk_beside_a_modified_file_is_still_scope():
+    """One tracked-file violation is enough to rule out a pure cleanup."""
+    from scripts.lib.failure_classification import classify_failure
+
+    gate = {
+        "status": "failed",
+        "errors": [
+            "change outside task scope or wrong status: A kvrocks-2.16.0/CMakeLists.txt",
+            "change outside task scope or wrong status: M README.md",
+        ],
+    }
+
+    assert (
+        classify_failure(gate=gate, allowed_roots=("Database",))["category"]
+        == "candidate-scope"
+    )
+
+
+def test_stray_added_files_at_the_repo_root_are_hygiene():
+    """Run 30597380057 left .baseimg.tar.xz and .filelists.tmp behind."""
+    from scripts.lib.failure_classification import classify_failure
+
+    gate = {
+        "status": "failed",
+        "errors": [
+            "change outside task scope or wrong status: A .baseimg.tar.xz",
+            "change outside task scope or wrong status: A .filelists.tmp",
+        ],
+    }
+
+    result = classify_failure(gate=gate, allowed_roots=("Database",))
+
+    assert result["category"] == "workspace-hygiene"
+    assert result["stray_paths"] == [".baseimg.tar.xz", ".filelists.tmp"]
+
+
+def test_yaml_parse_text_during_a_build_is_a_build_error():
+    """Upstream YAML processed inside a RUN step is not a Goss config fault."""
+    from scripts.lib.failure_classification import classify_failure
+
+    report = {
+        "status": "failed",
+        "failed_stage": "native_build",
+        "failure": "yaml: line 12: mapping values are not allowed",
+        "failure_details": {"returncode": 1},
+    }
+
+    assert classify_failure(report=report)["category"] == "build-error"
+
+
+def test_a_lint_failure_names_the_linter_rather_than_asking_for_more_evidence():
+    """Hadolint findings are always the Creator's to fix."""
+    from scripts.lib.failure_classification import classify_failure
+
+    result = classify_failure(
+        gate={"status": "passed"},
+        lint={"status": "failed", "output": "DL3033 pin yum packages"},
+    )
+
+    assert result["category"] == "lint-error"
+    assert "insufficient evidence" not in result["guidance"].lower()

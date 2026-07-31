@@ -17,10 +17,15 @@ import re
 from typing import Mapping, Sequence
 
 _SCOPE_ERROR_RE = re.compile(
-    r"change outside task scope or wrong status: \S+ (?P<path>\S+)"
+    r"change outside task scope or wrong status: (?P<status>\S+) (?P<path>\S+)"
 )
+# Only a newly added path can be research output. Telling an Agent to delete a
+# modified or deleted tracked file because it looked unfamiliar would destroy
+# real content, so anything but an addition rules hygiene out.
+_ADDED_STATUS = "A"
 # Goss and YAML reject a malformed file before any assertion runs, so these
-# never mean the image misbehaved.
+# never mean the image misbehaved. The same text can appear while a build step
+# processes upstream YAML, which is a build failure, so the stage has to agree.
 _CONFIG_PARSE_MARKERS = (
     "invalid attribute for",
     "error unmarshalling",
@@ -28,6 +33,7 @@ _CONFIG_PARSE_MARKERS = (
     "yaml: unmarshal errors",
     "cannot unmarshal",
 )
+_CONFIG_PARSE_STAGE = "dgoss"
 _TIMEOUT_RETURNCODE = 124
 _RUNTIME_STAGES = ("dgoss", "shared_tests", "restart_persistence")
 
@@ -45,6 +51,10 @@ _GUIDANCE = {
         "A Goss or YAML file failed to parse before any assertion ran, so the "
         "image behaviour is still unknown. Fix the test configuration syntax "
         "and do not change the Dockerfile for this failure."
+    ),
+    "lint-error": (
+        "The Dockerfile linter rejected the candidate. Fix the reported rules "
+        "without disabling them."
     ),
     "build-error": (
         "The image did not build. Fix the build definition; runtime "
@@ -69,12 +79,17 @@ def _stray_roots(
     errors: Sequence[object],
     allowed_roots: Sequence[str],
 ) -> list[str]:
-    """Top-level directories the task does not own that the errors point at."""
+    """Top-level paths that exist only because something wrote research output.
+
+    Every error must be an addition outside the task's own roots. One modified
+    or deleted tracked file, or one error of a different shape, means the
+    candidate itself reached out of scope and nothing here may be deleted.
+    """
     allowed = set(allowed_roots)
     roots: list[str] = []
     for error in errors:
         match = _SCOPE_ERROR_RE.search(str(error))
-        if not match:
+        if not match or match.group("status") != _ADDED_STATUS:
             return []
         root = match.group("path").split("/", 1)[0]
         if root in allowed:
@@ -88,13 +103,15 @@ def classify_failure(
     *,
     report: Mapping[str, object] | None = None,
     gate: Mapping[str, object] | None = None,
+    lint: Mapping[str, object] | None = None,
     allowed_roots: Sequence[str] = (),
 ) -> dict[str, object]:
     """Name the failure category and the action it calls for.
 
     `report` is a native validation report, `gate` a deterministic target
-    contract report. Whichever is present decides; neither means the evidence
-    was too thin to classify, which is itself worth saying out loud.
+    contract report, `lint` a Hadolint report. The first failing one decides;
+    none failing means the evidence was too thin to classify, which is itself
+    worth saying out loud rather than inventing a repair.
     """
     category = "unclassified"
     stray: list[str] = []
@@ -105,6 +122,8 @@ def classify_failure(
         if errors:
             stray = _stray_roots(errors, allowed_roots)
             category = "workspace-hygiene" if stray else "candidate-scope"
+    elif lint is not None and lint.get("status") != "passed":
+        category = "lint-error"
     elif report is not None and report.get("status") != "passed":
         details = report.get("failure_details")
         details = details if isinstance(details, Mapping) else {}
@@ -112,7 +131,9 @@ def classify_failure(
         stage = str(report.get("failed_stage", ""))
         if details.get("returncode") == _TIMEOUT_RETURNCODE:
             category = "infra"
-        elif any(marker in failure for marker in _CONFIG_PARSE_MARKERS):
+        elif stage == _CONFIG_PARSE_STAGE and any(
+            marker in failure for marker in _CONFIG_PARSE_MARKERS
+        ):
             category = "config-parse"
         elif stage == "native_build":
             category = "build-error"

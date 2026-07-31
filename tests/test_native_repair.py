@@ -653,3 +653,93 @@ def test_fixer_receives_the_deterministic_classification_of_the_failure(
         report["_input_review"]["classification"]["category"]
         == "workspace-hygiene"
     )
+
+
+def test_each_architecture_is_classified_before_the_fixer_is_asked(tmp_path):
+    """One Fixer sees both architectures, so one category cannot speak for both.
+
+    A Goss config fault on x86 and a build failure on ARM would otherwise be
+    handed over as "fix the test configuration and do not change the
+    Dockerfile", which is wrong for ARM.
+    """
+    from scripts.lib.native_repair import decide_round
+
+    workspace = tmp_path / "target"
+    workspace.mkdir()
+    fixer = Fixer()
+    reports = {
+        "x86_64": {
+            "status": "failed",
+            "failed_stage": "dgoss",
+            "failure": "invalid Attribute for File:/var/lib/kvrocks: dir",
+            "failure_details": {"returncode": 1},
+        },
+        "aarch64": {
+            "status": "failed",
+            "failed_stage": "native_build",
+            "failure": "libatomic.so.1: cannot open shared object file",
+            "failure_details": {"returncode": 1},
+        },
+    }
+
+    decide_round(
+        workspace=workspace,
+        task=_task(),
+        base_sha="1" * 40,
+        round_number=1,
+        max_rounds=3,
+        reports=reports,
+        report_dir=tmp_path / "evidence",
+        executable=tmp_path / "opencode",
+        api_key="deepseek-secret",
+        agent_runner=fixer,
+        target_validator=lambda **_: {"status": "passed"},
+    )
+
+    prompt = fixer.calls[0]["prompt"]
+    assert "config-parse" in prompt
+    assert "build-error" in prompt
+    report = json.loads(
+        (tmp_path / "evidence" / "fixer-native-dual-round1-attempt1.json").read_text()
+    )
+    per_arch = report["_input_review"]["classification"]
+    assert per_arch["x86_64"]["category"] == "config-parse"
+    assert per_arch["aarch64"]["category"] == "build-error"
+
+
+def test_an_infrastructure_failure_does_not_pay_for_a_fixer_call(tmp_path):
+    """The Fixer is told not to change anything, so asking it buys nothing.
+
+    The round is still consumed: re-validating the same candidate stays bounded
+    by max_rounds, whereas skipping the budget needs a stop condition this
+    harness cannot express yet.
+    """
+    from scripts.lib.native_repair import decide_round
+
+    workspace = tmp_path / "target"
+    workspace.mkdir()
+    fixer = Fixer()
+    timed_out = {
+        "status": "failed",
+        "failed_stage": "native_build",
+        "failure": "timed out",
+        "failure_details": {"returncode": 124},
+    }
+
+    decision = decide_round(
+        workspace=workspace,
+        task=_task(),
+        base_sha="1" * 40,
+        round_number=1,
+        max_rounds=3,
+        reports={"x86_64": timed_out, "aarch64": timed_out},
+        report_dir=tmp_path / "evidence",
+        executable=tmp_path / "opencode",
+        api_key="deepseek-secret",
+        agent_runner=fixer,
+        target_validator=lambda **_: {"status": "passed"},
+    )
+
+    assert fixer.calls == []
+    assert decision.converged is False
+    assert decision.repair_attempts == 0

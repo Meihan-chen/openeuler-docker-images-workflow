@@ -208,24 +208,39 @@ def decide_round(
         # Converging needs no model, so the key is only required once a repair
         # is actually about to run.
         raise NativeRepairError("DEEPSEEK_API_KEY is required to repair")
-    failed_first = next(
-        (reports[name] for name in _ARCHITECTURES if not _passed(reports[name])),
-        None,
-    )
-    review: dict[str, object] = _classified(
-        {
-            "kind": "native_validation_failure",
-            "repair_round": round_number,
-            # One Fixer sees both architectures, so a fix for one cannot
-            # silently regress the other.
-            "architectures": {
-                name: _redact(dict(reports[name]), api_key)
-                for name in _ARCHITECTURES
-            },
+    # One Fixer sees both architectures, so a fix for one cannot silently
+    # regress the other — and for the same reason one category cannot speak
+    # for both. A Goss config fault on x86 next to a build failure on ARM must
+    # not be handed over as "do not change the Dockerfile".
+    per_architecture = {
+        name: classify_failure(
+            report=reports[name],
+            allowed_roots=(task.domain,),
+        )
+        for name in _ARCHITECTURES
+        if not _passed(reports[name])
+    }
+    if all(
+        result["category"] == "infra" for result in per_architecture.values()
+    ):
+        # The Fixer would be told to change nothing, so asking it buys nothing.
+        # The round is still consumed, which keeps the retry bounded.
+        log(stage, "SKIP fixer reason=infra")
+        return RoundDecision(
+            converged=False,
+            round_number=round_number,
+            repair_attempts=0,
+            validated_patch_sha256="",
+        )
+    review: dict[str, object] = {
+        "kind": "native_validation_failure",
+        "repair_round": round_number,
+        "classification": per_architecture,
+        "architectures": {
+            name: _redact(dict(reports[name]), api_key)
+            for name in _ARCHITECTURES
         },
-        task=task,
-        report=failed_first,
-    )
+    }
     for attempt in range(1, _GATE_REPAIR_ATTEMPTS + 1):
         log(stage, f"START fixer attempt={attempt}")
         fixed = agent_runner(

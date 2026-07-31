@@ -720,8 +720,10 @@ def run_generation_pipeline(
         findings: Mapping[str, object],
     ) -> None:
         gate = findings.get("gate")
+        lint = findings.get("lint")
         classification = classify_failure(
             gate=gate if isinstance(gate, Mapping) else None,
+            lint=lint if isinstance(lint, Mapping) else None,
             allowed_roots=(task.domain,),
         )
         validation_report = {

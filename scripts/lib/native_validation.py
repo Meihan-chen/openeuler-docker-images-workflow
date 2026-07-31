@@ -687,7 +687,8 @@ def validate_native_image(
     )
     if failure:
         log(stage, f"FAIL validation: {failure}")
-        raise NativeValidationError(failure)
+        # Keep the structure a direct caller needs; only the report file had it.
+        raise NativeValidationError(failure, details=failure_details)
     log(stage, "PASS validation")
     return report
 
@@ -852,6 +853,6 @@ def validate_native_smoke(
     )
     if failure:
         log(stage, f"FAIL native plumbing: {failure}")
-        raise NativeValidationError(failure)
+        raise NativeValidationError(failure, details=failure_details)
     log(stage, "PASS native plumbing")
     return report
