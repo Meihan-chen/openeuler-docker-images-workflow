@@ -92,6 +92,15 @@ def test_image_prompts_treat_fixed_numeric_identity_as_a_collision_risk():
         assert "upstream or task contract" in prompt
 
 
+def test_image_qa_leaves_unproven_package_resolution_to_native_build():
+    image_qa = " ".join(
+        (AGENTS_DIR / "image-qa.md").read_text().lower().split()
+    )
+
+    assert "concrete evidence in the provided snapshot" in image_qa
+    assert "native build is authoritative" in image_qa
+
+
 def test_testcase_prompts_keep_goss_order_independent_and_tests_in_sync():
     testcase_creator = (AGENTS_DIR / "testcase-creator.md").read_text().lower()
     testcase_qa = (AGENTS_DIR / "testcase-qa.md").read_text().lower()

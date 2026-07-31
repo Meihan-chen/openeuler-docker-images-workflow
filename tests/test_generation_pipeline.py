@@ -214,6 +214,8 @@ def test_hadolint_runner_reports_command_failure(tmp_path, monkeypatch):
     assert commands == [[
         str(executable),
         "--ignore",
+        "DL3033",
+        "--ignore",
         "DL3041",
         str(dockerfile),
     ]]
@@ -235,7 +237,7 @@ def test_hadolint_runner_reports_command_failure(tmp_path, monkeypatch):
     assert "missing-hadolint" in unavailable["output"]
 
 
-def test_generation_returns_failed_image_lint_to_creator_once(tmp_path):
+def test_generation_returns_failed_image_lint_to_creator_once(tmp_path, capsys):
     from scripts.lib.generation_pipeline import run_generation_pipeline
 
     workspace = tmp_path / "target"
@@ -296,6 +298,10 @@ def test_generation_returns_failed_image_lint_to_creator_once(tmp_path):
     assert json.loads((reports / "image-precheck-repair-lint.json").read_text())[
         "status"
     ] == "passed"
+    assert (
+        "[flow][lint] NEEDS_FIX image_lint: "
+        "Dockerfile:9 DL3033 pin yum packages"
+    ) in capsys.readouterr().out
 
 
 def test_generation_returns_failed_testcase_gate_to_creator_once(tmp_path):

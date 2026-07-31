@@ -76,6 +76,8 @@ def lint_dockerfile(
             [
                 str(executable),
                 "--ignore",
+                "DL3033",
+                "--ignore",
                 "DL3041",
                 str(dockerfile),
             ],
@@ -693,9 +695,15 @@ def run_generation_pipeline(
         report = image_linter(dockerfile)
         _write_report(report_dir, report_name, report, api_key)
         if report.get("status") != "passed":
+            detail = " ".join(
+                str(_redact(report.get("output", ""), api_key)).split()
+            )[:500]
+            detail = detail or "no lint output"
+            log("lint", f"NEEDS_FIX {stage}: {detail}")
             if fail_closed:
-                raise GenerationPipelineError(f"{stage} did not pass")
-            log("lint", f"NEEDS_FIX {stage}")
+                raise GenerationPipelineError(
+                    f"{stage} did not pass: {detail}"
+                )
             return report
         log("lint", f"PASS {stage}")
         return report

@@ -641,7 +641,7 @@ def test_prepare_uploads_reports_and_diagnostic_patch_after_generation_failure()
     assert upload["with"]["path"] == "${{ runner.temp }}/phase1-prepare/"
 
 
-def test_hadolint_only_ignores_unpinned_dnf_packages():
+def test_hadolint_treats_unpinned_yum_and_dnf_packages_equally():
     jobs = _workflow()["jobs"]
     prepare_steps = {
         step["name"]: step for step in jobs["prepare"]["steps"]
@@ -654,8 +654,10 @@ def test_hadolint_only_ignores_unpinned_dnf_packages():
         prepare_steps["Lint generated Dockerfile"],
         package_steps["Enforce final target gates and lint"],
     ):
+        assert "--ignore DL3033" in step["run"]
         assert "--ignore DL3041" in step["run"]
 
+    assert WORKFLOW_PATH.read_text().count("--ignore DL3033") == 2
     assert WORKFLOW_PATH.read_text().count("--ignore DL3041") == 2
 
 

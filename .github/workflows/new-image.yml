@@ -169,6 +169,7 @@ jobs:
           DOMAIN: ${{ inputs.domain }}
         run: |
           "${{ steps.tools.outputs.hadolint_path }}" \
+            --ignore DL3033 \
             --ignore DL3041 \
             "${RUNNER_TEMP}/phase1-target/${DOMAIN}/${APP}/${VERSION}/${OS_VERSION}/Dockerfile"
 
@@ -695,6 +696,7 @@ jobs:
           )"
           mkdir -p "${RUNNER_TEMP}/candidate/reports/agents"
           "${{ steps.tools.outputs.hadolint_path }}" \
+            --ignore DL3033 \
             --ignore DL3041 \
             "${RUNNER_TEMP}/phase1-target/${domain}/${app}/${version}/${os_version}/Dockerfile"
           "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/gate_diff.py \

@@ -22,6 +22,10 @@ Challenge from these angles:
 - Is the base image reference correct? (`ARG BASE=openeuler/openeuler:{os_version}`)
 - Is the exact requested source tag or immutable reference used?
 - Are all required packages installed?
+- Treat package availability or ABI/version compatibility as a blocker only
+  when there is concrete evidence in the provided snapshot. When that evidence
+  is absent, native build is authoritative; do not request package pinning or
+  unpinning based on speculation.
 - Does `yum clean all` or `dnf clean all` follow every package installation?
 - Are necessary ports exposed?
 - Is the ENTRYPOINT/CMD correct for this application?
