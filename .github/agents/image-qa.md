@@ -49,6 +49,10 @@ Challenge from these angles:
 - Are usage instructions actually runnable?
 - Are dependencies listed correctly?
 - Is the logo from an official or trustworthy upstream source rather than AI-generated?
+- Does every link to an openEuler repository use `gitcode.com`? A `gitee.com`
+  link is a blocker even when neighbouring packages still carry one: those are
+  pre-migration files, and openEuler now hosts its repositories on gitcode.com.
+  Upstream project links keep their own real addresses.
 
 ### Repository Compliance
 - Are all files in the correct directory structure?

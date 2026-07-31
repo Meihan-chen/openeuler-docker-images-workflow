@@ -42,7 +42,7 @@ CMD ["{app}", "-g", "daemon off;"]
     # README.md
     (base / "README.md").write_text(f"""# Quick reference
 - The official {app} docker image.
-- Maintained by: [openEuler](https://atomgit.com/openeuler)
+- Maintained by: [openEuler](https://gitcode.com/openeuler)
 
 # {app} | openEuler
 Current {app} images are built on [openEuler](https://repo.openeuler.org/).
@@ -50,7 +50,7 @@ Current {app} images are built on [openEuler](https://repo.openeuler.org/).
 # Supported tags and respective dockerfile links
 | Tag | Currently | Architectures |
 |-----|-----------|---------------|
-| [{version}-{os_tag}](https://atomgit.com/openeuler/openeuler-docker-images/blob/master/{domain}/{app}/{version}/{os_ver}/Dockerfile) | {app} {version} on openEuler {os_ver} | amd64, arm64 |
+| [{version}-{os_tag}](https://gitcode.com/openeuler/openeuler-docker-images/blob/master/{domain}/{app}/{version}/{os_ver}/Dockerfile) | {app} {version} on openEuler {os_ver} | amd64, arm64 |
 
 # Usage
 - Pull the `openeuler/{app}` image:
@@ -71,7 +71,7 @@ Current {app} images are built on [openEuler](https://repo.openeuler.org/).
 	```
 
 # Question and answering
-If you have any questions, please submit an issue on [openeuler-docker-images](https://atomgit.com/openeuler/openeuler-docker-images).
+If you have any questions, please submit an issue on [openeuler-docker-images](https://gitcode.com/openeuler/openeuler-docker-images).
 """)
 
     # image-info.yml
@@ -87,7 +87,7 @@ environment: |
 tags: |
   | Tag | Currently | Architectures |
   |-----|-----------|---------------|
-  |[{version}-{os_tag}](https://atomgit.com/openeuler/openeuler-docker-images/blob/master/{domain}/{app}/{version}/{os_ver}/Dockerfile) | {app} {version} on openEuler {os_ver} | amd64, arm64 |
+  |[{version}-{os_tag}](https://gitcode.com/openeuler/openeuler-docker-images/blob/master/{domain}/{app}/{version}/{os_ver}/Dockerfile) | {app} {version} on openEuler {os_ver} | amd64, arm64 |
 download: |
   ```
   docker pull openeuler/{app}:{{{{Tag}}}}

@@ -44,6 +44,14 @@ gh api repos/{owner}/{repo}/readme --jq '.content' | base64 -d | head -60
 
 查看 `{category}/` 目录下已有包，选取 1-2 个同类型项目作为参考。
 
+参考包只用于学习结构、字段和措辞，不用于确定链接域名。openEuler 自身的仓库
+（openeuler-docker-images、各 SIG、community 等）一律使用 `gitcode.com`，路径形式不变，例如
+`https://gitcode.com/openeuler/openeuler-docker-images/blob/master/{category}/{package_name}/{version}/{os_version}/Dockerfile`。
+
+`gitee.com` 是 openEuler 迁移前的旧域名，一律禁止。目标仓大量存量文件
+仍指向 `gitee.com`，那是尚未回填的历史内容，不是现行规范，照抄会产生失效链接。
+上游项目链接（GitHub、官网、文档站）保持其真实地址，不做替换。
+
 ### 步骤 3：创建目录结构
 
 ```
@@ -86,7 +94,7 @@ arbitrary number is unused.
 
 ### 步骤 6：编写 README.md（纯英文，禁止中文）
 
-结构：Quick reference → {PackageName} | openEuler → Supported tags → Usage (pull/run/logs/exec) → Question and answering。链接域名遵循目标仓当前规范。代码块用 TAB 缩进。
+结构：Quick reference → {PackageName} | openEuler → Supported tags → Usage (pull/run/logs/exec) → Question and answering。指向 openEuler 仓库的链接使用 `gitcode.com`，禁止 `gitee.com`。代码块用 TAB 缩进。
 
 ### 步骤 7：编写 doc/image-info.yml（中文）
 
@@ -115,7 +123,7 @@ arbitrary number is unused.
 3. README 和 image-info.yml 的 Tag 表一致
 4. image-list.yml 格式正确且保留全部既有条目
 5. logo.png 存在且非空，来源为官方或可信上游资源
-6. 所有链接遵循目标仓当前规范
+6. 指向 openEuler 自有仓库的链接一律为 `gitcode.com`，本次改动的文件中不出现 `gitee.com`；上游项目链接（GitHub、官网、文档站）保持真实地址，不改写域名
 7. image-info.yml category 全小写
 8. usage/download 中镜像标签用 `{Tag}` 占位
 9. README 纯英文

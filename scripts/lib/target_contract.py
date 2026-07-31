@@ -26,6 +26,7 @@ _RESULT_FILES = {
     "version_info.json",
     "results.json",
 }
+_RETIRED_HOSTS = (b"gitee.com",)
 _VERSION_INFO_FIELDS = {
     "test_time",
     "Model",
@@ -286,6 +287,34 @@ def _validate_tests(
         errors.append(f"{shared_entry.relative_to(repo)} must be executable")
 
 
+def _validate_link_hosts(
+    repo: Path,
+    app_root: str,
+    errors: list[str],
+) -> None:
+    """Reject links to hosts openEuler has migrated away from.
+
+    Every openEuler repository now lives on gitcode.com, but the target repo
+    still carries hundreds of pre-migration gitee.com links. An Agent told to
+    follow "the target repo convention" reads that stale majority and copies a
+    dead host into new documentation, so the migration has to be asserted here
+    rather than inferred from the neighbouring packages.
+    """
+    for path in sorted((repo / app_root).rglob("*")):
+        if not path.is_file():
+            continue
+        if path.relative_to(repo / app_root).parts[0] == "results":
+            continue
+        content = path.read_bytes().lower()
+        for host in _RETIRED_HOSTS:
+            if host in content:
+                errors.append(
+                    f"{path.relative_to(repo).as_posix()} links to "
+                    f"{host.decode()}; openEuler repositories are hosted "
+                    "on gitcode.com"
+                )
+
+
 def _validate_docs(
     repo: Path,
     task: TaskSpec,
@@ -399,6 +428,7 @@ def validate_generated_target(
 
     if not any(error.startswith("required generated file") for error in errors):
         _validate_meta(repo, task, app_root, errors)
+        _validate_link_hosts(repo, app_root, errors)
         _validate_docs(repo, task, app_root, errors)
         if phase == "full":
             _validate_tests(repo, app_root, errors)

@@ -537,6 +537,55 @@ def test_contract_accepts_application_selected_goss_wait_resource(tmp_path):
     assert report["status"] == "passed"
 
 
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "README.md",
+        "doc/image-info.yml",
+        "2.16.0/24.03-lts-sp4/Dockerfile",
+        "tests/test.sh",
+    ],
+)
+def test_contract_rejects_pre_migration_gitee_link(tmp_path, relative):
+    from scripts.harness.gate_diff import (
+        TargetContractError,
+        validate_generated_target,
+    )
+
+    repo, base_sha = _repo(tmp_path)
+    _write_valid_generated_candidate(repo)
+    path = repo / "Database" / "kvrocks" / relative
+    path.write_text(
+        path.read_text()
+        + "\n# see https://gitee.com/openeuler/openeuler-docker-images\n"
+    )
+
+    with pytest.raises(TargetContractError, match="gitee.com.*gitcode.com"):
+        validate_generated_target(repo=repo, task=_task(), base_sha=base_sha)
+
+
+def test_contract_accepts_gitcode_and_upstream_links(tmp_path):
+    from scripts.harness.gate_diff import validate_generated_target
+
+    repo, base_sha = _repo(tmp_path)
+    _write_valid_generated_candidate(repo)
+    readme = repo / "Database" / "kvrocks" / "README.md"
+    readme.write_text(
+        readme.read_text()
+        + "\n- Maintained by: [openEuler CloudNative SIG]"
+        "(https://gitcode.com/openeuler/cloudnative).\n"
+        "- Upstream: https://github.com/apache/kvrocks\n"
+    )
+
+    report = validate_generated_target(
+        repo=repo,
+        task=_task(),
+        base_sha=base_sha,
+    )
+
+    assert report["status"] == "passed"
+
+
 def test_contract_derives_documented_tag_from_task_os_version(tmp_path):
     from scripts.harness.gate_diff import validate_generated_target
     from scripts.lib.task_spec import TaskSpec
