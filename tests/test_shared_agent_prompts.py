@@ -162,6 +162,20 @@ def test_testcase_prompts_keep_goss_order_independent_and_tests_in_sync():
     assert "cross-resource ordering" in " ".join(testcase_qa.split())
 
 
+def test_testcase_guidance_avoids_scalar_goss_port_ip_assertions():
+    testcase_creator = (AGENTS_DIR / "testcase-creator.md").read_text().lower()
+    testcase_qa = (AGENTS_DIR / "testcase-qa.md").read_text().lower()
+    goss_template = (ROOT / "templates" / "test" / "goss.yaml.j2").read_text()
+
+    for content in (testcase_creator, goss_template.lower()):
+        assert 'ip: "0.0.0.0"' not in content
+    for prompt in (testcase_creator, testcase_qa):
+        normalized = " ".join(prompt.split())
+        assert "multiple listening sockets" in normalized
+        assert "scalar" in normalized
+        assert "functional" in normalized
+
+
 def test_fixer_prompt_synchronizes_observable_runtime_contract_consumers():
     fixer = (AGENTS_DIR / "code-fixer.md").read_text().lower()
 

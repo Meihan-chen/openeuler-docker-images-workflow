@@ -43,7 +43,6 @@ official upstream 源码或文档中推导，不得假设固定运行身份、�
 port:
   tcp:{port}:
     listening: true
-    ip: "0.0.0.0"
 process:
   "{binary_name}":
     running: true
@@ -56,6 +55,15 @@ file:
     exists: true
     mode: "0755"
 ```
+
+Goss may return a collection for `port.*.ip` when an application opens
+multiple listening sockets, for example with worker sharding, `SO_REUSEPORT`,
+dual-stack networking, or multiple interfaces. Never compare that value with
+a scalar address in generic tests. Use `listening: true` by default. If the
+binding address is part of the application contract, prove it with a
+collection-aware matcher verified against the pinned Goss version or with a
+bounded functional reachability check; derive the expected address from the
+Dockerfile and official upstream evidence.
 
 **goss_wait.yaml is optional** — 但它同时是 Native Harness 的运行模式标记：
 long-running service 必须生成；its absence declares CLI/one-shot mode。内容只描述从

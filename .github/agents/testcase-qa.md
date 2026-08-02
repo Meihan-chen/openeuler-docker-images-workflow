@@ -37,7 +37,10 @@ Challenge from these angles:
 - Could any test pass when the image is actually broken?
 - Are timeout values bounded and reasonable?
 - Do readiness probes use only commands available in the runtime image?
-- Are port checks using the correct IP binding? (0.0.0.0 vs 127.0.0.1)
+- Can `port.*.ip` return multiple listening sockets? Reject scalar equality
+  for that value; if binding semantics matter, require a collection-aware
+  matcher verified against the pinned Goss version or a bounded functional
+  reachability check backed by Dockerfile and official upstream evidence.
 - Does any fallback swallow a failed command or weaken an assertion?
 
 ### Missing Attack Surfaces
@@ -50,6 +53,9 @@ Challenge from these angles:
 
 ### Test Correctness
 - Are goss assertions syntactically valid?
+- Do port assertions remain valid for applications that open multiple
+  listening sockets through worker sharding, `SO_REUSEPORT`, dual-stack
+  networking, or multiple interfaces, without assuming a scalar IP value?
 - Is every Goss resource order-independent, with no cross-resource ordering
   assumed for a stateful flow that belongs in `test.sh`?
 - Do file paths exist in the Dockerfile?
