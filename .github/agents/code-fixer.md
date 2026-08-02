@@ -50,6 +50,7 @@ Harness 在 `## Review report to resolve` 下附一个 JSON 对象，字段如�
 
 | category | 含义与处置 |
 |------|------|
+| `hard-stop` | Harness 已确认边界或完整性错误。不得修改；保留证据并立即终止自动修复 |
 | `workspace-hygiene` | 目标仓里出现了新增的调研产物，属于边界硬错误。不得自动修改；返回 `unfixable` 供 Harness 从 checkpoint 恢复 |
 | `candidate-scope` | 候选改动了本任务不拥有的路径，属于边界硬错误。不得自动修改；返回 `unfixable` |
 | `image-contract` | 结构化 finding 的 owner 是 Image Creator；只修报告列出的 image-owned 内容 |
@@ -101,7 +102,7 @@ Harness 在 `## Review report to resolve` 下附一个 JSON 对象，字段如�
   "success": true,
   "status": "fixed|insufficient_evidence|unfixable",
   "diagnosis": {
-    "error_type": "workspace-hygiene|candidate-scope|image-contract|test-contract|config-parse|lint-advisory|build-error|runtime-error|infra|unclassified",
+    "error_type": "hard-stop|workspace-hygiene|candidate-scope|image-contract|test-contract|config-parse|lint-advisory|build-error|runtime-error|infra|unclassified",
     "root_cause": "一句话描述",
     "confidence": 0.0
   },

@@ -189,8 +189,14 @@ def _write_valid_results(repo):
                     "https://github.com/Meihan-chen/repo/actions/runs/123456"
                 ),
                 "architectures": {
-                    "x86_64": {"checks": {"all": True}},
-                    "aarch64": {"checks": {"all": True}},
+                    architecture: {
+                        "checks": {
+                            "native_build": True,
+                            "dgoss": True,
+                            "shared_tests": True,
+                        }
+                    }
+                    for architecture in ("x86_64", "aarch64")
                 },
             }
         )
@@ -655,6 +661,29 @@ def test_contract_accepts_application_selected_goss_wait_resource(tmp_path):
     assert report["status"] == "passed"
 
 
+@pytest.mark.parametrize("content", ("", "{}\n"))
+def test_present_wait_marker_must_define_a_readiness_resource(tmp_path, content):
+    from scripts.harness.gate_diff import validate_generated_target
+
+    repo, base_sha = _repo(tmp_path)
+    _write_valid_generated_candidate(repo)
+    goss_wait = repo / "Database" / "kvrocks" / "tests" / "goss_wait.yaml"
+    goss_wait.write_text(content)
+
+    report = validate_generated_target(
+        repo=repo,
+        task=_task(),
+        base_sha=base_sha,
+    )
+
+    assert report["build_allowed"] is True
+    assert report["test_allowed"] is False
+    assert any(
+        finding["code"] == "tests.wait_empty"
+        for finding in report["findings"]
+    )
+
+
 @pytest.mark.parametrize("owner", ["openeuler", "src-openeuler"])
 def test_contract_blocks_only_open_euler_pre_migration_gitee_links(
     tmp_path,
@@ -808,6 +837,42 @@ def test_final_contract_rejects_missing_architecture_junit(tmp_path):
     ).unlink()
 
     with pytest.raises(TargetContractError, match="aarch64"):
+        validate_final_target(
+            repo=repo,
+            task=_task(),
+            base_sha=base_sha,
+            expected_run_id="123456",
+        )
+
+
+@pytest.mark.parametrize(
+    "junit",
+    (
+        '<testsuite tests="0" failures="0" errors="0"/>',
+        '<testsuite tests="1" failures="0" errors="0" skipped="1"/>',
+    ),
+)
+def test_final_contract_requires_junit_to_prove_executed_passes(tmp_path, junit):
+    from scripts.harness.gate_diff import (
+        TargetContractError,
+        validate_final_target,
+    )
+
+    repo, base_sha = _repo(tmp_path)
+    _write_valid_generated_candidate(repo)
+    _write_valid_results(repo)
+    junit_path = (
+        repo
+        / "Database"
+        / "kvrocks"
+        / "results"
+        / "2.16.0"
+        / "24.03-lts-sp4"
+        / "aarch64.junit.xml"
+    )
+    junit_path.write_text(junit)
+
+    with pytest.raises(TargetContractError, match="aarch64 JUnit"):
         validate_final_target(
             repo=repo,
             task=_task(),

@@ -19,7 +19,7 @@ You receive the Image Creator's complete output:
 Challenge from these angles:
 
 ### Dockerfile Correctness
-- Is the base image reference correct? (`ARG BASE=openeuler/openeuler:{os_version}`)
+- Does every build/runtime stage use the TaskSpec-selected openEuler base image, regardless of equivalent Dockerfile variable or stage-alias spelling?
 - Is the exact requested source tag or immutable reference used?
 - Are all required packages installed?
 - Treat package availability or ABI/version compatibility as a blocker only

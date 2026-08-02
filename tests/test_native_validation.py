@@ -131,7 +131,9 @@ def _workspace(tmp_path):
     tests.mkdir(parents=True)
     (image / "Dockerfile").write_text("FROM scratch\n")
     (tests / "goss.yaml").write_text("{}\n")
-    (tests / "goss_wait.yaml").write_text("{}\n")
+    (tests / "goss_wait.yaml").write_text(
+        "process:\n  sleep:\n    running: true\n"
+    )
     (tests / "test.sh").write_text("#!/bin/bash\n")
     (tests / "test.sh").chmod(0o755)
     return _git_init(workspace)
@@ -152,7 +154,9 @@ def _generic_workspace(tmp_path, task, *, service):
     (image / "Dockerfile").write_text("FROM scratch\n")
     (tests / "goss.yaml").write_text("{}\n")
     if service:
-        (tests / "goss_wait.yaml").write_text("{}\n")
+        (tests / "goss_wait.yaml").write_text(
+            "process:\n  sleep:\n    running: true\n"
+        )
     (tests / "test.sh").write_text("#!/bin/sh\nexit 0\n")
     (tests / "test.sh").chmod(0o755)
     return _git_init(workspace)
@@ -331,12 +335,19 @@ def test_native_cli_runs_shared_tests_without_a_detached_service(tmp_path):
     assert not any(
         command[:2] == ["docker", "exec"] for command in commands
     )
-    assert any(
-        command[:2] == ["docker", "run"]
-        and "--entrypoint" in command
-        and "/opt/oe-tests/test.sh" in command
+    cli_run = next(
+        command
         for command in commands
+        if command[:2] == ["docker", "run"]
+        and "--volume" in command
     )
+    assert cli_run[cli_run.index("--entrypoint") + 1] == "/bin/sh"
+    assert cli_run[cli_run.index("--label") + 1] == (
+        "oe.autopilot.run=123456"
+    )
+    # An explicit command follows the image, so Docker cannot append the
+    # image's original CMD as positional arguments to test.sh.
+    assert cli_run[-2:] == ["-c", "exec /opt/oe-tests/test.sh"]
 
 
 def test_native_builds_but_skips_runtime_tests_for_invalid_test_contract(
@@ -585,6 +596,7 @@ def test_native_pipeline_smoke_builds_and_runs_dgoss_without_ai(
     assert report["checks"] == {
         "native_build": True,
         "dgoss": True,
+        "shared_tests": True,
     }
     commands = "\n".join(
         " ".join(call["command"]) for call in runner.calls
@@ -594,14 +606,23 @@ def test_native_pipeline_smoke_builds_and_runs_dgoss_without_ai(
     assert "docker image inspect" in commands
     assert "docker image rm" in commands
     assert "docker buildx rm" not in commands
-    assert "docker exec" not in commands
-    dgoss_call = next(
+    assert "docker exec" in commands
+    dgoss_calls = [
         call for call in runner.calls if call["command"][0] == str(dgoss)
+    ]
+    assert len(dgoss_calls) == 2
+    assert {
+        call["env"]["GOSS_FILES_PATH"].rsplit("/", 1)[-1]
+        for call in dgoss_calls
+    } == {"service", "cli"}
+    assert all(call["env"]["GOSS_FILE"] == "goss.yaml" for call in dgoss_calls)
+    cli_shared_test = next(
+        call["command"]
+        for call in runner.calls
+        if call["command"][:2] == ["docker", "run"]
+        and "exec /opt/oe-tests/test.sh" in call["command"]
     )
-    assert dgoss_call["env"]["GOSS_FILES_PATH"].endswith(
-        "pipeline-smoke-context"
-    )
-    assert dgoss_call["env"]["GOSS_FILE"] == "goss.yaml"
+    assert cli_shared_test[-2:] == ["-c", "exec /opt/oe-tests/test.sh"]
     assert (
         repair_dir / "native-repair-x86_64.json"
     ).is_file()

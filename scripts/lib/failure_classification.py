@@ -40,12 +40,16 @@ _RUNTIME_STAGES = ("dgoss", "shared_tests", "restart_persistence")
 _GUIDANCE = {
     "workspace-hygiene": (
         "{paths} is research output that was written into the target "
-        "repository, not candidate content. Delete or move it under the "
-        "scratch directory; do not revert candidate files."
+        "repository, not candidate content. Preserve the exact paths and stop; "
+        "no Agent may delete, move, or revert candidate files."
     ),
     "candidate-scope": (
         "The candidate changed paths this task does not own. Restrict the "
         "change to the task's own files."
+    ),
+    "hard-stop": (
+        "The deterministic target contract found a boundary or integrity "
+        "violation. Preserve the evidence and stop; no Agent may repair it."
     ),
     "image-contract": (
         "The deterministic repository contract assigned these findings to "
@@ -126,6 +130,14 @@ def classify_failure(
     owner = ""
     finding_codes: list[str] = []
 
+    hard_findings = []
+    if gate is not None and isinstance(gate.get("findings"), list):
+        hard_findings = [
+            finding
+            for finding in gate["findings"]
+            if isinstance(finding, Mapping)
+            and finding.get("level") == "hard_stop"
+        ]
     structured_findings = []
     if gate is not None and isinstance(gate.get("findings"), list):
         structured_findings = [
@@ -134,7 +146,14 @@ def classify_failure(
             if isinstance(finding, Mapping)
             and finding.get("level") == "delivery_stop"
         ]
-    if structured_findings:
+    if hard_findings:
+        category = "hard-stop"
+        finding_codes = [
+            str(finding.get("code", ""))
+            for finding in hard_findings
+            if finding.get("code")
+        ]
+    elif structured_findings:
         owners = {str(finding.get("owner", "")) for finding in structured_findings}
         if owners == {"image_creator"}:
             category = "image-contract"
@@ -167,7 +186,10 @@ def classify_failure(
         details = details if isinstance(details, Mapping) else {}
         failure = str(report.get("failure", "")).lower()
         stage = str(report.get("failed_stage", ""))
-        if details.get("returncode") == _TIMEOUT_RETURNCODE:
+        if (
+            details.get("returncode") == _TIMEOUT_RETURNCODE
+            and stage not in _RUNTIME_STAGES
+        ):
             category = "infra"
         elif stage == "test_contract":
             category = "test-contract"

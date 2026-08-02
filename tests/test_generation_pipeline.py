@@ -1152,6 +1152,32 @@ def test_image_qa_snapshot_includes_auxiliary_image_files(tmp_path):
     assert "Database/kvrocks/results/results.json" not in image_qa_prompt
 
 
+def test_testcase_role_owns_nested_shared_test_assets_and_qa_reads_them(tmp_path):
+    agent = _fully_approved_agent()
+    fixture = (
+        tmp_path
+        / "target"
+        / "Database"
+        / "kvrocks"
+        / "tests"
+        / "fixtures"
+        / "protocol.txt"
+    )
+
+    def write_nested_fixture(role, _):
+        if role == "testcase_creator":
+            fixture.parent.mkdir(parents=True, exist_ok=True)
+            fixture.write_text("PING => PONG\n")
+
+    _run_recorded_pipeline(tmp_path, agent, mutation=write_nested_fixture)
+
+    testcase_qa_prompt = next(
+        call["prompt"] for call in agent.calls if call["role"] == "testcase_qa"
+    )
+    assert "Database/kvrocks/tests/fixtures/protocol.txt" in testcase_qa_prompt
+    assert "PING => PONG" in testcase_qa_prompt
+
+
 def test_qa_snapshot_failure_writes_machine_readable_report(tmp_path):
     dockerfile = (
         tmp_path
@@ -1319,7 +1345,10 @@ def test_phase1_prompts_pin_task_paths_without_injecting_app_implementation():
         task=_task(),
         base_sha="1" * 40,
     )
+    assert "service mode" in testcase_prompt
     assert "already-running container" in testcase_prompt
+    assert "CLI/one-shot mode" in testcase_prompt
+    assert "container entrypoint" in testcase_prompt
     assert "must not invoke Docker" in testcase_prompt
     assert "Database/kvrocks/tests/test.sh" in testcase_prompt
     assert "available in the runtime image" in testcase_prompt

@@ -28,6 +28,10 @@ _DOMAINS = {
 _APP_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
 _OS_VERSION_RE = re.compile(r"^\d{2}\.\d{2}(?:-lts)?(?:-sp\d+)?$")
+_MIGRATED_OPENEULER_GITEE_RE = re.compile(
+    r"^(?:www\.)?gitee\.com/(?:openeuler|src-openeuler)(?:/|$)",
+    re.IGNORECASE,
+)
 
 
 def _required(raw: Mapping[str, object], field: str) -> str:
@@ -73,6 +77,11 @@ class TaskSpec:
         parsed_source = urlparse(source_url)
         if parsed_source.scheme != "https" or not parsed_source.netloc:
             raise TaskSpecError("source_url: an absolute HTTPS URL is required")
+        source_location = parsed_source.netloc + parsed_source.path
+        if _MIGRATED_OPENEULER_GITEE_RE.match(source_location):
+            raise TaskSpecError(
+                "source_url: migrated openEuler repositories must use gitcode.com"
+            )
 
         return cls(
             app=app,

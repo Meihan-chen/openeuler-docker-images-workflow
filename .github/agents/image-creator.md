@@ -86,8 +86,6 @@ arbitrary number is unused.
 
 **openEuler 包名映射（Debian→RPM）：** libssl-dev→openssl-devel, build-essential→gcc gcc-c++ make, shadow→shadow-utils, python3-dev→python3-devel, libcurl4-openssl-dev→libcurl-devel, libffi-dev→libffi-devel
 
-**禁止使用的包：** clang-tools-extra, gmock-devel, gtest-devel, libdwarf-devel, gperftools-devel
-
 ### 步骤 5：编写 meta.yml
 
 ```yaml
@@ -123,7 +121,7 @@ Pillow 占位图伪装官方 logo，也禁止使用 AI 生成 logo。
 
 ## 质量检查清单
 
-1. ARG VERSION 全大写，默认值与 meta.yml 版本一致
+1. 源码版本必须与 TaskSpec 和 meta.yml 一致，不限定等价的 Dockerfile 变量写法
 2. meta.yml path 与实际路径一致
 3. 如果生成 image-info.yml，其 Tag 与 README 一致
 4. image-list.yml 格式正确且保留全部既有条目
@@ -137,9 +135,8 @@ Pillow 占位图伪装官方 logo，也禁止使用 AI 生成 logo。
 12. 如果生成 doc，目标仓必需字段完整且没有编造内容
 13. doc 中声明或引用的资源真实存在
 14. dnf remove 仅限实际安装的构建依赖
-15. name 与 homepage 最后路径段一致
-16. version_filter 完整: alpha;rc;candidate;beta;pre
-17. 不修改已有包的文件
-18. 不硬编码架构，两个原生架构使用同一 Dockerfile
-19. 精确锁定任务指定源码版本，不使用 latest 或可变分支
-20. 运行用户、端口、持久化、健康检查、LICENSE 和 NOTICE 符合 official upstream 的运行模型；只有任务输入明确提出额外要求时才把它作为应用约束
+15. homepage 等可选字段只在有可靠上游证据时填写
+16. 不修改已有包的文件
+17. 不硬编码架构，两个原生架构使用同一 Dockerfile
+18. 精确锁定任务指定源码版本，不使用 latest 或可变分支
+19. 运行用户、端口、持久化、健康检查、LICENSE 和 NOTICE 符合 official upstream 的运行模型；只有任务输入明确提出额外要求时才把它作为应用约束

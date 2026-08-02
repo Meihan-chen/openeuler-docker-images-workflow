@@ -63,7 +63,6 @@ def _write_report(
             "native_build": status == "passed",
             "dgoss": status == "passed",
             "shared_tests": status == "passed",
-            "restart_persistence": status == "passed",
         },
     }
     (root / f"{architecture}.json").write_text(json.dumps(payload) + "\n")
@@ -153,6 +152,69 @@ def test_rejects_failed_architecture_without_writing_result_directory(tmp_path):
         )
 
     assert not (workspace / "Database" / "kvrocks" / "results").exists()
+
+
+@pytest.mark.parametrize(
+    "junit",
+    (
+        '<testsuite tests="0" failures="0" errors="0"/>',
+        '<testsuite tests="1" failures="0" errors="0" skipped="1"/>',
+        '<testsuite tests="1" failures="-1" errors="1"/>',
+    ),
+)
+def test_rejects_junit_that_does_not_prove_executed_passes(tmp_path, junit):
+    from scripts.utils.artifacts import (
+        ResultAggregationError,
+        aggregate_native_results,
+    )
+
+    workspace = _workspace(tmp_path)
+    reports = _reports(tmp_path)
+    (reports / "aarch64.junit.xml").write_text(junit)
+
+    with pytest.raises(ResultAggregationError, match="aarch64 JUnit"):
+        aggregate_native_results(
+            workspace=workspace,
+            task=_task(),
+            run_id="123456",
+            run_url="https://github.com/Meihan-chen/repo/actions/runs/123456",
+            report_dir=reports,
+        )
+
+
+@pytest.mark.parametrize(
+    "checks",
+    (
+        {"native_build": True},
+        {
+            "native_build": True,
+            "dgoss": True,
+            "shared_tests": True,
+            "invented_check": True,
+        },
+    ),
+)
+def test_rejects_noncanonical_native_check_sets(tmp_path, checks):
+    from scripts.utils.artifacts import (
+        ResultAggregationError,
+        aggregate_native_results,
+    )
+
+    workspace = _workspace(tmp_path)
+    reports = _reports(tmp_path)
+    path = reports / "x86_64.json"
+    payload = json.loads(path.read_text())
+    payload["checks"] = checks
+    path.write_text(json.dumps(payload))
+
+    with pytest.raises(ResultAggregationError, match="checks are incomplete"):
+        aggregate_native_results(
+            workspace=workspace,
+            task=_task(),
+            run_id="123456",
+            run_url="https://github.com/Meihan-chen/repo/actions/runs/123456",
+            report_dir=reports,
+        )
 
 
 def test_refuses_to_overwrite_existing_version_os_results(tmp_path):
@@ -269,6 +331,7 @@ def test_legacy_evidence_is_accepted_only_when_explicitly_allowed(tmp_path):
             path = reports / f"{architecture}.json"
             payload = json.loads(path.read_text())
             del payload["validated_patch_sha256"]
+            payload["checks"]["restart_persistence"] = True
             path.write_text(json.dumps(payload))
         return reports
 

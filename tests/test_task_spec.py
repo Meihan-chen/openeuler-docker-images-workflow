@@ -71,3 +71,29 @@ def test_task_spec_rejects_missing_input():
 
     with pytest.raises(TaskSpecError, match="version"):
         TaskSpec.from_workflow_dispatch(raw)
+
+
+@pytest.mark.parametrize(
+    "source_url",
+    (
+        "https://gitee.com/openeuler/community/tree/master",
+        "https://gitee.com/src-openeuler/redis/tree/master",
+    ),
+)
+def test_task_spec_rejects_migrated_openeuler_gitee_source(source_url):
+    from scripts.lib.task_spec import TaskSpec, TaskSpecError
+
+    raw = _kvrocks_input()
+    raw["source_url"] = source_url
+
+    with pytest.raises(TaskSpecError, match="source_url.*gitcode"):
+        TaskSpec.from_workflow_dispatch(raw)
+
+
+def test_task_spec_accepts_third_party_gitee_source():
+    from scripts.lib.task_spec import TaskSpec
+
+    raw = _kvrocks_input()
+    raw["source_url"] = "https://gitee.com/example/kvrocks/tree/v2.16.0"
+
+    assert TaskSpec.from_workflow_dispatch(raw).source_url == raw["source_url"]

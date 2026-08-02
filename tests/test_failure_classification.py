@@ -35,7 +35,8 @@ def test_one_unpacked_tarball_is_workspace_hygiene_not_a_candidate_revert():
     assert result["category"] == "workspace-hygiene"
     assert result["stray_paths"] == ["kvrocks-2.16.0"]
     assert "kvrocks-2.16.0" in result["guidance"]
-    assert "do not revert" in result["guidance"].lower()
+    assert "no agent may" in result["guidance"].lower()
+    assert "stop" in result["guidance"].lower()
 
 
 def test_a_real_candidate_scope_violation_is_not_workspace_hygiene():
@@ -104,7 +105,7 @@ def test_invalid_generated_tests_are_returned_to_testcase_creator():
     assert result["category"] == "test-contract"
 
 
-def test_a_timeout_is_infrastructure_and_names_no_candidate_repair():
+def test_a_build_timeout_is_infrastructure_and_names_no_candidate_repair():
     from scripts.lib.failure_classification import classify_failure
 
     report = {
@@ -118,6 +119,44 @@ def test_a_timeout_is_infrastructure_and_names_no_candidate_repair():
 
     assert result["category"] == "infra"
     assert "do not" in result["guidance"].lower()
+
+
+@pytest.mark.parametrize("stage", ("dgoss", "shared_tests"))
+def test_a_candidate_runtime_timeout_is_not_misclassified_as_infra(stage):
+    from scripts.lib.failure_classification import classify_failure
+
+    result = classify_failure(
+        report={
+            "status": "failed",
+            "failed_stage": stage,
+            "failure": "command timed out",
+            "failure_details": {"returncode": 124},
+        }
+    )
+
+    assert result["category"] == "runtime-error"
+
+
+def test_a_hard_stop_gate_is_classified_as_non_agent_repair():
+    from scripts.lib.failure_classification import classify_failure
+
+    result = classify_failure(
+        gate={
+            "status": "failed",
+            "build_allowed": False,
+            "findings": [
+                {
+                    "code": "scope.changed_path",
+                    "level": "hard_stop",
+                    "owner": "workflow",
+                    "message": "changed path is outside the task scope",
+                }
+            ],
+        }
+    )
+
+    assert result["category"] == "hard-stop"
+    assert result["finding_codes"] == ["scope.changed_path"]
 
 
 def test_missing_evidence_is_reported_rather_than_guessed():

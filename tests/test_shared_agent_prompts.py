@@ -139,6 +139,16 @@ def test_image_qa_leaves_unproven_package_resolution_to_native_build():
     assert "native build is authoritative" in image_qa
 
 
+def test_image_prompts_do_not_require_one_dockerfile_spelling_or_package_blacklist():
+    image_creator = (AGENTS_DIR / "image-creator.md").read_text().lower()
+    image_qa = (AGENTS_DIR / "image-qa.md").read_text().lower()
+
+    assert "禁止使用的包" not in image_creator
+    assert "arg version 全大写" not in image_creator
+    assert "arg base=openeuler/openeuler" not in image_qa
+    assert "version_filter 完整" not in image_creator
+
+
 def test_testcase_prompts_keep_goss_order_independent_and_tests_in_sync():
     testcase_creator = (AGENTS_DIR / "testcase-creator.md").read_text().lower()
     testcase_qa = (AGENTS_DIR / "testcase-qa.md").read_text().lower()

@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import json
 import re
-import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Mapping
 
 from scripts.lib.task_spec import TaskSpec
+from scripts.lib.target_contract import junit_pass_rate, native_checks_pass
 
 
 class ResultAggregationError(ValueError):
@@ -65,8 +65,9 @@ def _load_report(
             f"{architecture} report does not record the candidate it validated"
         )
     checks = report.get("checks")
-    if not isinstance(checks, dict) or not checks or not all(
-        value is True for value in checks.values()
+    if not native_checks_pass(
+        checks,
+        allow_legacy=allow_legacy_evidence,
     ):
         raise ResultAggregationError(f"{architecture} report checks are incomplete")
     environment = report.get("environment")
@@ -88,19 +89,10 @@ def _load_report(
 def _load_junit(path: Path, architecture: str) -> bytes:
     try:
         content = path.read_bytes()
-        root = ET.fromstring(content)
-    except (OSError, ET.ParseError) as error:
+        pass_rate = junit_pass_rate(content)
+    except (OSError, ValueError) as error:
         raise ResultAggregationError(f"{architecture} JUnit is invalid") from error
-    if root.tag != "testsuite":
-        raise ResultAggregationError(f"{architecture} JUnit root must be testsuite")
-    try:
-        failures = int(root.attrib.get("failures", "0"))
-        errors = int(root.attrib.get("errors", "0"))
-    except ValueError as error:
-        raise ResultAggregationError(
-            f"{architecture} JUnit failure count is invalid"
-        ) from error
-    if failures or errors:
+    if pass_rate != 1.0:
         raise ResultAggregationError(f"{architecture} JUnit contains failures")
     return content
 

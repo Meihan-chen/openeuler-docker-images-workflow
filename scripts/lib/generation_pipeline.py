@@ -110,8 +110,8 @@ def _require_phase1_task(task: TaskSpec) -> None:
 
     Generation itself is no longer restricted: the prompts and the target
     gates carry no application knowledge, so the pipeline is free to attempt
-    any TaskSpec. Native validation is where the remaining Kvrocks assumptions
-    live, which is what running a second application is meant to expose.
+    any TaskSpec. This guard exists only because the deterministic smoke
+    fixture below intentionally writes one fixed sample candidate.
     """
     actual = (
         task.app,
@@ -195,9 +195,10 @@ def build_role_prompt(
                 "- Derive application-specific tests from the Dockerfile and "
                 "official upstream behavior; do not copy another "
                 "application's commands, ports or user assertions.",
-                "- The native harness executes shared tests inside an "
-                "already-running container; test scripts must not invoke "
-                "Docker or own the container lifecycle.",
+                "- In service mode, the native harness executes shared tests "
+                "inside an already-running container. In CLI/one-shot mode, "
+                "it runs test.sh as the container entrypoint. Test scripts "
+                "must not invoke Docker or own the container lifecycle.",
                 "- Every Goss resource must be order-independent. Put any "
                 "stateful sequence in the shared test.sh instead of relying "
                 "on ordering between Goss resources.",
@@ -325,7 +326,7 @@ def _qa_prompt(
             paths.extend(
                 sorted(
                     path
-                    for path in tests_root.iterdir()
+                    for path in tests_root.rglob("*")
                     if path.is_file() and path not in paths
                 )
             )
@@ -665,12 +666,7 @@ def run_generation_pipeline(
         / "Dockerfile"
     )
     app_root = workspace / task.domain / task.app
-    testcase_owned = {
-        app_root / "tests" / "goss.yaml",
-        app_root / "tests" / "goss_wait.yaml",
-        app_root / "tests" / "test_helpers.sh",
-        app_root / "tests" / "test.sh",
-    }
+    tests_root = app_root / "tests"
 
     def enforce_gate(
         *,
@@ -761,7 +757,7 @@ def run_generation_pipeline(
                 workspace=workspace,
                 task=task,
             )
-            if path.is_file() and path not in testcase_owned
+            if path.is_file() and tests_root not in path.parents
         }
 
     def repair_deterministic_failure(

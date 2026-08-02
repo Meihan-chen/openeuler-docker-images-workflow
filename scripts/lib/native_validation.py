@@ -57,7 +57,7 @@ _E2E_CHECKS = (
     "dgoss",
     "shared_tests",
 )
-_SMOKE_CHECKS = ("native_build", "dgoss")
+_SMOKE_CHECKS = _E2E_CHECKS
 
 
 def _default_runner(
@@ -380,6 +380,94 @@ def _environment_evidence(task: TaskSpec, architecture: str) -> dict[str, object
     }
 
 
+def _run_dgoss(
+    runner: CommandRunner,
+    *,
+    workspace: Path,
+    image: str,
+    tests_root: Path,
+    version: str,
+    dgoss: Path,
+    goss: Path,
+    container: str,
+    service_mode: bool,
+) -> None:
+    command = [str(dgoss), "run", "--name", container]
+    if not service_mode:
+        command.extend(("--entrypoint", "/bin/sh"))
+    command.extend(("--env", f"EXPECTED_VERSION={version}", image))
+    if not service_mode:
+        command.extend(("-c", "sleep 300"))
+    environment = {
+        "GOSS_PATH": str(goss),
+        "GOSS_FILES_PATH": str(tests_root),
+        "GOSS_FILE": "goss.yaml",
+        "EXPECTED_VERSION": version,
+    }
+    if service_mode:
+        environment["GOSS_WAIT_OPTS"] = "-r 30s -s 1s"
+    _run(
+        runner,
+        command,
+        cwd=workspace,
+        env=environment,
+        timeout=300,
+    )
+
+
+def _run_shared_tests(
+    runner: CommandRunner,
+    *,
+    workspace: Path,
+    image: str,
+    tests_root: Path,
+    version: str,
+    container: str,
+    service_mode: bool,
+    run_id: str,
+) -> None:
+    command = [
+        "docker",
+        "run",
+        "--name",
+        container,
+        "--label",
+        f"oe.autopilot.run={run_id}",
+        "--volume",
+        f"{tests_root}:/opt/oe-tests:ro",
+    ]
+    if service_mode:
+        command.insert(2, "--detach")
+        command.append(image)
+        _run(runner, command, cwd=workspace)
+        _run(
+            runner,
+            [
+                "docker",
+                "exec",
+                "--env",
+                f"EXPECTED_VERSION={version}",
+                container,
+                "/opt/oe-tests/test.sh",
+            ],
+            cwd=workspace,
+            timeout=300,
+        )
+        return
+    command.extend(
+        (
+            "--env",
+            f"EXPECTED_VERSION={version}",
+            "--entrypoint",
+            "/bin/sh",
+            image,
+            "-c",
+            "exec /opt/oe-tests/test.sh",
+        )
+    )
+    _run(runner, command, cwd=workspace, timeout=300)
+
+
 def validate_native_image(
     *,
     workspace: Path,
@@ -479,80 +567,31 @@ def validate_native_image(
             )
         current_check = "dgoss"
         log(stage, "START dgoss")
-        dgoss_command = [
-            str(dgoss),
-            "run",
-            "--name",
-            dgoss_container,
-        ]
-        if not service_mode:
-            dgoss_command.extend(("--entrypoint", "/bin/sh"))
-        dgoss_command.extend(
-            (
-                "--env",
-                f"EXPECTED_VERSION={task.version}",
-                image,
-            )
-        )
-        if not service_mode:
-            dgoss_command.extend(("-c", "sleep 300"))
-        dgoss_env = {
-            "GOSS_PATH": str(goss),
-            "GOSS_FILES_PATH": str(tests_root),
-            "GOSS_FILE": "goss.yaml",
-            "EXPECTED_VERSION": task.version,
-        }
-        if service_mode:
-            dgoss_env["GOSS_WAIT_OPTS"] = "-r 30s -s 1s"
-        _run(
+        _run_dgoss(
             runner,
-            dgoss_command,
-            cwd=workspace,
-            env=dgoss_env,
-            timeout=300,
+            workspace=workspace,
+            image=image,
+            tests_root=tests_root,
+            version=task.version,
+            dgoss=dgoss,
+            goss=goss,
+            container=dgoss_container,
+            service_mode=service_mode,
         )
         checks["dgoss"] = True
         log(stage, "PASS dgoss")
         current_check = "shared_tests"
         log(stage, "START shared tests")
-        runtime_command = [
-            "docker",
-            "run",
-            "--name",
-            container,
-            "--label",
-            f"oe.autopilot.run={run_id}",
-            "--volume",
-            f"{tests_root}:/opt/oe-tests:ro",
-        ]
-        if service_mode:
-            runtime_command.insert(2, "--detach")
-            runtime_command.append(image)
-            _run(runner, runtime_command, cwd=workspace)
-            _run(
-                runner,
-                [
-                    "docker",
-                    "exec",
-                    "--env",
-                    f"EXPECTED_VERSION={task.version}",
-                    container,
-                    "/opt/oe-tests/test.sh",
-                ],
-                cwd=workspace,
-                timeout=300,
-            )
-        else:
-            runtime_command.extend(
-                (
-                    "--env",
-                    f"EXPECTED_VERSION={task.version}",
-                    "--entrypoint",
-                    "/opt/oe-tests/test.sh",
-                    image,
-                )
-            )
-            _run(runner, runtime_command, cwd=workspace, timeout=300)
+        _run_shared_tests(
+            runner,
+            workspace=workspace,
+            image=image,
+            tests_root=tests_root,
+            version=task.version,
+            container=container,
+            service_mode=service_mode,
+            run_id=run_id,
+        )
         checks["shared_tests"] = True
         log(stage, "PASS shared tests")
     except NativeValidationError as error:
@@ -644,28 +683,52 @@ def validate_native_smoke(
     repair_report_dir = Path(repair_report_dir)
 
     context = report_path.parent / "pipeline-smoke-context"
-    context.mkdir(parents=True, exist_ok=True)
-    dockerfile = context / "Dockerfile"
-    goss_file = context / "goss.yaml"
-    dockerfile.write_text(
-        f"FROM openeuler/openeuler:{task.os_version}\n"
-        "RUN printf 'pipeline-smoke\\n' > /pipeline-smoke\n"
-        'CMD ["sleep", "30"]\n'
-    )
-    goss_file.write_text(
-        "file:\n"
-        "  /pipeline-smoke:\n"
-        "    exists: true\n"
-        "    contains:\n"
-        "      - pipeline-smoke\n"
-    )
+    contexts: dict[str, Path] = {}
+    for mode in ("service", "cli"):
+        mode_root = context / mode
+        mode_root.mkdir(parents=True, exist_ok=True)
+        marker = f"/pipeline-smoke-{mode}"
+        command = (
+            'CMD ["sleep", "300"]\n'
+            if mode == "service"
+            else 'CMD ["unexpected-image-cmd"]\n'
+        )
+        (mode_root / "Dockerfile").write_text(
+            f"FROM openeuler/openeuler:{task.os_version}\n"
+            f"RUN printf 'pipeline-smoke-{mode}\\n' > {marker}\n"
+            + command
+        )
+        (mode_root / "goss.yaml").write_text(
+            "file:\n"
+            f"  {marker}:\n"
+            "    exists: true\n"
+        )
+        if mode == "service":
+            (mode_root / "goss_wait.yaml").write_text(
+                "process:\n  sleep:\n    running: true\n"
+            )
+        test_sh = mode_root / "test.sh"
+        test_sh.write_text(
+            "#!/bin/sh\nset -eu\n"
+            "test \"$#\" -eq 0\n"
+            f"test -f {marker}\n"
+        )
+        test_sh.chmod(0o755)
+        contexts[mode] = mode_root
 
     platform = _PLATFORMS[architecture]
     slug = architecture.replace("_", "-")
     prefix = f"oe-smoke-{run_id}-{slug}"
     builder = f"{prefix}-builder"
-    container = f"{prefix}-dgoss"
-    image = f"oe-autopilot/pipeline-smoke:{run_id}-{slug}"
+    containers = [
+        f"{prefix}-{mode}-{kind}"
+        for mode in contexts
+        for kind in ("dgoss", "runtime")
+    ]
+    images = {
+        mode: f"oe-autopilot/pipeline-smoke-{mode}:{run_id}-{slug}"
+        for mode in contexts
+    }
     stage = f"smoke:{architecture}"
     validated_patch_sha256 = validated_patch_digest(workspace)
     start = time.monotonic()
@@ -676,48 +739,70 @@ def validate_native_smoke(
     current_check = ""
     log(stage, "START native plumbing")
     try:
-        current_check = "native_build"
         _ensure_builder(runner, builder, cwd=workspace)
-        _run(
+        current_check = "native_build"
+        for mode, mode_root in contexts.items():
+            _run(
+                runner,
+                [
+                    "docker",
+                    "buildx",
+                    "build",
+                    "--builder",
+                    builder,
+                    "--load",
+                    "--progress",
+                    "plain",
+                    "--platform",
+                    platform,
+                    "--tag",
+                    images[mode],
+                    str(mode_root),
+                ],
+                cwd=workspace,
+                timeout=1800,
+            )
+        checks["native_build"] = True
+        current_check = "dgoss"
+        for mode, mode_root in contexts.items():
+            _run_dgoss(
+                runner,
+                workspace=workspace,
+                image=images[mode],
+                tests_root=mode_root,
+                version=task.version,
+                dgoss=dgoss,
+                goss=goss,
+                container=f"{prefix}-{mode}-dgoss",
+                service_mode=mode == "service",
+            )
+        checks["dgoss"] = True
+        current_check = "shared_tests"
+        for mode, mode_root in contexts.items():
+            _run_shared_tests(
+                runner,
+                workspace=workspace,
+                image=images[mode],
+                tests_root=mode_root,
+                version=task.version,
+                container=f"{prefix}-{mode}-runtime",
+                service_mode=mode == "service",
+                run_id=run_id,
+            )
+        checks["shared_tests"] = True
+        inspected = _run(
             runner,
             [
                 "docker",
-                "buildx",
-                "build",
-                "--builder",
-                builder,
-                "--load",
-                "--progress",
-                "plain",
-                "--platform",
-                platform,
-                "--tag",
-                image,
-                str(context),
+                "image",
+                "inspect",
+                "--format",
+                "{{.Id}}",
+                images["service"],
             ],
-            cwd=workspace,
-            timeout=1800,
-        )
-        checks["native_build"] = True
-        current_check = "dgoss"
-        _run(
-            runner,
-            [str(dgoss), "run", "--name", container, image],
-            cwd=workspace,
-            env={
-                "GOSS_PATH": str(goss),
-                "GOSS_FILES_PATH": str(context),
-                "GOSS_FILE": "goss.yaml",
-            },
-            timeout=300,
-        )
-        inspected = _run(
-            runner,
-            ["docker", "image", "inspect", "--format", "{{.Id}}", image],
             cwd=workspace,
         )
         image_id = str(inspected.stdout or "").strip()
-        checks["dgoss"] = True
     except NativeValidationError as error:
         failure = str(error)
         failure_details = dict(error.details)
@@ -725,10 +810,13 @@ def validate_native_smoke(
             checks[current_check] = False
     finally:
         # Released once per run by release_run_builders, like the e2e builder.
-        for command in (
-            ["docker", "rm", "--force", container],
-            ["docker", "image", "rm", "--force", image],
-        ):
+        cleanup = [
+            ["docker", "rm", "--force", name] for name in containers
+        ] + [
+            ["docker", "image", "rm", "--force", image]
+            for image in images.values()
+        ]
+        for command in cleanup:
             _run(
                 runner,
                 command,

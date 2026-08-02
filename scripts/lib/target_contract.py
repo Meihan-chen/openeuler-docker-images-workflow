@@ -53,6 +53,46 @@ _VERSION_INFO_FIELDS = {
     "python_version",
     "numpy_version",
 }
+NATIVE_REQUIRED_CHECKS = frozenset(
+    {"native_build", "dgoss", "shared_tests"}
+)
+LEGACY_NATIVE_REQUIRED_CHECKS = frozenset(
+    {*NATIVE_REQUIRED_CHECKS, "restart_persistence"}
+)
+
+
+def native_checks_pass(
+    checks: object,
+    *,
+    allow_legacy: bool = False,
+) -> bool:
+    if not isinstance(checks, dict) or not all(
+        value is True for value in checks.values()
+    ):
+        return False
+    accepted = {NATIVE_REQUIRED_CHECKS}
+    if allow_legacy:
+        accepted.add(LEGACY_NATIVE_REQUIRED_CHECKS)
+    return frozenset(checks) in accepted
+
+
+def junit_pass_rate(content: bytes) -> float:
+    """Return the executed-test pass rate for one native JUnit suite."""
+    try:
+        suite = ET.fromstring(content)
+        counts = {
+            field: int(suite.attrib.get(field, "0"))
+            for field in ("tests", "failures", "errors", "skipped")
+        }
+    except (ET.ParseError, TypeError, ValueError) as error:
+        raise ValueError("JUnit is invalid") from error
+    if suite.tag != "testsuite" or any(value < 0 for value in counts.values()):
+        raise ValueError("JUnit is invalid")
+    tests = counts["tests"]
+    not_passed = counts["failures"] + counts["errors"] + counts["skipped"]
+    if tests <= 0 or not_passed > tests:
+        raise ValueError("JUnit is invalid")
+    return (tests - not_passed) / tests
 
 
 def _finding(
@@ -390,15 +430,33 @@ def _validate_tests(
             )
 
     goss_wait_path = shared / "goss_wait.yaml"
-    if goss_wait_path.is_file() and goss_wait_path.stat().st_size:
-        try:
-            goss_wait_data = yaml.safe_load(goss_wait_path.read_text())
-        except yaml.YAMLError:
-            goss_wait_data = None
+    if goss_wait_path.is_file():
+        if not goss_wait_path.stat().st_size:
             findings.append(
                 _delivery_finding(
-                    "tests.wait_yaml",
-                    "goss_wait.yaml must be valid YAML",
+                    "tests.wait_empty",
+                    "goss_wait.yaml must define at least one readiness resource",
+                    owner="testcase_creator",
+                )
+            )
+            goss_wait_data = None
+        else:
+            try:
+                goss_wait_data = yaml.safe_load(goss_wait_path.read_text())
+            except yaml.YAMLError:
+                goss_wait_data = None
+                findings.append(
+                    _delivery_finding(
+                        "tests.wait_yaml",
+                        "goss_wait.yaml must be valid YAML",
+                        owner="testcase_creator",
+                    )
+                )
+        if isinstance(goss_wait_data, dict) and not goss_wait_data:
+            findings.append(
+                _delivery_finding(
+                    "tests.wait_empty",
+                    "goss_wait.yaml must define at least one readiness resource",
                     owner="testcase_creator",
                 )
             )
@@ -779,15 +837,6 @@ def validate_generated_target(
                 _validate_meta(repo, task, app_root, findings)
 
     _validate_link_hosts(repo, app_root, findings)
-    if _OPENEULER_GITEE_URL_RE.search(task.source_url):
-        findings.append(
-            _delivery_finding(
-                "links.openeuler_gitee",
-                "TaskSpec source_url points to an openEuler repository on "
-                "gitee.com; use gitcode.com",
-                owner="image_creator",
-            )
-        )
     _validate_docs(repo, task, app_root, findings)
     if phase == "full":
         findings.extend(
@@ -834,6 +883,7 @@ def validate_final_target(
     task: TaskSpec,
     base_sha: str,
     expected_run_id: str,
+    allow_legacy_evidence: bool = False,
 ) -> dict[str, object]:
     if not _RUN_ID_RE.fullmatch(expected_run_id):
         raise TargetContractError("expected_run_id must be a positive integer")
@@ -881,14 +931,12 @@ def validate_final_target(
     for architecture in ("x86_64", "aarch64"):
         path = result_dir / f"{architecture}.junit.xml"
         try:
-            suite = ET.parse(path).getroot()
-            failures = int(suite.attrib.get("failures", "0"))
-            errors = int(suite.attrib.get("errors", "0"))
-        except (ET.ParseError, ValueError) as error:
+            pass_rate = junit_pass_rate(path.read_bytes())
+        except (OSError, ValueError) as error:
             raise TargetContractError(
                 f"{architecture} JUnit is invalid"
             ) from error
-        if suite.tag != "testsuite" or failures or errors:
+        if pass_rate != 1.0:
             raise TargetContractError(
                 f"{architecture} JUnit does not prove a passed validation"
             )
@@ -926,8 +974,9 @@ def validate_final_target(
         )
     for architecture, evidence in architectures.items():
         checks = evidence.get("checks") if isinstance(evidence, dict) else None
-        if not isinstance(checks, dict) or not checks or not all(
-            value is True for value in checks.values()
+        if not native_checks_pass(
+            checks,
+            allow_legacy=allow_legacy_evidence,
         ):
             raise TargetContractError(
                 f"results.json {architecture} checks did not all pass"
