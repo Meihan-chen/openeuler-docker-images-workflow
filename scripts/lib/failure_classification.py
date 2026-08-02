@@ -47,14 +47,22 @@ _GUIDANCE = {
         "The candidate changed paths this task does not own. Restrict the "
         "change to the task's own files."
     ),
+    "image-contract": (
+        "The deterministic repository contract assigned these findings to "
+        "Image Creator. Repair only the listed image-owned content."
+    ),
+    "test-contract": (
+        "The deterministic test contract assigned these findings to "
+        "Testcase Creator. Repair only the listed test-owned content."
+    ),
     "config-parse": (
         "A Goss or YAML file failed to parse before any assertion ran, so the "
         "image behaviour is still unknown. Fix the test configuration syntax "
         "and do not change the Dockerfile for this failure."
     ),
-    "lint-error": (
-        "The Dockerfile linter rejected the candidate. Fix the reported rules "
-        "without disabling them."
+    "lint-advisory": (
+        "Hadolint produced advisory diagnostics. Record them for review; do "
+        "not request an automatic Creator repair."
     ),
     "build-error": (
         "The image did not build. Fix the build definition; runtime "
@@ -115,15 +123,45 @@ def classify_failure(
     """
     category = "unclassified"
     stray: list[str] = []
+    owner = ""
+    finding_codes: list[str] = []
 
-    if gate is not None and gate.get("status") != "passed":
+    structured_findings = []
+    if gate is not None and isinstance(gate.get("findings"), list):
+        structured_findings = [
+            finding
+            for finding in gate["findings"]
+            if isinstance(finding, Mapping)
+            and finding.get("level") == "delivery_stop"
+        ]
+    if structured_findings:
+        owners = {str(finding.get("owner", "")) for finding in structured_findings}
+        if owners == {"image_creator"}:
+            category = "image-contract"
+            owner = "image_creator"
+        elif owners == {"testcase_creator"}:
+            category = "test-contract"
+            owner = "testcase_creator"
+        else:
+            category = "candidate-scope"
+        finding_codes = [
+            str(finding.get("code", ""))
+            for finding in structured_findings
+            if finding.get("code")
+        ]
+    elif gate is not None and gate.get("status") != "passed":
         errors = gate.get("errors")
         errors = list(errors) if isinstance(errors, list) else []
         if errors:
             stray = _stray_roots(errors, allowed_roots)
             category = "workspace-hygiene" if stray else "candidate-scope"
-    elif lint is not None and lint.get("status") != "passed":
-        category = "lint-error"
+    elif lint is not None and lint.get("blocking") is True:
+        category = "infra"
+    elif lint is not None and (
+        lint.get("diagnostic_status") == "findings"
+        or lint.get("status") != "passed"
+    ):
+        category = "lint-advisory"
     elif report is not None and report.get("status") != "passed":
         details = report.get("failure_details")
         details = details if isinstance(details, Mapping) else {}
@@ -146,6 +184,10 @@ def classify_failure(
             paths=", ".join(f"`{root}/`" for root in stray)
         )
     result: dict[str, object] = {"category": category, "guidance": guidance}
+    if owner:
+        result["owner"] = owner
+    if finding_codes:
+        result["finding_codes"] = finding_codes
     if stray:
         result["stray_paths"] = stray
     return result

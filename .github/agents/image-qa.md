@@ -8,7 +8,7 @@ You receive the Image Creator's complete output:
 - `Dockerfile` content
 - `meta.yml` content
 - `README.md` content
-- `doc/image-info.yml` content
+- optional `doc/` content, when the Creator generated it
 - `image-list.yml` update
 - all auxiliary files created for the image, such as configuration,
   entrypoint, patch and template files
@@ -48,15 +48,18 @@ Challenge from these angles:
 - Does `README.md` tag table match `meta.yml`?
 
 ### Documentation Quality
-- Does `doc/image-info.yml` have all required fields?
-- Is the upstream value correct for this project?
+- `doc/` is optional. Its complete absence is valid and must not be reported.
+- If any `doc/` content exists, is `doc/image-info.yml` valid and complete under
+  the target repository schema, does it include at least one doc/picture asset,
+  and do all declared or referenced assets exist?
+- If present, is the upstream value correct for this project?
 - Are usage instructions actually runnable?
 - Are dependencies listed correctly?
-- Is the logo from an official or trustworthy upstream source rather than AI-generated?
-- Does every link to an openEuler repository use `gitcode.com`? A `gitee.com`
-  link is a blocker even when neighbouring packages still carry one: those are
-  pre-migration files, and openEuler now hosts its repositories on gitcode.com.
-  Upstream project links keep their own real addresses.
+- If present, is the logo from an official or trustworthy upstream source rather than AI-generated?
+- Does every link to an openEuler repository use `gitcode.com`? Specifically,
+  `gitee.com/openeuler/*` and `gitee.com/src-openeuler/*` are pre-migration
+  links and must be replaced. Third-party Gitee repositories are valid upstream
+  sources and keep their own real addresses.
 
 ### Repository Compliance
 - Are all files in the correct directory structure?

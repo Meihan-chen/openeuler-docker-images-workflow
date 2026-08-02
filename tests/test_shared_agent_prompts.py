@@ -57,10 +57,34 @@ def test_image_prompts_define_generic_auxiliary_file_policy():
     image_qa = (AGENTS_DIR / "image-qa.md").read_text().lower()
 
     assert "minimum required structure" in image_creator
+    assert "doc/ is optional" in image_creator
+    assert "if any doc/ content is created" in image_creator
+    assert "at least one doc/picture asset" in image_creator
+    assert "at least one doc/picture asset" in image_qa
     assert "upstream-provided configuration" in image_creator
     assert "persistent data directory" in image_creator
     assert "auxiliary files" in image_qa
     assert "configuration provenance" in image_qa
+
+
+def test_image_prompts_restrict_only_open_euler_owned_gitee_links():
+    image_creator = (AGENTS_DIR / "image-creator.md").read_text().lower()
+    image_qa = (AGENTS_DIR / "image-qa.md").read_text().lower()
+
+    for prompt in (image_creator, image_qa):
+        assert "third-party gitee" in prompt
+        assert "gitee.com/openeuler" in prompt
+        assert "gitee.com/src-openeuler" in prompt
+    assert "`gitee.com` 是 openeuler 迁移前的旧域名，一律禁止" not in image_creator
+
+
+def test_testcase_prompts_make_wait_and_helper_files_conditional():
+    testcase_creator = (AGENTS_DIR / "testcase-creator.md").read_text().lower()
+    testcase_qa = (AGENTS_DIR / "testcase-qa.md").read_text().lower()
+
+    for prompt in (testcase_creator, testcase_qa):
+        assert "goss_wait.yaml is optional" in prompt
+        assert "test_helpers.sh is optional" in prompt
 
 
 def test_shared_prompts_derive_application_behavior_instead_of_assuming_it():

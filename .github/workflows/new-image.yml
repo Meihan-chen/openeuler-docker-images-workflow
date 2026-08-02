@@ -168,10 +168,13 @@ jobs:
           OS_VERSION: ${{ inputs.os_version }}
           DOMAIN: ${{ inputs.domain }}
         run: |
+          lint_report="${RUNNER_TEMP}/phase1-prepare/generation-reports/hadolint.txt"
+          lint_status=0
           "${{ steps.tools.outputs.hadolint_path }}" \
-            --ignore DL3033 \
-            --ignore DL3041 \
-            "${RUNNER_TEMP}/phase1-target/${DOMAIN}/${APP}/${VERSION}/${OS_VERSION}/Dockerfile"
+            "${RUNNER_TEMP}/phase1-target/${DOMAIN}/${APP}/${VERSION}/${OS_VERSION}/Dockerfile" \
+            > "${lint_report}" 2>&1 || lint_status=$?
+          cat "${lint_report}"
+          printf 'Hadolint advisory exit status: %s\n' "${lint_status}"
 
       - name: Create generation patch
         uses: ./.github/actions/phase1-emit-patch
@@ -695,10 +698,13 @@ jobs:
             tr -d '\n' < "${RUNNER_TEMP}/package-base-sha.txt"
           )"
           mkdir -p "${RUNNER_TEMP}/candidate/reports/agents"
+          lint_report="${RUNNER_TEMP}/candidate/reports/hadolint.txt"
+          lint_status=0
           "${{ steps.tools.outputs.hadolint_path }}" \
-            --ignore DL3033 \
-            --ignore DL3041 \
-            "${RUNNER_TEMP}/phase1-target/${domain}/${app}/${version}/${os_version}/Dockerfile"
+            "${RUNNER_TEMP}/phase1-target/${domain}/${app}/${version}/${os_version}/Dockerfile" \
+            > "${lint_report}" 2>&1 || lint_status=$?
+          cat "${lint_report}"
+          printf 'Hadolint advisory exit status: %s\n' "${lint_status}"
           "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/gate_diff.py \
             task-contract \
             --phase final \

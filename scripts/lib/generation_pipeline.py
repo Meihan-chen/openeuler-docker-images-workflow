@@ -75,10 +75,6 @@ def lint_dockerfile(
         completed = subprocess.run(
             [
                 str(executable),
-                "--ignore",
-                "DL3033",
-                "--ignore",
-                "DL3041",
                 str(dockerfile),
             ],
             text=True,
@@ -88,6 +84,8 @@ def lint_dockerfile(
     except OSError as error:
         return {
             "status": "failed",
+            "blocking": True,
+            "diagnostic_status": "unavailable",
             "returncode": None,
             "output": str(error),
         }
@@ -97,13 +95,24 @@ def lint_dockerfile(
         if part.strip()
     )
     return {
-        "status": "passed" if completed.returncode == 0 else "failed",
+        "status": "passed",
+        "blocking": False,
+        "diagnostic_status": (
+            "clean" if completed.returncode == 0 else "findings"
+        ),
         "returncode": completed.returncode,
         "output": output,
     }
 
 
 def _require_phase1_task(task: TaskSpec) -> None:
+    """Pin the zero-AI smoke candidate to the one TaskSpec it is written for.
+
+    Generation itself is no longer restricted: the prompts and the target
+    gates carry no application knowledge, so the pipeline is free to attempt
+    any TaskSpec. Native validation is where the remaining Kvrocks assumptions
+    live, which is what running a second application is meant to expose.
+    """
     actual = (
         task.app,
         task.version,
@@ -113,8 +122,8 @@ def _require_phase1_task(task: TaskSpec) -> None:
     )
     if actual != _PHASE1_TASK:
         raise GenerationPipelineError(
-            "phase one only supports the confirmed Kvrocks 2.16.0 "
-            "TaskSpec"
+            "the deterministic smoke candidate only supports the Kvrocks "
+            "2.16.0 TaskSpec"
         )
 
 
@@ -448,10 +457,16 @@ def _target_gate_report(
             phase=phase,
         )
     except (TargetContractError, OSError, UnicodeError) as error:
-        return {
+        report: dict[str, object] = {
             "status": "failed",
+            "build_allowed": False,
+            "delivery_allowed": False,
+            "test_allowed": False,
             "errors": str(error).splitlines(),
         }
+        if isinstance(error, TargetContractError) and error.findings:
+            report["findings"] = error.findings
+        return report
 
 
 def _run(
@@ -634,7 +649,6 @@ def run_generation_pipeline(
 ) -> GenerationResult:
     workspace = Path(workspace).resolve()
     report_dir = Path(report_dir).resolve()
-    _require_phase1_task(task)
     if report_dir == workspace or workspace in report_dir.parents:
         raise GenerationPipelineError(
             "Agent evidence directory must remain outside the target workspace"
@@ -664,7 +678,6 @@ def run_generation_pipeline(
         report_name: str,
         stage: str,
         failure_message: str,
-        fail_closed: bool = True,
     ) -> Mapping[str, object]:
         log("gate", f"START {stage}")
         report = _target_gate_report(
@@ -675,10 +688,18 @@ def run_generation_pipeline(
             phase=phase,
         )
         _write_report(report_dir, report_name, report, api_key)
-        if report.get("status") != "passed":
-            if fail_closed:
-                raise GenerationPipelineError(failure_message)
-            log("gate", f"NEEDS_FIX {stage}")
+        build_allowed = report.get(
+            "build_allowed",
+            report.get("status") == "passed",
+        )
+        if build_allowed is not True:
+            raise GenerationPipelineError(failure_message)
+        if report.get("delivery_allowed", True) is not True:
+            finding_count = len(report.get("findings", []))
+            log(
+                "gate",
+                f"NEEDS_FIX {stage} delivery_findings={finding_count}",
+            )
             return report
         log("gate", f"PASS {stage}")
         return report
@@ -687,26 +708,48 @@ def run_generation_pipeline(
         *,
         report_name: str,
         stage: str,
-        fail_closed: bool = True,
     ) -> Mapping[str, object]:
         if image_linter is None:
             return {"status": "passed"}
         log("lint", f"START {stage}")
         report = image_linter(dockerfile)
         _write_report(report_dir, report_name, report, api_key)
-        if report.get("status") != "passed":
-            detail = " ".join(
-                str(_redact(report.get("output", ""), api_key)).split()
-            )[:500]
-            detail = detail or "no lint output"
-            log("lint", f"NEEDS_FIX {stage}: {detail}")
-            if fail_closed:
-                raise GenerationPipelineError(
-                    f"{stage} did not pass: {detail}"
-                )
+        detail = " ".join(
+            str(_redact(report.get("output", ""), api_key)).split()
+        )[:500]
+        detail = detail or "no lint output"
+        if report.get("blocking") is True or report.get("status") != "passed":
+            raise GenerationPipelineError(
+                f"{stage} could not run: {detail}"
+            )
+        if report.get("diagnostic_status") == "findings":
+            log("lint", f"ADVISORY {stage}: {detail}")
             return report
         log("lint", f"PASS {stage}")
         return report
+
+    def owner_gate_findings(
+        report: Mapping[str, object],
+        *,
+        owner: str,
+    ) -> Mapping[str, object] | None:
+        raw_findings = report.get("findings", [])
+        if not isinstance(raw_findings, list):
+            return None
+        findings = [
+            finding
+            for finding in raw_findings
+            if isinstance(finding, Mapping)
+            and finding.get("owner") == owner
+            and finding.get("level") == "delivery_stop"
+        ]
+        if not findings:
+            return None
+        return {
+            **report,
+            "findings": findings,
+            "errors": [str(finding.get("message", "")) for finding in findings],
+        }
 
     def image_owned_snapshot() -> dict[str, str]:
         return {
@@ -801,26 +844,20 @@ def run_generation_pipeline(
         report_name="image-precheck-gates.json",
         stage="image_precheck",
         failure_message="deterministic image precheck did not pass",
-        fail_closed=False,
     )
-    image_lint: Mapping[str, object] = {
-        "status": "skipped",
-        "reason": "image gate did not pass",
-    }
-    if image_gate.get("status") == "passed":
-        image_lint = lint_image(
-            report_name="image-lint.json",
-            stage="image_lint",
-            fail_closed=False,
-        )
-    if (
-        image_gate.get("status") != "passed"
-        or image_lint.get("status") != "passed"
-    ):
+    lint_image(
+        report_name="image-lint.json",
+        stage="image_lint",
+    )
+    image_findings = owner_gate_findings(
+        image_gate,
+        owner="image_creator",
+    )
+    if image_findings is not None:
         repair_deterministic_failure(
             creator_role="image_creator",
             report_name="image-creator-precheck-repair.json",
-            findings={"gate": image_gate, "lint": image_lint},
+            findings={"gate": image_findings},
         )
         enforce_gate(
             phase="image",
@@ -912,13 +949,16 @@ def run_generation_pipeline(
         report_name="precheck-gates.json",
         stage="generated_precheck",
         failure_message="deterministic target precheck did not pass",
-        fail_closed=False,
     )
-    if testcase_gate.get("status") != "passed":
+    testcase_findings = owner_gate_findings(
+        testcase_gate,
+        owner="testcase_creator",
+    )
+    if testcase_findings is not None:
         repair_deterministic_failure(
             creator_role="testcase_creator",
             report_name="testcase-creator-precheck-repair.json",
-            findings={"gate": testcase_gate},
+            findings={"gate": testcase_findings},
         )
         enforce_testcase_ownership(
             report_name="testcase-precheck-repair-ownership.json",

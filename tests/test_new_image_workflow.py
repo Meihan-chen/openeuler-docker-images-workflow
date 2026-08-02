@@ -641,7 +641,7 @@ def test_prepare_uploads_reports_and_diagnostic_patch_after_generation_failure()
     assert upload["with"]["path"] == "${{ runner.temp }}/phase1-prepare/"
 
 
-def test_hadolint_treats_unpinned_yum_and_dnf_packages_equally():
+def test_hadolint_is_advisory_without_a_project_rule_allowlist():
     jobs = _workflow()["jobs"]
     prepare_steps = {
         step["name"]: step for step in jobs["prepare"]["steps"]
@@ -650,15 +650,19 @@ def test_hadolint_treats_unpinned_yum_and_dnf_packages_equally():
         step["name"]: step for step in jobs["package_candidate"]["steps"]
     }
 
-    for step in (
-        prepare_steps["Lint generated Dockerfile"],
-        package_steps["Enforce final target gates and lint"],
-    ):
-        assert "--ignore DL3033" in step["run"]
-        assert "--ignore DL3041" in step["run"]
+    smoke_lint = prepare_steps["Lint generated Dockerfile"]
+    final_gate = package_steps["Enforce final target gates and lint"]
+    for step in (smoke_lint, final_gate):
+        assert "--ignore" not in step["run"]
+        assert "lint_status=0" in step["run"]
+        assert "|| lint_status=$?" in step["run"]
+        assert "Hadolint advisory exit status" in step["run"]
 
-    assert WORKFLOW_PATH.read_text().count("--ignore DL3033") == 2
-    assert WORKFLOW_PATH.read_text().count("--ignore DL3041") == 2
+    assert "generation-reports/hadolint.txt" in smoke_lint["run"]
+    assert "candidate/reports/hadolint.txt" in final_gate["run"]
+    assert "scripts/harness/gate_diff.py" in final_gate["run"]
+    assert "--phase final" in final_gate["run"]
+    assert "--ignore DL" not in WORKFLOW_PATH.read_text()
 
 
 def test_validate_only_lints_before_agent_qa_inside_generation():

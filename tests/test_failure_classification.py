@@ -182,13 +182,49 @@ def test_yaml_parse_text_during_a_build_is_a_build_error():
 
 
 def test_a_lint_failure_names_the_linter_rather_than_asking_for_more_evidence():
-    """Hadolint findings are always the Creator's to fix."""
+    """Hadolint is diagnostic and must not invent an Agent repair."""
     from scripts.lib.failure_classification import classify_failure
 
     result = classify_failure(
         gate={"status": "passed"},
-        lint={"status": "failed", "output": "DL3033 pin yum packages"},
+        lint={
+            "status": "passed",
+            "diagnostic_status": "findings",
+            "blocking": False,
+            "output": "DL3033 pin yum packages",
+        },
     )
 
-    assert result["category"] == "lint-error"
-    assert "insufficient evidence" not in result["guidance"].lower()
+    assert result["category"] == "lint-advisory"
+    assert "do not request" in result["guidance"].lower()
+
+
+@pytest.mark.parametrize(
+    ("owner", "category"),
+    (
+        ("image_creator", "image-contract"),
+        ("testcase_creator", "test-contract"),
+    ),
+)
+def test_structured_gate_finding_routes_to_its_declared_owner(owner, category):
+    from scripts.lib.failure_classification import classify_failure
+
+    gate = {
+        "status": "passed",
+        "build_allowed": True,
+        "delivery_allowed": False,
+        "findings": [
+            {
+                "code": "contract.example",
+                "level": "delivery_stop",
+                "owner": owner,
+                "message": "repair this declared contract",
+            }
+        ],
+    }
+
+    result = classify_failure(gate=gate)
+
+    assert result["category"] == category
+    assert result["owner"] == owner
+    assert result["finding_codes"] == ["contract.example"]

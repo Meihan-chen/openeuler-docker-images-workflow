@@ -50,10 +50,12 @@ Harness 在 `## Review report to resolve` 下附一个 JSON 对象，字段如�
 
 | category | 含义与处置 |
 |------|------|
-| `workspace-hygiene` | 目标仓里出现了新增的调研产物。删除或移到 scratch 目录，**不要回退候选文件** |
-| `candidate-scope` | 候选改动了本任务不拥有的路径。收窄改动范围 |
+| `workspace-hygiene` | 目标仓里出现了新增的调研产物，属于边界硬错误。不得自动修改；返回 `unfixable` 供 Harness 从 checkpoint 恢复 |
+| `candidate-scope` | 候选改动了本任务不拥有的路径，属于边界硬错误。不得自动修改；返回 `unfixable` |
+| `image-contract` | 结构化 finding 的 owner 是 Image Creator；只修报告列出的 image-owned 内容 |
+| `test-contract` | 结构化 finding 的 owner 是 Testcase Creator；只修报告列出的 test-owned 内容 |
 | `config-parse` | Goss/YAML 在任何断言执行前解析失败。修测试配置语法，**不要因此改 Dockerfile** |
-| `lint-error` | Dockerfile linter 拒绝。按规则修，不得禁用规则 |
+| `lint-advisory` | Hadolint 诊断仅供记录，不触发 Fixer；若意外收到，保持文件不变并返回 `unfixable` |
 | `build-error` | 镜像未构建成功，运行时断言从未执行 |
 | `runtime-error` | 镜像构建成功但行为与测试不符。先判断错的是镜像还是断言 |
 | `infra` | 执行环境故障，不得修改任何文件 |
@@ -99,7 +101,7 @@ Harness 在 `## Review report to resolve` 下附一个 JSON 对象，字段如�
   "success": true,
   "status": "fixed|insufficient_evidence|unfixable",
   "diagnosis": {
-    "error_type": "workspace-hygiene|candidate-scope|config-parse|lint-error|build-error|runtime-error|infra",
+    "error_type": "workspace-hygiene|candidate-scope|image-contract|test-contract|config-parse|lint-advisory|build-error|runtime-error|infra|unclassified",
     "root_cause": "一句话描述",
     "confidence": 0.0
   },

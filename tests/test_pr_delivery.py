@@ -24,6 +24,8 @@ def _candidate(
     testcase_qa_status="approved",
     testcase_repaired=False,
     native_fixer=False,
+    hadolint_output="",
+    gate_delivery_allowed=None,
 ):
     from scripts.lib.candidate_bundle import CandidateBundle
 
@@ -68,9 +70,12 @@ def _candidate(
                 }
             )
         )
-    (root / "reports" / "gates.json").write_text(
-        json.dumps({"status": "passed", "added_files": 14})
-    )
+    gate_report = {"status": "passed", "added_files": 14}
+    if gate_delivery_allowed is not None:
+        gate_report["delivery_allowed"] = gate_delivery_allowed
+    (root / "reports" / "gates.json").write_text(json.dumps(gate_report))
+    if hadolint_output:
+        (root / "reports" / "hadolint.txt").write_text(hadolint_output)
     (root / "reports" / "agents" / "image-qa-round1.json").write_text(
         json.dumps(
             {
@@ -306,6 +311,35 @@ def test_pr_content_summarizes_qa_rounds_and_findings(tmp_path):
     assert "The repaired tests now verify the exact application version." in (
         content.body
     )
+
+
+def test_pr_content_reports_hadolint_findings_as_advisory(tmp_path):
+    from scripts.harness.compose_pr import compose_pull_request
+
+    bundle = _candidate(
+        tmp_path,
+        hadolint_output=(
+            "Dockerfile:8 DL3041 Specify version with yum install\n"
+            "Dockerfile:12 DL3002 Last USER should not be root\n"
+            "Dockerfile:15 SC2086 Double quote to prevent globbing\n"
+        ),
+    )
+
+    content = compose_pull_request(bundle)
+
+    assert "Hadolint: `3` advisory findings" in content.body
+    assert "DL3041" in content.body
+    assert "DL3002" in content.body
+    assert "SC2086" in content.body
+
+
+def test_pr_content_rejects_buildable_but_not_deliverable_gate(tmp_path):
+    from scripts.harness.compose_pr import PRDeliveryError, compose_pull_request
+
+    bundle = _candidate(tmp_path, gate_delivery_allowed=False)
+
+    with pytest.raises(PRDeliveryError, match="delivery contract"):
+        compose_pull_request(bundle)
 
 
 def test_pr_content_records_non_blocking_qa_disagreement(tmp_path):

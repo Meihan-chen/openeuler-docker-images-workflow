@@ -17,6 +17,15 @@ from scripts.lib.task_spec import TaskSpec
 class TargetContractError(ValueError):
     """Raised when generated target content is not safe or merge-ready."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        findings: list[dict[str, str]] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.findings = list(findings or ())
+
 
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _RUN_ID_RE = re.compile(r"^[1-9][0-9]*$")
@@ -26,7 +35,11 @@ _RESULT_FILES = {
     "version_info.json",
     "results.json",
 }
-_RETIRED_HOSTS = (b"gitee.com",)
+_OPENEULER_GITEE_URL_RE = re.compile(
+    r"https?://(?:www\.)?gitee\.com/(?:openeuler|src-openeuler)"
+    r"(?=/|[\s?#)]|$)",
+    re.IGNORECASE,
+)
 _VERSION_INFO_FIELDS = {
     "test_time",
     "Model",
@@ -40,6 +53,67 @@ _VERSION_INFO_FIELDS = {
     "python_version",
     "numpy_version",
 }
+
+
+def _finding(
+    code: str,
+    *,
+    owner: str,
+    level: str,
+    message: str,
+) -> dict[str, str]:
+    if code.startswith("tests."):
+        source = "scenario_one_test_protocol"
+    elif code.startswith("links."):
+        source = "confirmed_migration_policy"
+    elif code.startswith(("scope.", "required.")):
+        source = "task_boundary"
+    else:
+        source = "target_repository_contract"
+    return {
+        "code": code,
+        "level": level,
+        "owner": owner,
+        "source": source,
+        "message": message,
+    }
+
+
+def _hard_finding(code: str, message: str) -> dict[str, str]:
+    return _finding(
+        code,
+        owner="workflow",
+        level="hard_stop",
+        message=message,
+    )
+
+
+def _delivery_finding(
+    code: str,
+    message: str,
+    *,
+    owner: str,
+) -> dict[str, str]:
+    return _finding(
+        code,
+        owner=owner,
+        level="delivery_stop",
+        message=message,
+    )
+
+
+def _advisory_finding(
+    code: str,
+    message: str,
+    *,
+    owner: str,
+) -> dict[str, str]:
+    return _finding(
+        code,
+        owner=owner,
+        level="advisory",
+        message=message,
+    )
 
 
 def _image_tag(version: str, os_version: str) -> str:
@@ -182,16 +256,12 @@ def _required_paths(
     image_paths = [
         f"{app_root}/README.md",
         f"{app_root}/meta.yml",
-        f"{app_root}/doc/image-info.yml",
-        f"{app_root}/doc/picture/logo.png",
         f"{image_root}/Dockerfile",
     ]
     if phase == "image":
         return app_root, image_paths
     return app_root, image_paths + [
         f"{app_root}/tests/goss.yaml",
-        f"{app_root}/tests/goss_wait.yaml",
-        f"{app_root}/tests/test_helpers.sh",
         f"{app_root}/tests/test.sh",
     ]
 
@@ -201,7 +271,8 @@ def _validate_image_list(
     *,
     task: TaskSpec,
     base_sha: str,
-    errors: list[str],
+    hard_findings: list[dict[str, str]],
+    findings: list[dict[str, str]],
 ) -> str:
     relative = f"{task.domain}/image-list.yml"
     path = repo / relative
@@ -210,138 +281,277 @@ def _validate_image_list(
         before = yaml.safe_load(before_text)
         after = _load_yaml(path, relative)
     except (TargetContractError, yaml.YAMLError) as error:
-        errors.append(f"image-list validation failed: {error}")
+        hard_findings.append(
+            _hard_finding(
+                "image_list.invalid_yaml",
+                f"image-list validation failed: {error}",
+            )
+        )
         return relative
     if not isinstance(before, dict) or not isinstance(before.get("images"), dict):
-        errors.append("base image-list.yml has no images mapping")
+        hard_findings.append(
+            _hard_finding(
+                "image_list.invalid_base",
+                "base image-list.yml has no images mapping",
+            )
+        )
         return relative
     if not isinstance(after, dict) or not isinstance(after.get("images"), dict):
-        errors.append("image-list.yml has no images mapping")
+        hard_findings.append(
+            _hard_finding(
+                "image_list.invalid_generated",
+                "image-list.yml has no images mapping",
+            )
+        )
         return relative
-    expected = dict(before["images"])
-    expected[task.app] = task.app
-    if after["images"] != expected or set(after) != set(before):
-        errors.append(
-            "image-list.yml must preserve every existing entry and add only "
-            f"{task.app}: {task.app}"
+    if set(after) != set(before) or any(
+        after["images"].get(name) != value
+        for name, value in before["images"].items()
+    ):
+        hard_findings.append(
+            _hard_finding(
+                "image_list.existing_entries_changed",
+                "image-list.yml must preserve every existing entry",
+            )
+        )
+        return relative
+    added_names = set(after["images"]) - set(before["images"])
+    if added_names - {task.app}:
+        hard_findings.append(
+            _hard_finding(
+                "image_list.out_of_scope_entry",
+                "image-list.yml adds entries outside the requested application",
+            )
+        )
+    if added_names != {task.app} or after["images"].get(task.app) != task.app:
+        findings.append(
+            _delivery_finding(
+                "image_list.registration",
+                f"image-list.yml must add {task.app}: {task.app}",
+                owner="image_creator",
+            )
         )
     return relative
 
 
-def _validate_meta(repo: Path, task: TaskSpec, app_root: str, errors: list[str]) -> None:
-    errors.extend(
-        validate_task_meta_file(repo / app_root / "meta.yml", task)
-    )
+def _validate_meta(
+    repo: Path,
+    task: TaskSpec,
+    app_root: str,
+    findings: list[dict[str, str]],
+) -> None:
+    for message in validate_task_meta_file(repo / app_root / "meta.yml", task):
+        if "omit arch" in message:
+            code = "meta.dual_arch"
+        elif "path must be" in message or "does not exist" in message:
+            code = "meta.path"
+        elif "only tag" in message or "format" in message:
+            code = "meta.tag"
+        else:
+            code = "meta.schema"
+        findings.append(
+            _delivery_finding(code, message, owner="image_creator")
+        )
 
 
 def _validate_tests(
     repo: Path,
     app_root: str,
-    errors: list[str],
+    findings: list[dict[str, str]],
 ) -> None:
     shared = repo / app_root / "tests"
-    goss_text = (shared / "goss.yaml").read_text()
-    goss_wait_text = (shared / "goss_wait.yaml").read_text()
-    try:
-        goss_data = yaml.safe_load(goss_text)
-    except yaml.YAMLError:
-        goss_data = None
-        errors.append("goss.yaml must be valid YAML")
-    if isinstance(goss_data, dict):
-        commands = goss_data.get("command", {})
-        if isinstance(commands, dict):
-            for name, assertion in commands.items():
-                if not isinstance(assertion, dict) or "stdout" not in assertion:
-                    continue
-                if not isinstance(assertion["stdout"], (str, list)):
-                    errors.append(
-                        f"goss command {name} stdout must be a string or "
-                        "YAML list"
+    goss_path = shared / "goss.yaml"
+    if goss_path.is_file() and goss_path.stat().st_size:
+        try:
+            goss_data = yaml.safe_load(goss_path.read_text())
+        except yaml.YAMLError:
+            goss_data = None
+            findings.append(
+                _delivery_finding(
+                    "tests.goss_yaml",
+                    "goss.yaml must be valid YAML",
+                    owner="testcase_creator",
+                )
+            )
+        if isinstance(goss_data, dict):
+            commands = goss_data.get("command", {})
+            if isinstance(commands, dict):
+                for name, assertion in commands.items():
+                    if not isinstance(assertion, dict) or "stdout" not in assertion:
+                        continue
+                    if not isinstance(assertion["stdout"], (str, list)):
+                        findings.append(
+                            _delivery_finding(
+                                "tests.goss_stdout_schema",
+                                f"goss command {name} stdout must be a string or YAML list",
+                                owner="testcase_creator",
+                            )
+                        )
+        elif goss_data is not None:
+            findings.append(
+                _delivery_finding(
+                    "tests.goss_schema",
+                    "goss.yaml must contain a YAML mapping",
+                    owner="testcase_creator",
+                )
+            )
+
+    goss_wait_path = shared / "goss_wait.yaml"
+    if goss_wait_path.is_file() and goss_wait_path.stat().st_size:
+        try:
+            goss_wait_data = yaml.safe_load(goss_wait_path.read_text())
+        except yaml.YAMLError:
+            goss_wait_data = None
+            findings.append(
+                _delivery_finding(
+                    "tests.wait_yaml",
+                    "goss_wait.yaml must be valid YAML",
+                    owner="testcase_creator",
+                )
+            )
+        if isinstance(goss_wait_data, dict):
+            port = goss_wait_data.get("port", {})
+            if port and not isinstance(port, dict):
+                findings.append(
+                    _delivery_finding(
+                        "tests.wait_port_schema",
+                        "goss_wait.yaml port resource must be a YAML mapping",
+                        owner="testcase_creator",
                     )
-    elif goss_data is not None:
-        errors.append("goss.yaml must contain a YAML mapping")
-    try:
-        goss_wait_data = yaml.safe_load(goss_wait_text)
-    except yaml.YAMLError:
-        goss_wait_data = None
-        errors.append("goss_wait.yaml must be valid YAML")
-    if isinstance(goss_wait_data, dict):
-        port = goss_wait_data.get("port", {})
-        if port and not isinstance(port, dict):
-            errors.append("goss_wait.yaml port resource must be a YAML mapping")
-        elif isinstance(port, dict):
-            for name, assertion in port.items():
-                if not isinstance(assertion, dict):
-                    errors.append(
-                        f"goss_wait.yaml port {name} must be a YAML mapping"
-                    )
-                elif "timeout" in assertion:
-                    errors.append(
-                        f"goss_wait.yaml port {name} does not support timeout; "
-                        "the native harness controls the readiness retry"
-                    )
-    elif goss_wait_data is not None:
-        errors.append("goss_wait.yaml must contain a YAML mapping")
+                )
+            elif isinstance(port, dict):
+                for name, assertion in port.items():
+                    if not isinstance(assertion, dict):
+                        findings.append(
+                            _delivery_finding(
+                                "tests.wait_port_schema",
+                                f"goss_wait.yaml port {name} must be a YAML mapping",
+                                owner="testcase_creator",
+                            )
+                        )
+                    elif "timeout" in assertion:
+                        findings.append(
+                            _delivery_finding(
+                                "tests.wait_timeout",
+                                f"goss_wait.yaml port {name} does not support timeout; the native harness controls the readiness retry",
+                                owner="testcase_creator",
+                            )
+                        )
+        elif goss_wait_data is not None:
+            findings.append(
+                _delivery_finding(
+                    "tests.wait_schema",
+                    "goss_wait.yaml must contain a YAML mapping",
+                    owner="testcase_creator",
+                )
+            )
     shared_entry = shared / "test.sh"
-    if not shared_entry.stat().st_mode & 0o111:
-        errors.append(f"{shared_entry.relative_to(repo)} must be executable")
+    if shared_entry.is_file() and not shared_entry.stat().st_mode & 0o111:
+        findings.append(
+            _delivery_finding(
+                "tests.entrypoint_executable",
+                f"{shared_entry.relative_to(repo)} must be executable",
+                owner="testcase_creator",
+            )
+        )
 
 
 def _validate_link_hosts(
     repo: Path,
     app_root: str,
-    errors: list[str],
+    findings: list[dict[str, str]],
 ) -> None:
-    """Reject links to hosts openEuler has migrated away from.
-
-    Every openEuler repository now lives on gitcode.com, but the target repo
-    still carries hundreds of pre-migration gitee.com links. An Agent told to
-    follow "the target repo convention" reads that stale majority and copies a
-    dead host into new documentation, so the migration has to be asserted here
-    rather than inferred from the neighbouring packages.
-    """
+    """Report only old Gitee URLs owned by openEuler, not the whole host."""
     for path in sorted((repo / app_root).rglob("*")):
         if not path.is_file():
             continue
         if path.relative_to(repo / app_root).parts[0] == "results":
             continue
-        content = path.read_bytes().lower()
-        for host in _RETIRED_HOSTS:
-            if host in content:
-                errors.append(
-                    f"{path.relative_to(repo).as_posix()} links to "
-                    f"{host.decode()}; openEuler repositories are hosted "
-                    "on gitcode.com"
+        content = path.read_bytes().decode("utf-8", errors="ignore")
+        if _OPENEULER_GITEE_URL_RE.search(content):
+            findings.append(
+                _delivery_finding(
+                    "links.openeuler_gitee",
+                    f"{path.relative_to(repo).as_posix()} links to an "
+                    "openEuler repository on gitee.com; use gitcode.com",
+                    owner="image_creator",
                 )
+            )
 
 
 def _validate_docs(
     repo: Path,
     task: TaskSpec,
     app_root: str,
-    errors: list[str],
+    findings: list[dict[str, str]],
 ) -> None:
-    readme = (repo / app_root / "README.md").read_text()
-    for heading in (
-        "# Quick reference",
-        "# Supported tags and respective Dockerfile links",
-        "# Usage",
-        "# Question and answering",
-    ):
-        if heading not in readme:
-            errors.append(f"README.md is missing section: {heading}")
-    title = re.compile(
-        rf"^# .*{re.escape(task.app)}.* \| openEuler\s*$",
-        re.IGNORECASE | re.MULTILINE,
-    )
-    if not title.search(readme):
-        errors.append(
-            f"README.md is missing the {task.app} openEuler title"
+    readme_path = repo / app_root / "README.md"
+    if readme_path.is_file() and readme_path.stat().st_size:
+        readme = readme_path.read_text()
+        for heading in (
+            "# Quick reference",
+            "# Supported tags and respective Dockerfile links",
+            "# Usage",
+            "# Question and answering",
+        ):
+            if heading not in readme:
+                findings.append(
+                    _delivery_finding(
+                        "readme.section",
+                        f"README.md is missing section: {heading}",
+                        owner="image_creator",
+                    )
+                )
+        title = re.compile(
+            rf"^# .*{re.escape(task.app)}.* \| openEuler\s*$",
+            re.IGNORECASE | re.MULTILINE,
         )
-    if _image_tag(task.version, task.os_version) not in readme:
-        errors.append("README.md is missing the generated image tag")
+        if not title.search(readme):
+            findings.append(
+                _delivery_finding(
+                    "readme.title",
+                    f"README.md is missing the {task.app} openEuler title",
+                    owner="image_creator",
+                )
+            )
+        if _image_tag(task.version, task.os_version) not in readme:
+            findings.append(
+                _delivery_finding(
+                    "readme.tag",
+                    "README.md is missing the generated image tag",
+                    owner="image_creator",
+                )
+            )
 
-    info = _load_yaml(repo / app_root / "doc" / "image-info.yml", "image-info.yml")
+    doc_root = repo / app_root / "doc"
+    doc_files = (
+        [path for path in doc_root.rglob("*") if path.is_file()]
+        if doc_root.is_dir()
+        else []
+    )
+    if not doc_files:
+        return
+    info_path = doc_root / "image-info.yml"
+    if not info_path.is_file() or not info_path.stat().st_size:
+        findings.append(
+            _delivery_finding(
+                "doc.incomplete",
+                "generated doc is missing doc/image-info.yml",
+                owner="image_creator",
+            )
+        )
+        return
+    try:
+        info = yaml.safe_load(info_path.read_text())
+    except yaml.YAMLError:
+        findings.append(
+            _delivery_finding(
+                "doc.invalid_yaml",
+                "doc/image-info.yml must be valid YAML",
+                owner="image_creator",
+            )
+        )
+        return
     required_keys = {
         "name",
         "category",
@@ -353,22 +563,78 @@ def _validate_docs(
         "license",
         "similar_packages",
         "dependency",
-        "homepage",
-        "upstream",
     }
     if not isinstance(info, dict) or not required_keys.issubset(info):
-        errors.append("image-info.yml is missing required metadata fields")
+        findings.append(
+            _delivery_finding(
+                "doc.required_metadata",
+                "image-info.yml is missing required metadata fields",
+                owner="image_creator",
+            )
+        )
     else:
         if info["name"] != task.app or info["category"] != task.domain.lower():
-            errors.append("image-info.yml name/category do not match TaskSpec")
+            findings.append(
+                _delivery_finding(
+                    "doc.task_identity",
+                    "image-info.yml name/category do not match TaskSpec",
+                    owner="image_creator",
+                )
+            )
         if not isinstance(info["similar_packages"], list) or len(
             info["similar_packages"]
         ) < 3:
-            errors.append("image-info.yml must list at least three similar packages")
+            findings.append(
+                _advisory_finding(
+                    "doc.similar_packages",
+                    "image-info.yml should list at least three similar packages",
+                    owner="image_creator",
+                )
+            )
+        if "homepage" not in info or "upstream" not in info:
+            findings.append(
+                _advisory_finding(
+                    "doc.upstream_metadata",
+                    "image-info.yml should include homepage and upstream metadata",
+                    owner="image_creator",
+                )
+            )
 
-    logo = (repo / app_root / "doc" / "picture" / "logo.png").read_bytes()
-    if not logo.startswith(b"\x89PNG\r\n\x1a\n"):
-        errors.append("doc/picture/logo.png must be a non-empty PNG")
+    picture_root = doc_root / "picture"
+    pictures = (
+        [path for path in picture_root.rglob("*") if path.is_file()]
+        if picture_root.is_dir()
+        else []
+    )
+    if not pictures:
+        findings.append(
+            _delivery_finding(
+                "doc.picture_required",
+                "generated doc must include at least one doc/picture asset",
+                owner="image_creator",
+            )
+        )
+        return
+    for picture in pictures:
+        content = picture.read_bytes()
+        if not content:
+            findings.append(
+                _delivery_finding(
+                    "doc.picture_empty",
+                    f"{picture.relative_to(repo).as_posix()} must not be empty",
+                    owner="image_creator",
+                )
+            )
+        elif picture.suffix.lower() == ".png" and not content.startswith(
+            b"\x89PNG\r\n\x1a\n"
+        ):
+            findings.append(
+                _delivery_finding(
+                    "doc.picture_format",
+                    f"{picture.relative_to(repo).as_posix()} must be a valid PNG",
+                    owner="image_creator",
+                )
+            )
 
 
 def validate_generated_target(
@@ -396,13 +662,15 @@ def validate_generated_target(
     ).returncode == 0:
         raise TargetContractError(f"{app_root} already exists at the target base")
 
-    errors: list[str] = []
+    hard_findings: list[dict[str, str]] = []
+    findings: list[dict[str, str]] = []
     changes = _changed_files(repo, base_sha)
     image_list = _validate_image_list(
         repo,
         task=task,
         base_sha=base_sha,
-        errors=errors,
+        hard_findings=hard_findings,
+        findings=findings,
     )
     modified_files = []
     added_files = []
@@ -412,31 +680,110 @@ def validate_generated_target(
         elif status == "M" and relative == image_list:
             modified_files.append(relative)
         else:
-            errors.append(
-                f"change outside task scope or wrong status: {status} {relative}"
+            hard_findings.append(
+                _hard_finding(
+                    "scope.outside_task",
+                    f"change outside task scope or wrong status: {status} {relative}",
+                )
             )
     if modified_files != [image_list]:
-        errors.append(f"{image_list} must be the only modified existing file")
+        findings.append(
+            _delivery_finding(
+                "image_list.not_modified",
+                f"{image_list} must be the only modified existing file",
+                owner="image_creator",
+            )
+        )
 
     for relative in required:
         path = repo / relative
         if not path.is_file() or path.stat().st_size == 0:
-            errors.append(f"required generated file is missing or empty: {relative}")
+            message = f"required generated file is missing or empty: {relative}"
+            if relative.endswith(("/meta.yml", "/Dockerfile")):
+                hard_findings.append(
+                    _hard_finding("required.build_input", message)
+                )
+            else:
+                owner = (
+                    "testcase_creator"
+                    if "/tests/" in relative
+                    else "image_creator"
+                )
+                findings.append(
+                    _delivery_finding(
+                        "tests.required"
+                        if owner == "testcase_creator"
+                        else "readme.required",
+                        message,
+                        owner=owner,
+                    )
+                )
     for path in (repo / app_root).rglob("*"):
         if path.is_symlink():
-            errors.append(f"generated symlink is forbidden: {path.relative_to(repo)}")
+            hard_findings.append(
+                _hard_finding(
+                    "scope.symlink",
+                    f"generated symlink is forbidden: {path.relative_to(repo)}",
+                )
+            )
 
-    if not any(error.startswith("required generated file") for error in errors):
-        _validate_meta(repo, task, app_root, errors)
-        _validate_link_hosts(repo, app_root, errors)
-        _validate_docs(repo, task, app_root, errors)
-        if phase == "full":
-            _validate_tests(repo, app_root, errors)
+    meta_path = repo / app_root / "meta.yml"
+    if meta_path.is_file() and meta_path.stat().st_size:
+        try:
+            meta = yaml.safe_load(meta_path.read_text())
+        except (OSError, yaml.YAMLError):
+            hard_findings.append(
+                _hard_finding(
+                    "meta.invalid_yaml",
+                    "meta.yml is not valid YAML",
+                )
+            )
+        else:
+            if not isinstance(meta, dict) or not meta:
+                hard_findings.append(
+                    _hard_finding(
+                        "meta.invalid_schema",
+                        "meta.yml must contain a non-empty YAML mapping",
+                    )
+                )
+            else:
+                _validate_meta(repo, task, app_root, findings)
 
-    if errors:
-        raise TargetContractError("\n".join(errors))
+    _validate_link_hosts(repo, app_root, findings)
+    if _OPENEULER_GITEE_URL_RE.search(task.source_url):
+        findings.append(
+            _delivery_finding(
+                "links.openeuler_gitee",
+                "TaskSpec source_url points to an openEuler repository on "
+                "gitee.com; use gitcode.com",
+                owner="image_creator",
+            )
+        )
+    _validate_docs(repo, task, app_root, findings)
+    if phase == "full":
+        _validate_tests(repo, app_root, findings)
+
+    if hard_findings:
+        raise TargetContractError(
+            "\n".join(finding["message"] for finding in hard_findings),
+            findings=hard_findings,
+        )
+    delivery_findings = [
+        finding
+        for finding in findings
+        if finding["level"] == "delivery_stop"
+    ]
+    test_allowed = not any(
+        finding["owner"] == "testcase_creator"
+        for finding in delivery_findings
+    )
     return {
         "status": "passed",
+        "build_allowed": True,
+        "delivery_allowed": not delivery_findings,
+        "test_allowed": test_allowed,
+        "findings": findings,
+        "errors": [finding["message"] for finding in delivery_findings],
         "task_id": task.task_id,
         "base_sha": base_sha,
         "phase": phase,
@@ -464,6 +811,12 @@ def validate_final_target(
         task=task,
         base_sha=base_sha,
     )
+    if not generated.get("delivery_allowed", True):
+        messages = generated.get("errors", [])
+        raise TargetContractError(
+            "final delivery contract did not pass: "
+            + "; ".join(str(message) for message in messages)
+        )
     result_dir = (
         Path(repo)
         / task.domain

@@ -48,9 +48,10 @@ gh api repos/{owner}/{repo}/readme --jq '.content' | base64 -d | head -60
 （openeuler-docker-images、各 SIG、community 等）一律使用 `gitcode.com`，路径形式不变，例如
 `https://gitcode.com/openeuler/openeuler-docker-images/blob/master/{category}/{package_name}/{version}/{os_version}/Dockerfile`。
 
-`gitee.com` 是 openEuler 迁移前的旧域名，一律禁止。目标仓大量存量文件
-仍指向 `gitee.com`，那是尚未回填的历史内容，不是现行规范，照抄会产生失效链接。
-上游项目链接（GitHub、官网、文档站）保持其真实地址，不做替换。
+只有 openEuler 自有仓库的迁移前链接需要替换：不得新增
+`gitee.com/openeuler/*` 或 `gitee.com/src-openeuler/*`，应使用对应的
+`gitcode.com` 地址。Third-party Gitee repositories are valid upstream sources；
+第三方项目位于 `gitee.com` 时必须保留其真实地址，不能全局替换域名。
 
 ### 步骤 3：创建目录结构
 
@@ -58,14 +59,16 @@ gh api repos/{owner}/{repo}/readme --jq '.content' | base64 -d | head -60
 {category}/{package_name}/
 ├── {version}/{os_version}/Dockerfile
 ├── meta.yml
-├── README.md
-└── doc/
-    ├── image-info.yml
-    └── picture/logo.png
+└── README.md
 ```
 
 这是 minimum required structure，不是完整文件白名单。应用确有需要时，可以在本次 MDU
 目录内增加配置、entrypoint、patch 或模板等附属文件。
+
+doc/ is optional。完全不生成 `doc/` 是合法结果；if any doc/ content is created，
+必须同时保证 `doc/image-info.yml` 可解析、目标仓必需字段完整，并且所有声明或引用的
+图片真实存在且格式有效。目标仓还要求 at least one doc/picture asset；无法获得可信
+图片时应完全省略 `doc/`，不要留下部分目录，也不要编造元数据或图片。
 
 优先复用固定版本源码中的 upstream-provided configuration。只有上游配置不存在，或无法
 满足容器运行要求且不能通过启动参数覆盖时，才创建本地配置；在最终 summary 中说明其来源
@@ -94,15 +97,17 @@ arbitrary number is unused.
 
 ### 步骤 6：编写 README.md（纯英文，禁止中文）
 
-结构：Quick reference → {PackageName} | openEuler → Supported tags → Usage (pull/run/logs/exec) → Question and answering。指向 openEuler 仓库的链接使用 `gitcode.com`，禁止 `gitee.com`。代码块用 TAB 缩进。
+结构：Quick reference → {PackageName} | openEuler → Supported tags → Usage (pull/run/logs/exec) → Question and answering。指向 openEuler 自有仓库的链接使用 `gitcode.com`；只禁止 `gitee.com/openeuler/*` 与 `gitee.com/src-openeuler/*`，third-party Gitee 上游保持真实地址。代码块用 TAB 缩进。
 
-### 步骤 7：编写 doc/image-info.yml（中文）
+### 步骤 7（可选）：编写 doc/image-info.yml（中文）
 
-字段顺序：name → category → description → environment → tags → download → usage → license → similar_packages → dependency → homepage → upstream。category 全小写。similar_packages 至少 3 条。version_filter: alpha;rc;candidate;beta;pre。
+只有决定生成 `doc/` 时执行。遵循目标仓当前 schema；name/category 必须与任务一致。
+similar_packages、homepage、upstream 等没有可靠上游证据时不得编造。
 
-### 步骤 8：下载 Logo
+### 步骤 8（可选）：下载 Logo
 
-优先从上游仓库 docs/ 目录寻找官方图片，失败则依次尝试 CNCF artwork、GitHub 组织头像、Pillow 占位图。禁止使用 AI 生成 logo。
+仅在生成 doc 且能获得可信图片时执行。优先使用上游官方图片或 CNCF artwork；不得用
+Pillow 占位图伪装官方 logo，也禁止使用 AI 生成 logo。
 
 ### 步骤 9：更新 image-list.yml
 
@@ -120,17 +125,17 @@ arbitrary number is unused.
 
 1. ARG VERSION 全大写，默认值与 meta.yml 版本一致
 2. meta.yml path 与实际路径一致
-3. README 和 image-info.yml 的 Tag 表一致
+3. 如果生成 image-info.yml，其 Tag 与 README 一致
 4. image-list.yml 格式正确且保留全部既有条目
-5. logo.png 存在且非空，来源为官方或可信上游资源
-6. 指向 openEuler 自有仓库的链接一律为 `gitcode.com`，本次改动的文件中不出现 `gitee.com`；上游项目链接（GitHub、官网、文档站）保持真实地址，不改写域名
-7. image-info.yml category 全小写
+5. 如果生成 logo.png，其内容非空且来源为官方或可信上游资源
+6. 指向 openEuler 自有仓库的链接一律为 `gitcode.com`，不出现 `gitee.com/openeuler/*` 或 `gitee.com/src-openeuler/*`；third-party Gitee 等上游链接保持真实地址
+7. 如果生成 image-info.yml，其 category 全小写
 8. usage/download 中镜像标签用 `{Tag}` 占位
 9. README 纯英文
 10. README 代码块 TAB 缩进
 11. Usage 含 pull/run/logs/exec 四个环节
-12. similar_packages ≥ 3 条
-13. image-info.yml 字段顺序正确
+12. 如果生成 doc，目标仓必需字段完整且没有编造内容
+13. doc 中声明或引用的资源真实存在
 14. dnf remove 仅限实际安装的构建依赖
 15. name 与 homepage 最后路径段一致
 16. version_filter 完整: alpha;rc;candidate;beta;pre

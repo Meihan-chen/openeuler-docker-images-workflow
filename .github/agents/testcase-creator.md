@@ -57,14 +57,15 @@ file:
     mode: "0755"
 ```
 
-**goss_wait.yaml** — 就绪等待：
+**goss_wait.yaml is optional** — 仅服务类应用确实需要在断言前等待就绪时生成：
 ```yaml
 port:
   tcp:{port}:
     listening: true
 ```
 
-**test_helpers.sh** — 辅助函数：
+**test_helpers.sh is optional** — 只有 `test.sh` 或 Goss 命令确实复用辅助逻辑时生成；
+简单测试直接写在唯一入口中，不创建空 helper：
 ```bash
 retry() {
     local timeout=$1

@@ -72,6 +72,24 @@ def _fully_approved_agent(*, image_summary="approved"):
     )
 
 
+def _repairable_gate(*, owner, code, message):
+    return {
+        "status": "passed",
+        "build_allowed": True,
+        "delivery_allowed": False,
+        "test_allowed": owner != "testcase_creator",
+        "errors": [message],
+        "findings": [
+            {
+                "code": code,
+                "level": "delivery_stop",
+                "owner": owner,
+                "message": message,
+            }
+        ],
+    }
+
+
 def _agent_with_repair(pair):
     image_creator = {
         "success": True,
@@ -180,7 +198,10 @@ def test_generation_lints_image_before_paid_qa(tmp_path):
     }
 
 
-def test_hadolint_runner_reports_command_failure(tmp_path, monkeypatch):
+def test_hadolint_runner_reports_findings_without_policy_allowlist(
+    tmp_path,
+    monkeypatch,
+):
     from scripts.lib import generation_pipeline
 
     executable = tmp_path / "hadolint"
@@ -209,14 +230,12 @@ def test_hadolint_runner_reports_command_failure(tmp_path, monkeypatch):
         dockerfile=dockerfile,
     )
 
-    assert report["status"] == "failed"
+    assert report["status"] == "passed"
+    assert report["diagnostic_status"] == "findings"
+    assert report["blocking"] is False
     assert report["output"] == "DL3006 pin image tag"
     assert commands == [[
         str(executable),
-        "--ignore",
-        "DL3033",
-        "--ignore",
-        "DL3041",
         str(dockerfile),
     ]]
 
@@ -233,11 +252,15 @@ def test_hadolint_runner_reports_command_failure(tmp_path, monkeypatch):
         dockerfile=dockerfile,
     )
     assert unavailable["status"] == "failed"
+    assert unavailable["blocking"] is True
     assert unavailable["returncode"] is None
     assert "missing-hadolint" in unavailable["output"]
 
 
-def test_generation_returns_failed_image_lint_to_creator_once(tmp_path, capsys):
+def test_generation_records_hadolint_findings_without_creator_repair(
+    tmp_path,
+    capsys,
+):
     from scripts.lib.generation_pipeline import run_generation_pipeline
 
     workspace = tmp_path / "target"
@@ -249,7 +272,7 @@ def test_generation_returns_failed_image_lint_to_creator_once(tmp_path, capsys):
     }
     agent = StubAgent(
         {
-            "image_creator": [image_creator, image_creator],
+            "image_creator": [image_creator],
             "image_qa": [_approved_image()],
             "testcase_creator": [
                 {
@@ -260,16 +283,13 @@ def test_generation_returns_failed_image_lint_to_creator_once(tmp_path, capsys):
             "testcase_qa": [_approved_tests()],
         }
     )
-    lint_results = iter(
-        (
-            {
-                "status": "failed",
-                "returncode": 1,
-                "output": "Dockerfile:9 DL3033 pin yum packages",
-            },
-            {"status": "passed", "returncode": 0, "output": ""},
-        )
-    )
+    lint_report = {
+        "status": "passed",
+        "diagnostic_status": "findings",
+        "blocking": False,
+        "returncode": 1,
+        "output": "Dockerfile:9 DL3033 pin yum packages",
+    }
 
     result = run_generation_pipeline(
         workspace=workspace,
@@ -280,26 +300,24 @@ def test_generation_returns_failed_image_lint_to_creator_once(tmp_path, capsys):
         api_key="deepseek-secret",
         agent_runner=agent,
         target_validator=lambda **_: {"status": "passed"},
-        image_linter=lambda _: next(lint_results),
+        image_linter=lambda _: lint_report,
     )
 
     assert result.status == "passed"
     assert [call["role"] for call in agent.calls] == [
         "image_creator",
-        "image_creator",
         "image_qa",
         "testcase_creator",
         "testcase_qa",
     ]
-    assert "DL3033 pin yum packages" in agent.calls[1]["prompt"]
-    assert json.loads((reports / "image-lint.json").read_text())[
-        "status"
-    ] == "failed"
-    assert json.loads((reports / "image-precheck-repair-lint.json").read_text())[
-        "status"
-    ] == "passed"
+    assert all(
+        "DL3033 pin yum packages" not in call["prompt"]
+        for call in agent.calls
+    )
+    assert json.loads((reports / "image-lint.json").read_text()) == lint_report
+    assert not (reports / "image-precheck-repair-lint.json").exists()
     assert (
-        "[flow][lint] NEEDS_FIX image_lint: "
+        "[flow][lint] ADVISORY image_lint: "
         "Dockerfile:9 DL3033 pin yum packages"
     ) in capsys.readouterr().out
 
@@ -329,12 +347,25 @@ def test_generation_returns_failed_testcase_gate_to_creator_once(tmp_path):
     )
     full_results = iter(
         (
+            _repairable_gate(
+                owner="testcase_creator",
+                code="tests.required",
+                message="required generated file is missing: tests/test.sh",
+            ),
             {
-                "status": "failed",
-                "errors": ["required generated file is missing: tests/test.sh"],
+                "status": "passed",
+                "build_allowed": True,
+                "delivery_allowed": True,
+                "test_allowed": True,
+                "findings": [],
             },
-            {"status": "passed"},
-            {"status": "passed"},
+            {
+                "status": "passed",
+                "build_allowed": True,
+                "delivery_allowed": True,
+                "test_allowed": True,
+                "findings": [],
+            },
         )
     )
 
@@ -364,42 +395,122 @@ def test_generation_returns_failed_testcase_gate_to_creator_once(tmp_path):
     ]
     assert "required generated file is missing" in agent.calls[3]["prompt"]
     assert json.loads((reports / "precheck-gates.json").read_text())[
-        "status"
-    ] == "failed"
+        "delivery_allowed"
+    ] is False
     assert json.loads((reports / "precheck-repair-gates.json").read_text())[
         "status"
     ] == "passed"
 
 
+def test_generation_continues_when_image_delivery_finding_survives_repair(
+    tmp_path,
+):
+    from scripts.lib.generation_pipeline import run_generation_pipeline
+
+    workspace = tmp_path / "target"
+    reports = tmp_path / "evidence"
+    workspace.mkdir()
+    image_creator = {
+        "success": True,
+        "files_created": ["Database/kvrocks/README.md"],
+    }
+    agent = _fully_approved_agent()
+    agent.responses["image_creator"].append(image_creator)
+    unresolved = _repairable_gate(
+        owner="image_creator",
+        code="readme.section",
+        message="README.md is missing section: # Usage",
+    )
+
+    def validator(*, phase, **_):
+        return unresolved if phase == "image" else {
+            "status": "passed",
+            "build_allowed": True,
+            "delivery_allowed": True,
+            "test_allowed": True,
+            "findings": [],
+        }
+
+    result = run_generation_pipeline(
+        workspace=workspace,
+        report_dir=reports,
+        task=_task(),
+        base_sha="1" * 40,
+        executable=tmp_path / "opencode",
+        api_key="deepseek-secret",
+        agent_runner=agent,
+        target_validator=validator,
+    )
+
+    assert result.status == "passed"
+    assert [call["role"] for call in agent.calls][:3] == [
+        "image_creator",
+        "image_creator",
+        "image_qa",
+    ]
+    assert json.loads(
+        (reports / "image-precheck-repair-gates.json").read_text()
+    )["delivery_allowed"] is False
+
+
+def test_generation_continues_to_qa_when_test_contract_survives_repair(
+    tmp_path,
+):
+    from scripts.lib.generation_pipeline import run_generation_pipeline
+
+    workspace = tmp_path / "target"
+    reports = tmp_path / "evidence"
+    workspace.mkdir()
+    testcase_creator = {
+        "success": True,
+        "files_created": ["Database/kvrocks/tests/goss.yaml"],
+    }
+    agent = _fully_approved_agent()
+    agent.responses["testcase_creator"].append(testcase_creator)
+    full_calls = 0
+
+    def validator(*, phase, **_):
+        nonlocal full_calls
+        if phase == "image":
+            return {"status": "passed"}
+        full_calls += 1
+        return _repairable_gate(
+            owner="testcase_creator",
+            code="tests.goss_yaml",
+            message="goss.yaml must be valid YAML",
+        )
+
+    result = run_generation_pipeline(
+        workspace=workspace,
+        report_dir=reports,
+        task=_task(),
+        base_sha="1" * 40,
+        executable=tmp_path / "opencode",
+        api_key="deepseek-secret",
+        agent_runner=agent,
+        target_validator=validator,
+    )
+
+    assert result.status == "passed"
+    assert result.gate_report["delivery_allowed"] is False
+    assert result.gate_report["test_allowed"] is False
+    assert [call["role"] for call in agent.calls][-2:] == [
+        "testcase_creator",
+        "testcase_qa",
+    ]
+    assert full_calls == 3
+
+
 @pytest.mark.parametrize(
-    ("failure", "error", "report_name", "repair_report_name"),
+    "failure",
     [
-        (
-            "gate",
-            "deterministic image repair precheck",
-            "image-precheck-gates.json",
-            "image-precheck-repair-gates.json",
-        ),
-        (
-            "decode",
-            "deterministic image repair precheck",
-            "image-precheck-gates.json",
-            "image-precheck-repair-gates.json",
-        ),
-        (
-            "lint",
-            "image_lint_repair",
-            "image-lint.json",
-            "image-precheck-repair-lint.json",
-        ),
+        "gate",
+        "decode",
     ],
 )
-def test_generation_stops_before_image_qa_after_one_static_repair(
+def test_generation_hard_stops_before_image_qa_without_agent_repair(
     tmp_path,
     failure,
-    error,
-    report_name,
-    repair_report_name,
 ):
     from scripts.lib.generation_pipeline import (
         GenerationPipelineError,
@@ -410,12 +521,6 @@ def test_generation_stops_before_image_qa_after_one_static_repair(
     reports = tmp_path / "evidence"
     workspace.mkdir()
     agent = _fully_approved_agent()
-    agent.responses["image_creator"].append(
-        {
-            "success": True,
-            "files_created": ["Database/kvrocks/meta.yml"],
-        }
-    )
 
     def validator(**_):
         if failure == "decode":
@@ -426,12 +531,24 @@ def test_generation_stops_before_image_qa_after_one_static_repair(
                 1,
                 "invalid start byte",
             )
-        return {"status": "failed" if failure == "gate" else "passed"}
+        return {
+            "status": "failed",
+            "build_allowed": False,
+            "delivery_allowed": False,
+            "findings": [
+                {
+                    "code": "scope.outside_task",
+                    "level": "hard_stop",
+                    "owner": "workflow",
+                    "message": "change outside task scope",
+                }
+            ],
+        }
 
-    def image_linter(_):
-        return {"status": "failed" if failure == "lint" else "passed"}
-
-    with pytest.raises(GenerationPipelineError, match=error):
+    with pytest.raises(
+        GenerationPipelineError,
+        match="deterministic image precheck",
+    ):
         run_generation_pipeline(
             workspace=workspace,
             report_dir=reports,
@@ -441,19 +558,13 @@ def test_generation_stops_before_image_qa_after_one_static_repair(
             api_key="deepseek-secret",
             agent_runner=agent,
             target_validator=validator,
-            image_linter=image_linter,
         )
 
-    assert [call["role"] for call in agent.calls] == [
-        "image_creator",
-        "image_creator",
-    ]
-    if failure in {"gate", "decode"}:
-        assert '"status": "skipped"' in agent.calls[1]["prompt"]
-    assert json.loads((reports / report_name).read_text())["status"] == "failed"
-    assert json.loads((reports / repair_report_name).read_text())[
+    assert [call["role"] for call in agent.calls] == ["image_creator"]
+    assert json.loads((reports / "image-precheck-gates.json").read_text())[
         "status"
     ] == "failed"
+    assert not (reports / "image-creator-precheck-repair.json").exists()
 
 
 @pytest.mark.parametrize(
@@ -809,7 +920,7 @@ def test_generation_records_failed_target_gate_before_raising(tmp_path):
     assert json.loads((reports / "gates.json").read_text()) == failed_gate
 
 
-def test_generation_precheck_fails_before_testcase_qa(tmp_path):
+def test_generation_full_hard_stop_fails_before_testcase_qa(tmp_path):
     from scripts.lib.generation_pipeline import (
         GenerationPipelineError,
         run_generation_pipeline,
@@ -819,24 +930,26 @@ def test_generation_precheck_fails_before_testcase_qa(tmp_path):
     reports = tmp_path / "evidence"
     workspace.mkdir()
     agent = _fully_approved_agent()
-    agent.responses["testcase_creator"].append(
-        {
-            "success": True,
-            "files_created": ["Database/kvrocks/tests/goss.yaml"],
-        }
-    )
     from scripts.lib.target_contract import TargetContractError
 
     def failed_validator(*, phase, **_):
         if phase == "image":
             return {"status": "passed", "phase": phase}
         raise TargetContractError(
-            "required generated file is missing: tests/test.sh"
+            "meta.yml is not valid YAML",
+            findings=[
+                {
+                    "code": "meta.invalid_yaml",
+                    "level": "hard_stop",
+                    "owner": "workflow",
+                    "message": "meta.yml is not valid YAML",
+                }
+            ],
         )
 
     with pytest.raises(
         GenerationPipelineError,
-        match="deterministic target repair precheck",
+        match="deterministic target precheck",
     ):
         run_generation_pipeline(
             workspace=workspace,
@@ -853,16 +966,23 @@ def test_generation_precheck_fails_before_testcase_qa(tmp_path):
         "image_creator",
         "image_qa",
         "testcase_creator",
-        "testcase_creator",
     ]
     assert json.loads((reports / "precheck-gates.json").read_text()) == {
+        "build_allowed": False,
+        "delivery_allowed": False,
+        "errors": ["meta.yml is not valid YAML"],
+        "findings": [
+            {
+                "code": "meta.invalid_yaml",
+                "level": "hard_stop",
+                "message": "meta.yml is not valid YAML",
+                "owner": "workflow",
+            }
+        ],
         "status": "failed",
-        "errors": ["required generated file is missing: tests/test.sh"],
+        "test_allowed": False,
     }
-    assert json.loads((reports / "precheck-repair-gates.json").read_text()) == {
-        "status": "failed",
-        "errors": ["required generated file is missing: tests/test.sh"],
-    }
+    assert not (reports / "precheck-repair-gates.json").exists()
 
 
 def test_generation_records_agent_timeout_without_exposing_secret(tmp_path):
@@ -1092,18 +1212,56 @@ def test_generation_reports_must_be_outside_target_workspace(tmp_path):
         )
 
 
-def test_generation_rejects_unsupported_phase1_task_before_agent_call(
-    tmp_path,
-):
-    from scripts.lib.generation_pipeline import (
-        GenerationPipelineError,
-        run_generation_pipeline,
-    )
+def test_generation_accepts_a_task_it_has_never_seen(tmp_path):
+    """Generation carries no application knowledge, so it must not gate on one.
+
+    The prompts and the target gates were made application-neutral in 5eb80d6;
+    the remaining Kvrocks assumptions live in native validation, and refusing
+    the TaskSpec here only hid that fact behind an earlier error.
+    """
+    from scripts.lib.generation_pipeline import run_generation_pipeline
     from scripts.lib.task_spec import TaskSpec
 
     workspace = tmp_path / "target"
     workspace.mkdir()
     agent = _fully_approved_agent()
+    unseen = TaskSpec.from_workflow_dispatch(
+        {
+            "app": "caddy",
+            "version": "2.11.4",
+            "os_version": "24.03-lts-sp4",
+            "domain": "Cloud",
+            "source_url": "https://github.com/caddyserver/caddy/tree/v2.11.4",
+        }
+    )
+
+    result = run_generation_pipeline(
+        workspace=workspace,
+        report_dir=tmp_path / "evidence",
+        task=unseen,
+        base_sha="1" * 40,
+        executable=tmp_path / "opencode",
+        api_key="deepseek-secret",
+        agent_runner=agent,
+        target_validator=lambda **_: {"status": "passed"},
+    )
+
+    assert result.status == "passed"
+    assert [call["role"] for call in agent.calls][0] == "image_creator"
+    for call in agent.calls:
+        assert "kvrocks" not in call["prompt"].lower()
+
+
+def test_the_smoke_candidate_still_refuses_a_task_it_cannot_write(tmp_path):
+    """write_smoke_candidate emits Kvrocks literals, so it stays pinned."""
+    from scripts.lib.generation_pipeline import (
+        GenerationPipelineError,
+        write_smoke_candidate,
+    )
+    from scripts.lib.task_spec import TaskSpec
+
+    workspace = tmp_path / "target"
+    workspace.mkdir()
     unsupported = TaskSpec.from_workflow_dispatch(
         {
             "app": "redis",
@@ -1114,19 +1272,8 @@ def test_generation_rejects_unsupported_phase1_task_before_agent_call(
         }
     )
 
-    with pytest.raises(GenerationPipelineError, match="only supports"):
-        run_generation_pipeline(
-            workspace=workspace,
-            report_dir=tmp_path / "evidence",
-            task=unsupported,
-            base_sha="1" * 40,
-            executable=tmp_path / "opencode",
-            api_key="deepseek-secret",
-            agent_runner=agent,
-            target_validator=lambda **_: {"status": "passed"},
-        )
-
-    assert agent.calls == []
+    with pytest.raises(GenerationPipelineError, match="smoke candidate"):
+        write_smoke_candidate(workspace=workspace, task=unsupported)
 
 
 def test_phase1_prompts_pin_task_paths_without_injecting_app_implementation():
@@ -1275,7 +1422,7 @@ def test_fixer_prompt_whitelists_generated_candidate_files(tmp_path):
     assert "Database/kvrocks/results/results.json" not in prompt
 
 
-def test_generation_tells_the_creator_a_stray_tarball_is_not_a_candidate_revert(
+def test_generation_hard_stops_on_stray_tarball_outside_task_scope(
     tmp_path,
 ):
     """Run 30567356119 failed here, not in native repair.
@@ -1284,7 +1431,10 @@ def test_generation_tells_the_creator_a_stray_tarball_is_not_a_candidate_revert(
     answered with 496 "change outside task scope" errors, whose obvious repair
     is to revert the candidate rather than remove the tarball.
     """
-    from scripts.lib.generation_pipeline import run_generation_pipeline
+    from scripts.lib.generation_pipeline import (
+        GenerationPipelineError,
+        run_generation_pipeline,
+    )
 
     workspace = tmp_path / "target"
     reports = tmp_path / "evidence"
@@ -1295,7 +1445,7 @@ def test_generation_tells_the_creator_a_stray_tarball_is_not_a_candidate_revert(
     }
     agent = StubAgent(
         {
-            "image_creator": [created, created],
+            "image_creator": [created],
             "image_qa": [_approved_image()],
             "testcase_creator": [
                 {
@@ -1306,38 +1456,43 @@ def test_generation_tells_the_creator_a_stray_tarball_is_not_a_candidate_revert(
             "testcase_qa": [_approved_tests()],
         }
     )
-    image_results = iter(
-        (
+    failed = {
+        "status": "failed",
+        "build_allowed": False,
+        "delivery_allowed": False,
+        "test_allowed": False,
+        "errors": [
+            "change outside task scope or wrong status: A "
+            "kvrocks-2.16.0/CMakeLists.txt",
+            "change outside task scope or wrong status: A "
+            "kvrocks-2.16.0/src/cli/main.cc",
+        ],
+        "findings": [
             {
-                "status": "failed",
-                "errors": [
-                    "change outside task scope or wrong status: A "
-                    "kvrocks-2.16.0/CMakeLists.txt",
-                    "change outside task scope or wrong status: A "
-                    "kvrocks-2.16.0/src/cli/main.cc",
-                ],
-            },
-            {"status": "passed"},
-        )
-    )
+                "code": "scope.outside_task",
+                "level": "hard_stop",
+                "owner": "workflow",
+                "message": "change outside task scope",
+            }
+        ],
+    }
 
     def validator(*, phase, **_):
         if phase == "image":
-            return next(image_results)
+            return failed
         return {"status": "passed"}
 
-    run_generation_pipeline(
-        workspace=workspace,
-        report_dir=reports,
-        task=_task(),
-        base_sha="1" * 40,
-        executable=tmp_path / "opencode",
-        api_key="deepseek-secret",
-        agent_runner=agent,
-        target_validator=validator,
-    )
+    with pytest.raises(GenerationPipelineError, match="image precheck"):
+        run_generation_pipeline(
+            workspace=workspace,
+            report_dir=reports,
+            task=_task(),
+            base_sha="1" * 40,
+            executable=tmp_path / "opencode",
+            api_key="deepseek-secret",
+            agent_runner=agent,
+            target_validator=validator,
+        )
 
-    repair_prompt = agent.calls[1]["prompt"]
-    assert "workspace-hygiene" in repair_prompt
-    assert "do not revert candidate files" in repair_prompt
-    assert "kvrocks-2.16.0" in repair_prompt
+    assert [call["role"] for call in agent.calls] == ["image_creator"]
+    assert not (reports / "image-creator-precheck-repair.json").exists()

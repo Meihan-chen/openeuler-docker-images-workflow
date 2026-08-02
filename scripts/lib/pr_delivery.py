@@ -282,6 +282,28 @@ def _brief(value: object, *, limit: int = 300) -> str:
     return text[: limit - 3].rstrip() + "..."
 
 
+def _hadolint_lines(root: Path) -> tuple[str, ...]:
+    path = root / "reports" / "hadolint.txt"
+    if not path.is_file():
+        return ("- Hadolint: `not recorded`.",)
+    output = path.read_text(errors="replace")
+    finding_lines = [
+        line.strip()
+        for line in output.splitlines()
+        if re.search(r"\b(?:DL|SC)[0-9]{4}\b", line)
+    ]
+    if not finding_lines:
+        return ("- Hadolint: `0` advisory findings.",)
+    lines = [f"- Hadolint: `{len(finding_lines)}` advisory findings."]
+    lines.extend(f"  - `{_brief(line)}`" for line in finding_lines[:3])
+    if len(finding_lines) > 3:
+        lines.append(
+            f"  - {len(finding_lines) - 3} more findings are preserved in "
+            "the candidate artifact."
+        )
+    return tuple(lines)
+
+
 def _qa_review_lines(root: Path, prefix: str, label: str) -> tuple[str, ...]:
     def round_number(path: Path) -> int:
         match = re.search(r"-round([0-9]+)\.json$", path.name)
@@ -573,6 +595,8 @@ def compose_pull_request(bundle: CandidateBundle) -> PullRequestContent:
     gates = _load_json(bundle.root / "reports" / "gates.json", "target gates")
     if gates.get("status") != "passed":
         raise PRDeliveryError("deterministic target gates did not pass")
+    if gates.get("delivery_allowed", True) is not True:
+        raise PRDeliveryError("deterministic delivery contract did not pass")
     image_review = _qa_review_lines(bundle.root, "image-qa", "Image")
     testcase_review = _qa_review_lines(
         bundle.root,
@@ -580,6 +604,7 @@ def compose_pull_request(bundle: CandidateBundle) -> PullRequestContent:
         "Testcase",
     )
     fixer_process = _fixer_process_lines(bundle.root)
+    hadolint_lines = _hadolint_lines(bundle.root)
     recovery = _recovery_provenance(bundle)
     recovery_lines: tuple[str, ...] = ()
     candidate_origin = (
@@ -634,6 +659,7 @@ def compose_pull_request(bundle: CandidateBundle) -> PullRequestContent:
             candidate_origin,
             *recovery_lines,
             f"- Deterministic target contract: {gates.get('status')}",
+            *hadolint_lines,
             f"- Target base SHA: `{bundle.manifest.base_sha}`.",
             f"- Task ID: `{bundle.manifest.task_id}`.",
             "- Result evidence: `results.json`, `version_info.json`, "

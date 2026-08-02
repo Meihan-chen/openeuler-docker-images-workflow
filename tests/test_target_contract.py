@@ -233,9 +233,99 @@ def test_valid_generated_kvrocks_candidate_passes_contract(tmp_path):
     )
 
     assert report["status"] == "passed"
+    assert report["build_allowed"] is True
+    assert report["delivery_allowed"] is True
+    assert report["test_allowed"] is True
+    assert report["findings"] == []
     assert report["task_id"] == _task().task_id
     assert report["added_files"] == 9
     assert report["modified_files"] == ["Database/image-list.yml"]
+
+
+def test_contract_allows_candidate_without_optional_doc(tmp_path):
+    from scripts.harness.gate_diff import validate_generated_target
+
+    repo, base_sha = _repo(tmp_path)
+    _write_valid_generated_candidate(repo)
+    shutil.rmtree(repo / "Database" / "kvrocks" / "doc")
+
+    report = validate_generated_target(
+        repo=repo,
+        task=_task(),
+        base_sha=base_sha,
+    )
+
+    assert report["status"] == "passed"
+    assert report["delivery_allowed"] is True
+    assert report["findings"] == []
+
+
+def test_contract_blocks_delivery_for_partially_generated_doc(tmp_path):
+    from scripts.harness.gate_diff import validate_generated_target
+
+    repo, base_sha = _repo(tmp_path)
+    _write_valid_generated_candidate(repo)
+    (repo / "Database" / "kvrocks" / "doc" / "image-info.yml").unlink()
+
+    report = validate_generated_target(
+        repo=repo,
+        task=_task(),
+        base_sha=base_sha,
+    )
+
+    assert report["status"] == "passed"
+    assert report["build_allowed"] is True
+    assert report["delivery_allowed"] is False
+    assert report["findings"] == [
+        {
+            "code": "doc.incomplete",
+            "level": "delivery_stop",
+            "owner": "image_creator",
+            "source": "target_repository_contract",
+            "message": "generated doc is missing doc/image-info.yml",
+        }
+    ]
+
+
+def test_contract_blocks_delivery_when_generated_doc_has_no_picture(tmp_path):
+    from scripts.harness.gate_diff import validate_generated_target
+
+    repo, base_sha = _repo(tmp_path)
+    _write_valid_generated_candidate(repo)
+    shutil.rmtree(repo / "Database" / "kvrocks" / "doc" / "picture")
+
+    report = validate_generated_target(
+        repo=repo,
+        task=_task(),
+        base_sha=base_sha,
+    )
+
+    assert report["build_allowed"] is True
+    assert report["delivery_allowed"] is False
+    assert any(
+        finding["code"] == "doc.picture_required"
+        and finding["source"] == "target_repository_contract"
+        for finding in report["findings"]
+    )
+
+
+def test_contract_does_not_require_optional_test_helpers(tmp_path):
+    from scripts.harness.gate_diff import validate_generated_target
+
+    repo, base_sha = _repo(tmp_path)
+    _write_valid_generated_candidate(repo)
+    tests = repo / "Database" / "kvrocks" / "tests"
+    (tests / "goss_wait.yaml").unlink()
+    (tests / "test_helpers.sh").unlink()
+
+    report = validate_generated_target(
+        repo=repo,
+        task=_task(),
+        base_sha=base_sha,
+    )
+
+    assert report["test_allowed"] is True
+    assert report["delivery_allowed"] is True
 
 
 def test_generated_contract_uses_only_the_app_shared_test_entrypoint(tmp_path):
@@ -431,8 +521,8 @@ def test_contract_rejects_image_list_rewrite(tmp_path):
         validate_generated_target(repo=repo, task=_task(), base_sha=base_sha)
 
 
-def test_contract_rejects_single_arch_meta_without_gating_build_command(tmp_path):
-    from scripts.harness.gate_diff import TargetContractError, validate_generated_target
+def test_contract_defers_single_arch_meta_to_delivery_without_gating_build(tmp_path):
+    from scripts.harness.gate_diff import validate_generated_target
 
     repo, base_sha = _repo(tmp_path)
     _write_valid_generated_candidate(repo)
@@ -445,19 +535,38 @@ def test_contract_rejects_single_arch_meta_without_gating_build_command(tmp_path
     dockerfile = app / "2.16.0" / "24.03-lts-sp4" / "Dockerfile"
     dockerfile.write_text(dockerfile.read_text().replace("-j 4", "-j $(nproc)"))
 
-    with pytest.raises(TargetContractError) as error:
-        validate_generated_target(repo=repo, task=_task(), base_sha=base_sha)
+    report = validate_generated_target(
+        repo=repo,
+        task=_task(),
+        base_sha=base_sha,
+    )
 
-    message = str(error.value)
-    assert "dual-architecture" in message
-    assert "-j 4" not in message
+    assert report["status"] == "passed"
+    assert report["build_allowed"] is True
+    assert report["delivery_allowed"] is False
+    assert any(
+        finding["code"] == "meta.dual_arch"
+        and "dual-architecture" in finding["message"]
+        for finding in report["findings"]
+    )
 
 
-def test_contract_rejects_non_list_goss_stdout_matcher(tmp_path):
+def test_contract_hard_stops_when_meta_cannot_be_parsed(tmp_path):
     from scripts.harness.gate_diff import (
         TargetContractError,
         validate_generated_target,
     )
+
+    repo, base_sha = _repo(tmp_path)
+    _write_valid_generated_candidate(repo)
+    (repo / "Database" / "kvrocks" / "meta.yml").write_text("tag: [\n")
+
+    with pytest.raises(TargetContractError, match="meta.yml.*valid YAML"):
+        validate_generated_target(repo=repo, task=_task(), base_sha=base_sha)
+
+
+def test_contract_keeps_buildable_candidate_with_invalid_goss_contract(tmp_path):
+    from scripts.harness.gate_diff import validate_generated_target
 
     repo, base_sha = _repo(tmp_path)
     _write_valid_generated_candidate(repo)
@@ -477,19 +586,25 @@ def test_contract_rejects_non_list_goss_stdout_matcher(tmp_path):
         "      contains: PONG\n"
     )
 
-    with pytest.raises(TargetContractError, match="stdout.*YAML list"):
-        validate_generated_target(
-            repo=repo,
-            task=_task(),
-            base_sha=base_sha,
-        )
-
-
-def test_contract_rejects_command_timeout_on_goss_port_resource(tmp_path):
-    from scripts.harness.gate_diff import (
-        TargetContractError,
-        validate_generated_target,
+    report = validate_generated_target(
+        repo=repo,
+        task=_task(),
+        base_sha=base_sha,
     )
+
+    assert report["status"] == "passed"
+    assert report["build_allowed"] is True
+    assert report["test_allowed"] is False
+    assert report["delivery_allowed"] is False
+    assert any(
+        finding["code"] == "tests.goss_stdout_schema"
+        and finding["owner"] == "testcase_creator"
+        for finding in report["findings"]
+    )
+
+
+def test_contract_classifies_invalid_optional_wait_as_test_contract(tmp_path):
+    from scripts.harness.gate_diff import validate_generated_target
 
     repo, base_sha = _repo(tmp_path)
     _write_valid_generated_candidate(repo)
@@ -503,15 +618,18 @@ def test_contract_rejects_command_timeout_on_goss_port_resource(tmp_path):
         "    timeout: 30000\n"
     )
 
-    with pytest.raises(
-        TargetContractError,
-        match="goss_wait.yaml.*timeout.*retry",
-    ):
-        validate_generated_target(
-            repo=repo,
-            task=_task(),
-            base_sha=base_sha,
-        )
+    report = validate_generated_target(
+        repo=repo,
+        task=_task(),
+        base_sha=base_sha,
+    )
+
+    assert report["status"] == "passed"
+    assert report["test_allowed"] is False
+    assert any(
+        finding["code"] == "tests.wait_timeout"
+        for finding in report["findings"]
+    )
 
 
 def test_contract_accepts_application_selected_goss_wait_resource(tmp_path):
@@ -537,31 +655,56 @@ def test_contract_accepts_application_selected_goss_wait_resource(tmp_path):
     assert report["status"] == "passed"
 
 
-@pytest.mark.parametrize(
-    "relative",
-    [
-        "README.md",
-        "doc/image-info.yml",
-        "2.16.0/24.03-lts-sp4/Dockerfile",
-        "tests/test.sh",
-    ],
-)
-def test_contract_rejects_pre_migration_gitee_link(tmp_path, relative):
-    from scripts.harness.gate_diff import (
-        TargetContractError,
-        validate_generated_target,
-    )
+@pytest.mark.parametrize("owner", ["openeuler", "src-openeuler"])
+def test_contract_blocks_only_open_euler_pre_migration_gitee_links(
+    tmp_path,
+    owner,
+):
+    from scripts.harness.gate_diff import validate_generated_target
 
     repo, base_sha = _repo(tmp_path)
     _write_valid_generated_candidate(repo)
-    path = repo / "Database" / "kvrocks" / relative
-    path.write_text(
-        path.read_text()
-        + "\n# see https://gitee.com/openeuler/openeuler-docker-images\n"
+    readme = repo / "Database" / "kvrocks" / "README.md"
+    readme.write_text(
+        readme.read_text()
+        + f"\nSee https://gitee.com/{owner}/openeuler-docker-images\n"
     )
 
-    with pytest.raises(TargetContractError, match="gitee.com.*gitcode.com"):
-        validate_generated_target(repo=repo, task=_task(), base_sha=base_sha)
+    report = validate_generated_target(
+        repo=repo,
+        task=_task(),
+        base_sha=base_sha,
+    )
+
+    assert report["status"] == "passed"
+    assert report["delivery_allowed"] is False
+    assert any(
+        finding["code"] == "links.openeuler_gitee"
+        and finding["owner"] == "image_creator"
+        for finding in report["findings"]
+    )
+
+
+def test_contract_accepts_third_party_gitee_link_and_plain_host_text(tmp_path):
+    from scripts.harness.gate_diff import validate_generated_target
+
+    repo, base_sha = _repo(tmp_path)
+    _write_valid_generated_candidate(repo)
+    readme = repo / "Database" / "kvrocks" / "README.md"
+    readme.write_text(
+        readme.read_text()
+        + "\nUpstream: https://gitee.com/example/vendor-project\n"
+        + "The word gitee.com alone is not a repository URL.\n"
+    )
+
+    report = validate_generated_target(
+        repo=repo,
+        task=_task(),
+        base_sha=base_sha,
+    )
+
+    assert report["delivery_allowed"] is True
+    assert report["findings"] == []
 
 
 def test_contract_accepts_gitcode_and_upstream_links(tmp_path):
