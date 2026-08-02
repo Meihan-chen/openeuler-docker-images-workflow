@@ -306,6 +306,7 @@ class GitCodeClient:
         title: str,
         body: str,
         branch: str,
+        issue_id: str = "",
     ) -> GitCodeResource:
         if not config.allows_pr_create:
             raise GitCodeWriteForbiddenError(
@@ -324,15 +325,21 @@ class GitCodeClient:
                     f"{duplicate.url}"
                 )
 
+        json_body = {
+            "title": title,
+            "head": config.pr_head(branch),
+            "base": config.target_branch,
+            "body": body,
+        }
+        if issue_id:
+            if not issue_id.isdigit() or int(issue_id) <= 0:
+                raise ValueError("issue_id must be a positive integer")
+            json_body["issue"] = issue_id
+
         payload = self._request(
             "POST",
             f"/repos/{config.target_repo}/pulls",
-            json_body={
-                "title": title,
-                "head": config.pr_head(branch),
-                "base": config.target_branch,
-                "body": body,
-            },
+            json_body=json_body,
         )
         return self._resource(payload)
 

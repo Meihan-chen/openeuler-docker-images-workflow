@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from scripts.lib.gitcode_client import GitCodeResource
@@ -104,6 +106,197 @@ def _update_source_issue(
         body=str(issue.get("body", "") or ""),
         state=state,
         issue_status=issue_status,
+    )
+
+
+def _load_evidence(path: Path, label: str) -> Mapping[str, object]:
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise IssueLifecycleError(f"{label} evidence is invalid") from error
+    if not isinstance(payload, Mapping):
+        raise IssueLifecycleError(f"{label} evidence must be an object")
+    return payload
+
+
+def _brief(value: object, *, limit: int = 500) -> str:
+    text = " ".join(str(value or "").split())
+    if not text:
+        return "No summary recorded."
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3].rstrip() + "..."
+
+
+def _agent_stage_lines(generation_dir: Path) -> list[str]:
+    stage_files = (
+        ("image-creator.json", "Image Creator"),
+        ("image-creator-precheck-repair.json", "Image Creator precheck repair"),
+        ("image-qa-round1.json", "Image QA round 1"),
+        ("image-creator-round2.json", "Image Creator QA repair"),
+        ("image-qa-round2.json", "Image QA round 2"),
+        ("testcase-creator.json", "Testcase Creator"),
+        (
+            "testcase-creator-precheck-repair.json",
+            "Testcase Creator precheck repair",
+        ),
+        ("testcase-qa-round1.json", "Testcase QA round 1"),
+        ("testcase-creator-round2.json", "Testcase Creator QA repair"),
+        ("testcase-qa-round2.json", "Testcase QA round 2"),
+    )
+    lines: list[str] = []
+    for filename, label in stage_files:
+        path = generation_dir / filename
+        if not path.is_file():
+            continue
+        report = _load_evidence(path, label)
+        if "status" in report:
+            status = _brief(report.get("status"), limit=40)
+        else:
+            status = "completed" if report.get("success") is True else "failed"
+        lines.append(
+            f"- {label}: `{status}` — {_brief(report.get('summary'))}"
+        )
+        issues = report.get("issues")
+        if not isinstance(issues, list):
+            continue
+        for issue in issues[:3]:
+            if not isinstance(issue, Mapping):
+                continue
+            severity = _brief(issue.get("severity", "unknown"), limit=30)
+            file = _brief(issue.get("file"), limit=180) if issue.get("file") else ""
+            location = f"`{file}`: " if file else ""
+            lines.append(
+                f"  - `{severity}` — {location}"
+                f"{_brief(issue.get('description'))}"
+            )
+        if len(issues) > 3:
+            lines.append(f"  - {len(issues) - 3} more issues are in the Artifact.")
+    return lines
+
+
+def _native_stage_lines(terminal: Mapping[str, object]) -> list[str]:
+    architectures = terminal.get("architectures")
+    if not isinstance(architectures, Mapping):
+        raise IssueLifecycleError("terminal evidence has no architecture reports")
+    lines: list[str] = []
+    for architecture in ("x86_64", "aarch64"):
+        report = architectures.get(architecture)
+        if not isinstance(report, Mapping):
+            raise IssueLifecycleError(
+                f"terminal evidence is missing {architecture} report"
+            )
+        status = _brief(report.get("status", "unknown"), limit=40)
+        failed_stage = _brief(report.get("failed_stage"), limit=80)
+        failure = _brief(report.get("failure"))
+        if status == "passed":
+            lines.append(f"- Native {architecture}: `passed`.")
+        else:
+            lines.append(
+                f"- Native {architecture}: `{status}` at `{failed_stage}` — "
+                f"{failure}"
+            )
+    return lines
+
+
+def _fixer_stage_lines(evidence_dir: Path) -> list[str]:
+    pattern = re.compile(
+        r"^fixer-native-[A-Za-z0-9_]+-round(?P<round>[0-9]+)"
+        r"(?:-attempt(?P<attempt>[0-9]+))?\.json$"
+    )
+    def order(path: Path) -> tuple[int, int, str]:
+        match = pattern.fullmatch(path.name)
+        if match is None:
+            return (10_000, 10_000, str(path))
+        return (
+            int(match.group("round")),
+            int(match.group("attempt") or 1),
+            str(path),
+        )
+
+    paths = sorted(evidence_dir.rglob("fixer-native-*.json"), key=order)
+    lines: list[str] = []
+    for path in paths:
+        match = pattern.fullmatch(path.name)
+        if match is None:
+            continue
+        report = _load_evidence(path, "Native Fixer")
+        round_number = int(match.group("round"))
+        attempt = int(match.group("attempt") or 1)
+        status = _brief(
+            report.get("status", "fixed" if report.get("success") else "failed"),
+            limit=40,
+        )
+        lines.append(
+            f"- Fixer round {round_number}, attempt {attempt}: `{status}` — "
+            f"{_brief(report.get('summary'))}"
+        )
+        changes = report.get("changes")
+        if not isinstance(changes, list):
+            continue
+        for change in changes[:3]:
+            if isinstance(change, Mapping):
+                file = _brief(change.get("file"), limit=180) if change.get("file") else ""
+                location = f"`{file}` — " if file else ""
+                lines.append(
+                    f"  - Change: {location}{_brief(change.get('change'))}"
+                )
+            else:
+                lines.append(f"  - Change: {_brief(change)}")
+    return lines
+
+
+def render_needs_human_summary(evidence_dir: Path) -> str:
+    """Render one concise, auditable terminal report from sealed evidence."""
+
+    evidence_dir = Path(evidence_dir)
+    decision_dir = evidence_dir / "decision" / "agents"
+    terminal = _load_evidence(
+        decision_dir / "convergence-report.json",
+        "convergence report",
+    )
+    if terminal.get("status") != "needs-human-review":
+        raise IssueLifecycleError(
+            "convergence report is not a needs-human-review terminal"
+        )
+
+    stage_lines = _agent_stage_lines(evidence_dir / "generation")
+    stage_lines.extend(_native_stage_lines(terminal))
+    stage_lines.extend(_fixer_stage_lines(evidence_dir))
+
+    blockers: list[str] = [
+        f"- Terminal reason: `{_brief(terminal.get('reason'), limit=100)}`.",
+        f"- Repair attempts: `{terminal.get('repair_attempts', 'unknown')}`.",
+    ]
+    architectures = terminal["architectures"]
+    for architecture in ("x86_64", "aarch64"):
+        report = architectures[architecture]
+        if isinstance(report, Mapping) and report.get("status") != "passed":
+            blockers.append(
+                f"- **{architecture} `{_brief(report.get('failed_stage'), limit=80)}`**: "
+                f"{_brief(report.get('failure'))}"
+            )
+    gate = terminal.get("gate")
+    if isinstance(gate, Mapping):
+        findings = gate.get("findings")
+        if isinstance(findings, list):
+            for finding in findings[:3]:
+                if isinstance(finding, Mapping):
+                    blockers.append(
+                        f"- **Gate `{_brief(finding.get('code'), limit=100)}`**: "
+                        f"{_brief(finding.get('message'))}"
+                    )
+
+    return "\n".join(
+        (
+            "## Stage summary",
+            "",
+            *(stage_lines or ["- No stage reports were recorded."]),
+            "",
+            "## Blocking error",
+            "",
+            *blockers,
+        )
     )
 
 
@@ -217,6 +410,7 @@ def finalize_new_image_issue(
     run_url: str,
     pr_url: str = "",
     failure_summary: str = "",
+    failure_evidence_dir: Path | None = None,
 ) -> Any | None:
     """Write the terminal scenario-one result back to its source Issue."""
 
@@ -234,7 +428,7 @@ def finalize_new_image_issue(
         number=issue_number,
     )
     target_status = "已完成" if outcome == "success" else "已挂起"
-    target_state = "closed" if outcome == "success" else "open"
+    target_state = "open"
     if _issue_status(issue) == target_status:
         return None
     if _issue_status(issue) != "已接纳":
@@ -251,15 +445,28 @@ def finalize_new_image_issue(
                 f"- Pull request: {pr_url}",
             )
         )
-    else:
-        terminal = (
-            "needs-human-review: 三轮自动修复后候选仍未收敛。"
-            if outcome == "needs-human-review"
-            else "自动镜像流水线未完成，Issue 已挂起等待人工处理。"
-        )
+    elif outcome == "needs-human-review":
+        if failure_evidence_dir is not None:
+            failure_summary = render_needs_human_summary(failure_evidence_dir)
+        if not failure_summary.strip():
+            raise IssueLifecycleError(
+                "needs-human-review requires terminal failure evidence"
+            )
         comment = "\n".join(
             (
-                terminal,
+                "needs-human-review: 三轮自动修复后候选仍未收敛。",
+                "",
+                failure_summary,
+                "",
+                "## Evidence",
+                "",
+                f"- Workflow: {run_url}",
+            )
+        )
+    else:
+        comment = "\n".join(
+            (
+                "自动镜像流水线未完成，Issue 已挂起等待人工处理。",
                 "",
                 f"- Workflow: {run_url}",
                 f"- Failure summary: {failure_summary or 'see workflow run'}",

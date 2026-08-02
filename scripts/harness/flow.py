@@ -174,6 +174,7 @@ def _fork_deliver(args: argparse.Namespace) -> None:
         token=token,
         delivery_run_id=args.delivery_run_id,
         delivery_run_attempt=args.delivery_run_attempt,
+        source_issue_number=args.source_issue_number,
     )
     _print_json(
         {
@@ -258,15 +259,19 @@ def _issue_finalize(args: argparse.Namespace) -> None:
     token = os.environ.get("GITCODE_TOKEN", "")
     if not token:
         raise IssueLifecycleError("GITCODE_TOKEN is required")
-    finalize_new_image_issue(
-        client=GitCodeClient(token=token),
-        target_repo=args.target_repo,
-        issue_number=args.issue_number,
-        outcome=args.outcome,
-        run_url=args.run_url,
-        pr_url=args.pr_url,
-        failure_summary=args.failure_summary,
-    )
+    finalize_args = {
+        "client": GitCodeClient(token=token),
+        "target_repo": args.target_repo,
+        "issue_number": args.issue_number,
+        "outcome": args.outcome,
+        "run_url": args.run_url,
+        "pr_url": args.pr_url,
+        "failure_summary": args.failure_summary,
+    }
+    failure_evidence_dir = getattr(args, "failure_evidence_dir", None)
+    if failure_evidence_dir is not None:
+        finalize_args["failure_evidence_dir"] = failure_evidence_dir
+    finalize_new_image_issue(**finalize_args)
     _print_json(
         {
             "issue_number": args.issue_number,
@@ -561,6 +566,7 @@ def _add_delivery_commands(commands: argparse._SubParsersAction) -> None:
     fork.add_argument("--delivery-run-id", required=True)
     fork.add_argument("--delivery-run-attempt", required=True)
     fork.add_argument("--workspace", required=True, type=Path)
+    fork.add_argument("--source-issue-number", type=int)
     fork.add_argument(
         "--gitcode-username",
         default="qq_42020325",
@@ -608,6 +614,7 @@ def _add_delivery_commands(commands: argparse._SubParsersAction) -> None:
     issue_finalize.add_argument("--run-url", required=True)
     issue_finalize.add_argument("--pr-url", default="")
     issue_finalize.add_argument("--failure-summary", default="")
+    issue_finalize.add_argument("--failure-evidence-dir", type=Path)
     issue_finalize.set_defaults(handler=_issue_finalize)
 
 

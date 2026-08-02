@@ -156,10 +156,42 @@ jobs:
           input-dir: ${{ runner.temp }}/phase1-input
           output-dir: ${{ runner.temp }}/phase1-terminal-candidate
 
+      - name: Download terminal generation evidence
+        if: ${{ steps.judge.outputs.terminal_status != '' }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: phase1-generation-${{ github.run_id }}
+          path: ${{ runner.temp }}/phase1-terminal-generation
+
+      - name: Download round 1 decision evidence
+        if: >-
+          ${{ steps.judge.outputs.terminal_status != '' && inputs.round > 1 }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: phase1-decide1-${{ github.run_id }}
+          path: ${{ runner.temp }}/phase1-terminal/decisions/round1
+
+      - name: Download round 2 decision evidence
+        if: >-
+          ${{ steps.judge.outputs.terminal_status != '' && inputs.round > 2 }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: phase1-decide2-${{ github.run_id }}
+          path: ${{ runner.temp }}/phase1-terminal/decisions/round2
+
+      - name: Download round 3 decision evidence
+        if: >-
+          ${{ steps.judge.outputs.terminal_status != '' && inputs.round > 3 }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: phase1-decide3-${{ github.run_id }}
+          path: ${{ runner.temp }}/phase1-terminal/decisions/round3
+
       - name: Collect terminal evidence
         if: ${{ steps.judge.outputs.terminal_status != '' }}
         run: |
-          mkdir -p "${RUNNER_TEMP}/phase1-terminal/decision"
+          mkdir -p "${RUNNER_TEMP}/phase1-terminal/decision" \
+            "${RUNNER_TEMP}/phase1-terminal/generation"
           cp "${RUNNER_TEMP}/phase1-terminal-candidate/task-spec.json" \
             "${RUNNER_TEMP}/phase1-terminal-candidate/base-sha.txt" \
             "${RUNNER_TEMP}/phase1-terminal-candidate/changes.patch" \
@@ -170,6 +202,8 @@ jobs:
             "${RUNNER_TEMP}/phase1-terminal/"
           cp -a "${RUNNER_TEMP}/phase1-decide/." \
             "${RUNNER_TEMP}/phase1-terminal/decision/"
+          cp -a "${RUNNER_TEMP}/phase1-terminal-generation/generation-reports/." \
+            "${RUNNER_TEMP}/phase1-terminal/generation/"
 
       - name: Upload needs-human-review evidence
         if: ${{ steps.judge.outputs.terminal_status == 'needs-human-review' }}

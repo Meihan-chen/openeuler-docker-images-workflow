@@ -1,3 +1,4 @@
+import json
 from dataclasses import dataclass
 
 import pytest
@@ -500,7 +501,7 @@ def test_dispatch_failure_returns_claimed_issue_to_new_state():
             "success",
             "https://gitcode.com/openeuler/openeuler-docker-images/pull/4000",
             "已完成",
-            "closed",
+            "open",
         ),
         ("failure", "", "已挂起", "open"),
         ("needs-human-review", "", "已挂起", "open"),
@@ -540,6 +541,127 @@ def test_trigger_issue_is_finalized_from_scenario_one_result(
     update = client.calls[2][1]
     assert update["issue_status"] == expected_status
     assert update["state"] == expected_state
+
+
+def test_needs_human_comment_summarizes_stages_fixer_and_blocker(tmp_path):
+    from scripts.lib.issue_lifecycle import (
+        finalize_new_image_issue,
+        render_needs_human_summary,
+    )
+
+    generation = tmp_path / "generation"
+    decision = tmp_path / "decision" / "agents"
+    previous_decision = tmp_path / "decisions" / "round1" / "agents"
+    generation.mkdir()
+    decision.mkdir(parents=True)
+    previous_decision.mkdir(parents=True)
+    (generation / "image-creator.json").write_text(
+        json.dumps({"success": True, "summary": "Created the image files."})
+    )
+    (generation / "image-qa-round1.json").write_text(
+        json.dumps(
+            {
+                "status": "needs_fix",
+                "summary": "Runtime user assertion was inconsistent.",
+                "issues": [
+                    {
+                        "severity": "major",
+                        "file": "Database/example/tests/goss.yaml",
+                        "description": "Expected UID differs from Dockerfile.",
+                    }
+                ],
+            }
+        )
+    )
+    (decision / "fixer-native-dual-round3-attempt1.json").write_text(
+        json.dumps(
+            {
+                "success": True,
+                "status": "fixed",
+                "summary": "Added the missing ARM runtime library.",
+                "changes": [
+                    {
+                        "file": "Database/example/1.0/oe/Dockerfile",
+                        "change": "Install libatomic on aarch64.",
+                    }
+                ],
+                "_input_review": {"kind": "native_validation_failure"},
+            }
+        )
+    )
+    (previous_decision / "fixer-native-dual-round1-attempt1.json").write_text(
+        json.dumps(
+            {
+                "success": True,
+                "status": "fixed",
+                "summary": "Pinned the missing build dependency.",
+                "changes": ["Install the compiler package."],
+                "_input_review": {"kind": "native_validation_failure"},
+            }
+        )
+    )
+    (decision / "convergence-report.json").write_text(
+        json.dumps(
+            {
+                "status": "needs-human-review",
+                "reason": "native-repair-budget-exhausted",
+                "round": 4,
+                "repair_attempts": 3,
+                "architectures": {
+                    "x86_64": {
+                        "status": "passed",
+                        "checks": {
+                            "native_build": True,
+                            "dgoss": True,
+                            "shared_tests": True,
+                        },
+                    },
+                    "aarch64": {
+                        "status": "failed",
+                        "failed_stage": "native_build",
+                        "failure": "libatomic.so.1: cannot open shared object file",
+                        "classification": {"category": "build-error"},
+                    },
+                },
+            }
+        )
+    )
+
+    summary = render_needs_human_summary(tmp_path)
+
+    assert "## Stage summary" in summary
+    assert "Image Creator" in summary
+    assert "Created the image files" in summary
+    assert "Image QA round 1" in summary
+    assert "Expected UID differs from Dockerfile" in summary
+    assert "Native x86_64" in summary and "passed" in summary
+    assert "Native aarch64" in summary and "native_build" in summary
+    assert "Fixer round 3, attempt 1" in summary
+    assert "Fixer round 1, attempt 1" in summary
+    assert "Pinned the missing build dependency" in summary
+    assert "Install libatomic on aarch64" in summary
+    assert "## Blocking error" in summary
+    assert "libatomic.so.1" in summary
+
+    client = TriggerIssueClient(
+        _new_trigger_issue(
+            issue_state="已接纳",
+            issue_state_detail={"title": "已接纳"},
+        )
+    )
+    finalize_new_image_issue(
+        client=client,
+        target_repo=TARGET_REPO,
+        issue_number=64,
+        outcome="needs-human-review",
+        run_url="https://github.com/Meihan-chen/repo/actions/runs/123",
+        failure_evidence_dir=tmp_path,
+    )
+
+    comment = client.calls[1][1]["body"]
+    assert "## Stage summary" in comment
+    assert "## Blocking error" in comment
+    assert "libatomic.so.1" in comment
 
 
 def test_github_workflow_dispatch_uses_token_only_in_environment():

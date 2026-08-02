@@ -725,6 +725,7 @@ def deliver_promoted_candidate(
     title: str,
     body: str,
     client: Any,
+    issue_id: str = "",
     push: Callable[..., None] = push_working_branch,
     delete: Callable[..., bool] = delete_working_branch,
 ) -> Any:
@@ -740,11 +741,16 @@ def deliver_promoted_candidate(
         token=token,
     )
     try:
+        create_args = {
+            "config": config,
+            "title": title,
+            "body": body,
+            "branch": promotion.branch,
+        }
+        if issue_id:
+            create_args["issue_id"] = issue_id
         return client.create_pull_request(
-            config=config,
-            title=title,
-            body=body,
-            branch=promotion.branch,
+            **create_args,
         )
     except Exception:
         try:
@@ -773,6 +779,7 @@ def deliver_validated_candidate(
     token: str,
     delivery_run_id: str,
     delivery_run_attempt: str,
+    source_issue_number: int | None = None,
     clone: Callable[..., TargetWorkspace] = TargetWorkspace.clone,
     promote: Callable[..., Any] = promote_candidate,
     client_factory: Callable[..., Any] = GitCodeClient,
@@ -795,6 +802,8 @@ def deliver_validated_candidate(
         raise ForkPRPipelineError(
             "delivery run ID and attempt must be positive integers"
         )
+    if source_issue_number is not None and source_issue_number <= 0:
+        raise ForkPRPipelineError("source Issue number must be positive")
 
     bundle = CandidateBundle.verify(
         candidate_dir,
@@ -815,6 +824,16 @@ def deliver_validated_candidate(
         branch=delivery_branch,
     )
     content = compose_pull_request(bundle)
+    client = client_factory(token=token)
+    issue_id = ""
+    if source_issue_number is not None:
+        source_issue = client.get_issue(
+            target_repo=config.target_repo,
+            number=source_issue_number,
+        )
+        issue_id = str(source_issue.get("id", ""))
+        if not issue_id.isdigit() or int(issue_id) <= 0:
+            raise ForkPRPipelineError("source Issue has no valid global ID")
     return deliver(
         repo=workspace.path,
         config=config,
@@ -823,5 +842,6 @@ def deliver_validated_candidate(
         token=token,
         title=content.title,
         body=content.body,
-        client=client_factory(token=token),
+        client=client,
+        issue_id=issue_id,
     )

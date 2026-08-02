@@ -61,6 +61,7 @@ def test_test_delivery_creates_cross_repo_pr_without_duplicate_lookup():
         title="[New Image] Add Apache Kvrocks 2.16.0",
         body="Validated on x86_64 and aarch64.",
         branch=BRANCH,
+        issue_id="152212",
     )
 
     assert result.number == 42
@@ -75,7 +76,9 @@ def test_test_delivery_creates_cross_repo_pr_without_duplicate_lookup():
         "head": f"qq_42020325:{BRANCH}",
         "base": "master",
         "body": "Validated on x86_64 and aarch64.",
+        "issue": "152212",
     }
+    assert "close_related_issue" not in request.json_body
 
 
 def test_production_delivery_checks_every_pr_page_before_rejecting_duplicate():

@@ -130,6 +130,19 @@ def test_issue_trigger_reuses_scenario_one_and_finalizes_the_source_issue():
         assert f"needs.{name}.result == 'success'" in text
         assert f"needs.{name}.outputs.terminal_status" in text
     assert "needs-human-review" in text
+    assert "phase1-needs-human-${{ github.run_id }}" in text
+    assert "--failure-evidence-dir" in text
+    delivery_step = next(
+        step
+        for step in delivery["steps"]
+        if step["name"] == "Promote candidate and create fork PR"
+    )
+    assert delivery_step["env"]["SOURCE_RUN_ID"] == (
+        "${{ inputs.source_run_id }}"
+    )
+    assert "--source-issue-number" in delivery_step["run"]
+    assert 'case "${SOURCE_RUN_ID}"' in delivery_step["run"]
+    assert "case \"${{ inputs.source_run_id }}\"" not in delivery_step["run"]
 
 
 def test_repair_budget_terminal_is_preserved_without_emitting_round_five():
@@ -149,7 +162,27 @@ def test_repair_budget_terminal_is_preserved_without_emitting_round_five():
     assert terminal_emit["with"]["output-dir"].endswith(
         "/phase1-terminal-candidate"
     )
+    generation = steps["Download terminal generation evidence"]
+    assert "terminal_status != ''" in generation["if"]
+    assert generation["with"]["name"] == (
+        "phase1-generation-${{ github.run_id }}"
+    )
+    for round_number in (1, 2, 3):
+        previous = steps[
+            f"Download round {round_number} decision evidence"
+        ]
+        assert "terminal_status != ''" in previous["if"]
+        assert f"inputs.round > {round_number}" in previous["if"]
+        assert previous["with"]["name"] == (
+            f"phase1-decide{round_number}-${{{{ github.run_id }}}}"
+        )
+        assert previous["with"]["path"].endswith(
+            f"/phase1-terminal/decisions/round{round_number}"
+        )
     assert "phase1-terminal-candidate/changes.patch" in steps[
+        "Collect terminal evidence"
+    ]["run"]
+    assert "phase1-terminal-generation/generation-reports" in steps[
         "Collect terminal evidence"
     ]["run"]
     terminal_upload = steps["Upload needs-human-review evidence"]
