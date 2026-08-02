@@ -275,7 +275,7 @@ jobs:
           retention-days: 30
 
   round1:
-    name: Round 1
+    name: Build & Test 1
     needs: [prepare, seed_resume]
     if: >-
       ${{ always() &&
@@ -288,7 +288,7 @@ jobs:
       operation: ${{ inputs.operation }}
 
   decide1:
-    name: Decision 1
+    name: Evaluate & Fix 1
     needs: round1
     if: ${{ always() && needs.round1.result != 'skipped' }}
     uses: ./.github/workflows/phase1-decide.yml
@@ -302,7 +302,7 @@ jobs:
         || secrets.DEEPSEEK_API_KEY }}
 
   round2:
-    name: Round 2
+    name: Build & Test 2
     needs: [decide1, seed_resume]
     if: >-
       ${{ always() &&
@@ -317,7 +317,7 @@ jobs:
       operation: ${{ inputs.operation }}
 
   decide2:
-    name: Decision 2
+    name: Evaluate & Fix 2
     needs: round2
     if: ${{ always() && needs.round2.result != 'skipped' }}
     uses: ./.github/workflows/phase1-decide.yml
@@ -331,7 +331,7 @@ jobs:
         || secrets.DEEPSEEK_API_KEY }}
 
   round3:
-    name: Round 3
+    name: Build & Test 3
     needs: [decide2, seed_resume]
     if: >-
       ${{ always() &&
@@ -346,7 +346,7 @@ jobs:
       operation: ${{ inputs.operation }}
 
   decide3:
-    name: Decision 3
+    name: Evaluate & Fix 3
     needs: round3
     if: ${{ always() && needs.round3.result != 'skipped' }}
     uses: ./.github/workflows/phase1-decide.yml
@@ -360,7 +360,7 @@ jobs:
         || secrets.DEEPSEEK_API_KEY }}
 
   round4:
-    name: Round 4
+    name: Build & Test 4
     needs: [decide3, seed_resume]
     if: >-
       ${{ always() &&
@@ -375,7 +375,7 @@ jobs:
       operation: ${{ inputs.operation }}
 
   decide4:
-    name: Decision 4
+    name: Evaluate & Fix 4
     needs: round4
     if: ${{ always() && needs.round4.result != 'skipped' }}
     uses: ./.github/workflows/phase1-decide.yml

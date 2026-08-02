@@ -1,4 +1,4 @@
-name: Phase 1 - Round decision
+name: Phase 1 - Evaluate and fix candidate
 
 # Reads both architectures' reports and rules on the round: either the
 # candidate converged, or the Fixer repairs it once for the next round.
@@ -44,7 +44,7 @@ env:
 
 jobs:
   decide:
-    name: Decide round ${{ inputs.round }}
+    name: Evaluate results and fix if needed
     runs-on: [self-hosted, Linux, X64, oe-image-x86]
     timeout-minutes: 60
     outputs:

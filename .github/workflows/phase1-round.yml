@@ -1,4 +1,4 @@
-name: Phase 1 - Validation round
+name: Phase 1 - Build and test candidate
 
 # One round validates the same candidate on both architectures at once, so
 # the round that passes on both is itself the dual-architecture proof.
@@ -27,7 +27,7 @@ env:
 
 jobs:
   x86_64:
-    name: Validate round ${{ inputs.round }} on x86_64
+    name: x86_64
     runs-on: [self-hosted, Linux, X64, oe-image-x86]
     timeout-minutes: 180
     steps:
@@ -96,7 +96,7 @@ jobs:
           retention-days: 30
 
   aarch64:
-    name: Validate round ${{ inputs.round }} on aarch64
+    name: aarch64
     runs-on: [self-hosted, Linux, ARM64, oe-image-arm64]
     timeout-minutes: 180
     steps:

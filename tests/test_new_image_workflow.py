@@ -104,6 +104,26 @@ def test_scenario_one_runs_full_validation_chain_and_delivers_same_run():
     assert jobs["round1"]["with"]["operation"] == "${{ inputs.operation }}"
 
 
+def test_validation_rounds_use_functional_display_names():
+    jobs = _workflow()["jobs"]
+
+    for index, job_id in enumerate(ROUNDS, start=1):
+        assert jobs[job_id]["name"] == f"Build & Test {index}"
+    for index, job_id in enumerate(DECISIONS, start=1):
+        assert jobs[job_id]["name"] == f"Evaluate & Fix {index}"
+
+    round_workflow = _workflow(ROUND_PATH)
+    assert round_workflow["name"] == "Phase 1 - Build and test candidate"
+    assert round_workflow["jobs"]["x86_64"]["name"] == "x86_64"
+    assert round_workflow["jobs"]["aarch64"]["name"] == "aarch64"
+
+    decide_workflow = _workflow(DECIDE_PATH)
+    assert decide_workflow["name"] == "Phase 1 - Evaluate and fix candidate"
+    assert decide_workflow["jobs"]["decide"]["name"] == (
+        "Evaluate results and fix if needed"
+    )
+
+
 def test_issue_trigger_reuses_scenario_one_and_finalizes_the_source_issue():
     data = _workflow()
     inputs = _trigger(data)["workflow_dispatch"]["inputs"]
@@ -721,14 +741,14 @@ def test_jobs_and_run_have_readable_display_names():
     expected = {
         "prepare": "Generate candidate on x86_64",
         "seed_resume": "Seed resumed round candidate",
-        "round1": "Round 1",
-        "decide1": "Decision 1",
-        "round2": "Round 2",
-        "decide2": "Decision 2",
-        "round3": "Round 3",
-        "decide3": "Decision 3",
-        "round4": "Round 4",
-        "decide4": "Decision 4",
+        "round1": "Build & Test 1",
+        "decide1": "Evaluate & Fix 1",
+        "round2": "Build & Test 2",
+        "decide2": "Evaluate & Fix 2",
+        "round3": "Build & Test 3",
+        "decide3": "Evaluate & Fix 3",
+        "round4": "Build & Test 4",
+        "decide4": "Evaluate & Fix 4",
         "package_candidate": "Verify and seal validated candidate",
         "release_x86_builders": "Release x86_64 run builders",
         "release_arm_builders": "Release aarch64 run builders",
