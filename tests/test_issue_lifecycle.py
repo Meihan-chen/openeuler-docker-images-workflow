@@ -503,6 +503,7 @@ def test_dispatch_failure_returns_claimed_issue_to_new_state():
             "closed",
         ),
         ("failure", "", "已挂起", "open"),
+        ("needs-human-review", "", "已挂起", "open"),
     ],
 )
 def test_trigger_issue_is_finalized_from_scenario_one_result(
@@ -534,6 +535,8 @@ def test_trigger_issue_is_finalized_from_scenario_one_result(
         assert pr_url in comment
     else:
         assert "package_candidate=failure" in comment
+        if outcome == "needs-human-review":
+            assert "needs-human-review" in comment
     update = client.calls[2][1]
     assert update["issue_status"] == expected_status
     assert update["state"] == expected_state

@@ -18,6 +18,7 @@ from scripts.lib.progress import log
 from scripts.lib.task_spec import TaskSpec
 from scripts.lib.target_contract import (
     TargetContractError,
+    native_checks_pass,
     validate_generated_target,
 )
 
@@ -44,6 +45,8 @@ def _load_failure_report(path: Path, error: Exception) -> dict[str, object]:
 
 
 def _redact(value: object, secret: str) -> object:
+    if not secret:
+        return value
     if isinstance(value, str):
         return value.replace(secret, "REDACTED")
     if isinstance(value, list):
@@ -90,10 +93,16 @@ def _target_gate_report(
             base_sha=base_sha,
         )
     except (TargetContractError, UnicodeError) as error:
-        return {
+        report: dict[str, object] = {
             "status": "failed",
+            "build_allowed": False,
+            "test_allowed": False,
+            "delivery_allowed": False,
             "errors": str(error).splitlines(),
         }
+        if isinstance(error, TargetContractError) and error.findings:
+            report["findings"] = error.findings
+        return report
 
 
 @dataclass(frozen=True)
@@ -102,6 +111,7 @@ class RoundDecision:
     round_number: int
     repair_attempts: int
     validated_patch_sha256: str
+    terminal_status: str = ""
 
 
 _ARCHITECTURES = ("x86_64", "aarch64")
@@ -112,15 +122,90 @@ _GATE_REPAIR_ATTEMPTS = 3
 
 
 def _passed(report: Mapping[str, object]) -> bool:
-    return report.get("status") == "passed"
+    return (
+        report.get("status") == "passed"
+        and native_checks_pass(report.get("checks"))
+    )
 
 
 def _native_gate_ready(gate: Mapping[str, object]) -> bool:
     """Require safe build input and executable tests before paying for Docker."""
     return (
         gate.get("status") == "passed"
-        and gate.get("build_allowed", True) is True
-        and gate.get("test_allowed", True) is True
+        and gate.get("build_allowed") is True
+        and gate.get("test_allowed") is True
+    )
+
+
+def _hard_stop_reasons(gate: Mapping[str, object]) -> list[str]:
+    findings = gate.get("findings")
+    hard = [
+        finding
+        for finding in findings
+        if isinstance(finding, Mapping)
+        and finding.get("level") == "hard_stop"
+    ] if isinstance(findings, list) else []
+    if hard:
+        return [
+            str(finding.get("code") or finding.get("message") or "hard_stop")
+            for finding in hard
+        ]
+    if gate.get("status") != "passed" and gate.get("build_allowed") is False:
+        errors = gate.get("errors")
+        if isinstance(errors, list) and errors:
+            return [str(error) for error in errors]
+        return ["deterministic target contract"]
+    return []
+
+
+def _raise_for_invalid_gate(gate: Mapping[str, object]) -> None:
+    reasons = _hard_stop_reasons(gate)
+    if reasons:
+        raise NativeRepairError("target contract hard stop: " + ", ".join(reasons))
+    missing = [
+        key
+        for key in ("build_allowed", "test_allowed")
+        if gate.get(key) is not True and gate.get(key) is not False
+    ]
+    if missing:
+        raise NativeRepairError(
+            "target contract omitted explicit permission fields: "
+            + ", ".join(missing)
+        )
+
+
+def _needs_human_decision(
+    *,
+    report_dir: Path,
+    round_number: int,
+    repair_attempts: int,
+    reports: Mapping[str, Mapping[str, object]],
+    api_key: str,
+    reason: str,
+    gate: Mapping[str, object] | None = None,
+) -> RoundDecision:
+    terminal: dict[str, object] = {
+        "status": "needs-human-review",
+        "reason": reason,
+        "repair_attempts": repair_attempts,
+        "round": round_number,
+        "architectures": {
+            name: _redact(dict(reports[name]), api_key)
+            for name in _ARCHITECTURES
+        },
+    }
+    if gate is not None:
+        terminal["gate"] = _redact(dict(gate), api_key)
+    (report_dir / "convergence-report.json").write_text(
+        json.dumps(terminal, ensure_ascii=False, indent=2, sort_keys=True)
+        + "\n"
+    )
+    return RoundDecision(
+        converged=False,
+        round_number=round_number,
+        repair_attempts=repair_attempts,
+        validated_patch_sha256="",
+        terminal_status="needs-human-review",
     )
 
 
@@ -184,6 +269,18 @@ def decide_round(
     report_dir.mkdir(parents=True, exist_ok=True)
     stage = f"round:{round_number}"
 
+    invalid_passed = [
+        name
+        for name in _ARCHITECTURES
+        if reports[name].get("status") == "passed"
+        and not native_checks_pass(reports[name].get("checks"))
+    ]
+    if invalid_passed:
+        raise NativeRepairError(
+            "native report checks are incomplete: "
+            + ", ".join(invalid_passed)
+        )
+
     if all(_passed(reports[name]) for name in _ARCHITECTURES):
         digests = {
             str(reports[name].get("validated_patch_sha256", ""))
@@ -204,13 +301,32 @@ def decide_round(
             ),
         )
 
+    per_architecture = {
+        name: classify_failure(
+            report=reports[name],
+            allowed_roots=(task.domain,),
+        )
+        for name in _ARCHITECTURES
+        if not _passed(reports[name])
+    }
+    if max_rounds == 0:
+        raise NativeRepairError("zero-repair validation failed")
     if round_number > max_rounds:
-        failed = [
-            name for name in _ARCHITECTURES if not _passed(reports[name])
-        ]
-        raise NativeRepairError(
-            f"native validation failed on {', '.join(failed)} after "
-            f"{max_rounds} repair attempts"
+        if all(
+            result["category"] == "infra"
+            for result in per_architecture.values()
+        ):
+            raise NativeRepairError(
+                "native validation infrastructure retries were exhausted"
+            )
+        log(stage, "NEEDS_HUMAN repair budget exhausted")
+        return _needs_human_decision(
+            report_dir=report_dir,
+            round_number=round_number,
+            repair_attempts=max_rounds,
+            reports=reports,
+            api_key=api_key,
+            reason="native-repair-budget-exhausted",
         )
 
     if not api_key:
@@ -221,14 +337,6 @@ def decide_round(
     # regress the other — and for the same reason one category cannot speak
     # for both. A Goss config fault on x86 next to a build failure on ARM must
     # not be handed over as "do not change the Dockerfile".
-    per_architecture = {
-        name: classify_failure(
-            report=reports[name],
-            allowed_roots=(task.domain,),
-        )
-        for name in _ARCHITECTURES
-        if not _passed(reports[name])
-    }
     if all(
         result["category"] == "infra" for result in per_architecture.values()
     ):
@@ -285,6 +393,7 @@ def decide_round(
             task=task,
             base_sha=base_sha,
         )
+        _raise_for_invalid_gate(gate)
         if _native_gate_ready(gate):
             log(stage, f"PASS fixer attempt={attempt}")
             return RoundDecision(
@@ -296,9 +405,15 @@ def decide_round(
         log(stage, f"NEEDS_FIX target_contract attempt={attempt}")
         review = _classified({**review, "gate": gate}, task=task, gate=gate)
 
-    raise NativeRepairError(
-        f"repaired candidate still fails the target contract in round "
-        f"{round_number}"
+    log(stage, "NEEDS_HUMAN target contract repair exhausted")
+    return _needs_human_decision(
+        report_dir=report_dir,
+        round_number=round_number,
+        repair_attempts=_GATE_REPAIR_ATTEMPTS,
+        reports=reports,
+        api_key=api_key,
+        reason="target-contract-repair-exhausted",
+        gate=gate,
     )
 
 
@@ -348,6 +463,7 @@ def validate_native_with_repairs(
         task=task,
         base_sha=base_sha,
     )
+    _raise_for_invalid_gate(initial_gate)
     pending_review: Mapping[str, object] | None = None
     if not _native_gate_ready(initial_gate):
         pending_review = _classified(
@@ -392,9 +508,9 @@ def validate_native_with_repairs(
                     ),
                 )
             else:
-                if report.get("status") != "passed":
+                if not _passed(report):
                     raise NativeRepairError(
-                        "native validator returned without passed status"
+                        "native validator returned without complete passed checks"
                     )
                 summary = {
                     "architecture": architecture,
@@ -422,9 +538,30 @@ def validate_native_with_repairs(
         if pending_review is not None:
             if repair_attempts == max_repairs:
                 kind = str(pending_review.get("kind", "native validation"))
-                raise NativeRepairError(
-                    f"{kind.replace('_', ' ')} failed after "
-                    f"{max_repairs} repair attempts"
+                terminal = {
+                    "status": "needs-human-review",
+                    "reason": "target-contract-repair-exhausted",
+                    "architecture": architecture,
+                    "repair_attempts": repair_attempts,
+                    "last_review": _redact(dict(pending_review), api_key),
+                }
+                (repair_report_dir / "convergence-report.json").write_text(
+                    json.dumps(
+                        terminal,
+                        ensure_ascii=False,
+                        indent=2,
+                        sort_keys=True,
+                    )
+                    + "\n"
+                )
+                log(
+                    f"native:{architecture}",
+                    f"NEEDS_HUMAN {kind} repair exhausted",
+                )
+                return NativeRepairResult(
+                    status="needs-human-review",
+                    repair_attempts=repair_attempts,
+                    report=terminal,
                 )
             repair_attempts += 1
             review = dict(pending_review)
@@ -467,6 +604,7 @@ def validate_native_with_repairs(
                 task=task,
                 base_sha=base_sha,
             )
+            _raise_for_invalid_gate(gate)
             if not _native_gate_ready(gate):
                 log(
                     f"native:{architecture}",

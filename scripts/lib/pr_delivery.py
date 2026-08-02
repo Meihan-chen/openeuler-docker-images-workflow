@@ -12,14 +12,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Sequence
 
-from scripts.lib.candidate_bundle import CandidateBundle, promote_candidate
+from scripts.lib.candidate_bundle import (
+    CandidateBundle,
+    CandidateBundleError,
+    junit_pass_rate,
+    promote_candidate,
+    recovery_provenance,
+)
 from scripts.lib.git_workspace import TargetWorkspace
 from scripts.lib.gitcode_client import DeliveryConfig, GitCodeClient
+from scripts.lib.target_contract import native_checks_pass
 
 
 TARGET_SOURCE = "https://gitcode.com/openeuler/openeuler-docker-images.git"
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
-_RUN_ID_RE = re.compile(r"^[1-9][0-9]*$")
 _REF_CHARS_RE = re.compile(r"^[A-Za-z0-9._+/-]+$")
 
 GitRunner = Callable[
@@ -38,6 +44,38 @@ class GitDeliveryError(RuntimeError):
 
 class ForkPRPipelineError(RuntimeError):
     """Raised when fork delivery is not configured safely."""
+
+
+def calculate_confidence(
+    build_success: Mapping[str, bool],
+    test_pass_rate: Mapping[str, float],
+    hadolint_violations: int,
+    meta_consistent: bool,
+) -> dict[str, object]:
+    """Score only evidence already required by validated PR delivery."""
+    build_score = 0.35
+    if not build_success.get("amd64", False):
+        build_score *= 0.5
+    if not build_success.get("arm64", False):
+        build_score *= 0.5
+    test_average = (
+        test_pass_rate.get("amd64", 0) + test_pass_rate.get("arm64", 0)
+    ) / 2
+    test_score = 0.30 * test_average
+    lint_score = 0.20 * max(0, 1 - hadolint_violations * 0.1)
+    meta_score = 0.15 if meta_consistent else 0
+    total = build_score + test_score + lint_score + meta_score
+    level = "auto-merge" if total >= 0.85 else "review" if total >= 0.75 else "loop"
+    return {
+        "score": round(total, 3),
+        "level": level,
+        "details": {
+            "build": round(build_score, 3),
+            "test": round(test_score, 3),
+            "lint": round(lint_score, 3),
+            "meta": round(meta_score, 3),
+        },
+    }
 
 
 @dataclass(frozen=True)
@@ -285,7 +323,7 @@ def _brief(value: object, *, limit: int = 300) -> str:
 def _hadolint_lines(root: Path) -> tuple[str, ...]:
     path = root / "reports" / "hadolint.txt"
     if not path.is_file():
-        return ("- Hadolint: `not recorded`.",)
+        raise PRDeliveryError("Hadolint evidence is required")
     output = path.read_text(errors="replace")
     finding_lines = [
         line.strip()
@@ -304,6 +342,17 @@ def _hadolint_lines(root: Path) -> tuple[str, ...]:
     return tuple(lines)
 
 
+def _hadolint_violation_count(root: Path) -> int:
+    path = root / "reports" / "hadolint.txt"
+    if not path.is_file():
+        raise PRDeliveryError("Hadolint evidence is required")
+    return sum(
+        1
+        for line in path.read_text(errors="replace").splitlines()
+        if re.search(r"\b(?:DL|SC)[0-9]{4}\b", line)
+    )
+
+
 def _qa_review_lines(root: Path, prefix: str, label: str) -> tuple[str, ...]:
     def round_number(path: Path) -> int:
         match = re.search(r"-round([0-9]+)\.json$", path.name)
@@ -315,7 +364,7 @@ def _qa_review_lines(root: Path, prefix: str, label: str) -> tuple[str, ...]:
     )
     lines = [f"### {label} review", ""]
     if not paths:
-        return (*lines, "- Final result: `not recorded`.", "")
+        raise PRDeliveryError(f"{prefix} QA evidence is required")
 
     reports = []
     for path in paths:
@@ -324,6 +373,15 @@ def _qa_review_lines(root: Path, prefix: str, label: str) -> tuple[str, ...]:
         if status not in {"approved", "needs_fix"}:
             raise PRDeliveryError(f"{prefix} evidence has an invalid status")
         reports.append((round_number(path), status, report))
+
+    sequence = [(number, status) for number, status, _ in reports]
+    valid_sequence = sequence == [(1, "approved")] or (
+        len(sequence) == 2
+        and sequence[0] == (1, "needs_fix")
+        and sequence[1][0] == 2
+    )
+    if not valid_sequence:
+        raise PRDeliveryError(f"{prefix} QA round sequence is invalid")
 
     final_status = reports[-1][1]
     rounds = len(reports)
@@ -505,67 +563,20 @@ def _patch_changes(bundle: CandidateBundle) -> tuple[tuple[str, str], ...]:
 def _recovery_provenance(
     bundle: CandidateBundle,
 ) -> Mapping[str, object] | None:
-    path = bundle.root / "reports" / "recovery-provenance.json"
-    if not path.is_file():
-        return None
-    recovery = _load_json(path, "recovery provenance")
-    expected_fields = {
-        "schema_version",
-        "mode",
-        "status",
-        "generation_run_id",
-        "validation_run_id",
-        "packaging_run_id",
-        "validated_base_sha",
-        "current_base_sha",
-        "upstream_changed_paths",
-        "candidate_changed_paths",
-        "promotable",
-    }
-    if set(recovery) != expected_fields:
-        raise PRDeliveryError("recovery provenance has an invalid schema")
-    if (
-        recovery.get("schema_version") != 1
-        or recovery.get("mode") != "recover_package"
-        or recovery.get("status") != "passed"
-        or recovery.get("promotable") is not True
-    ):
-        raise PRDeliveryError("recovery provenance is not promotable")
-    for field in (
-        "generation_run_id",
-        "validation_run_id",
-        "packaging_run_id",
-    ):
-        if not _RUN_ID_RE.fullmatch(str(recovery.get(field, ""))):
-            raise PRDeliveryError(f"recovery provenance {field} is invalid")
-    if recovery["packaging_run_id"] != bundle.manifest.validated_run_id:
-        raise PRDeliveryError(
-            "recovery packaging run does not match candidate manifest"
+    try:
+        return recovery_provenance(
+            bundle.root,
+            validated_run_id=bundle.manifest.validated_run_id,
+            base_sha=bundle.manifest.base_sha,
         )
-    if recovery["current_base_sha"] != bundle.manifest.base_sha:
-        raise PRDeliveryError(
-            "recovery current base does not match candidate manifest"
-        )
-    if not _SHA_RE.fullmatch(str(recovery["validated_base_sha"])):
-        raise PRDeliveryError("recovery validated base SHA is invalid")
-    upstream = recovery["upstream_changed_paths"]
-    candidate = recovery["candidate_changed_paths"]
-    if (
-        not isinstance(upstream, list)
-        or not isinstance(candidate, list)
-        or not candidate
-        or any(not isinstance(path, str) or not path for path in upstream)
-        or any(not isinstance(path, str) or not path for path in candidate)
-    ):
-        raise PRDeliveryError("recovery changed paths are invalid")
-    if set(upstream) & set(candidate):
-        raise PRDeliveryError("recovery changed paths overlap")
-    return recovery
+    except CandidateBundleError as error:
+        raise PRDeliveryError(str(error)) from error
 
 
 def compose_pull_request(bundle: CandidateBundle) -> PullRequestContent:
     task = bundle.task
     changes = _patch_changes(bundle)
+    recovery = _recovery_provenance(bundle)
     rows = []
     for architecture in ("x86_64", "aarch64"):
         report = _load_json(
@@ -575,8 +586,9 @@ def compose_pull_request(bundle: CandidateBundle) -> PullRequestContent:
         if report.get("status") != "passed":
             raise PRDeliveryError(f"{architecture} evidence did not pass")
         checks = report.get("checks")
-        if not isinstance(checks, dict) or not all(
-            value is True for value in checks.values()
+        if not native_checks_pass(
+            checks,
+            allow_legacy=recovery is not None,
         ):
             raise PRDeliveryError(f"{architecture} checks are incomplete")
         rows.append(
@@ -595,7 +607,7 @@ def compose_pull_request(bundle: CandidateBundle) -> PullRequestContent:
     gates = _load_json(bundle.root / "reports" / "gates.json", "target gates")
     if gates.get("status") != "passed":
         raise PRDeliveryError("deterministic target gates did not pass")
-    if gates.get("delivery_allowed", True) is not True:
+    if gates.get("delivery_allowed") is not True:
         raise PRDeliveryError("deterministic delivery contract did not pass")
     image_review = _qa_review_lines(bundle.root, "image-qa", "Image")
     testcase_review = _qa_review_lines(
@@ -605,7 +617,22 @@ def compose_pull_request(bundle: CandidateBundle) -> PullRequestContent:
     )
     fixer_process = _fixer_process_lines(bundle.root)
     hadolint_lines = _hadolint_lines(bundle.root)
-    recovery = _recovery_provenance(bundle)
+    hadolint_violations = _hadolint_violation_count(bundle.root)
+    confidence = calculate_confidence(
+        {"amd64": True, "arm64": True},
+        {
+            "amd64": junit_pass_rate(
+                bundle.root / "reports" / "x86_64.junit.xml",
+                "x86_64",
+            ),
+            "arm64": junit_pass_rate(
+                bundle.root / "reports" / "aarch64.junit.xml",
+                "aarch64",
+            ),
+        },
+        hadolint_violations,
+        True,
+    )
     recovery_lines: tuple[str, ...] = ()
     candidate_origin = (
         f"- Promoted from validated run "
@@ -660,6 +687,14 @@ def compose_pull_request(bundle: CandidateBundle) -> PullRequestContent:
             *recovery_lines,
             f"- Deterministic target contract: {gates.get('status')}",
             *hadolint_lines,
+            "",
+            "### Confidence Score",
+            "",
+            f"- Score: `{confidence['score']}` (`{confidence['level']}`).",
+            "- Inputs: both native builds passed; both required runtime test "
+            f"sets passed; Hadolint advisories: "
+            f"`{hadolint_violations}`; final metadata "
+            "contract passed.",
             f"- Target base SHA: `{bundle.manifest.base_sha}`.",
             f"- Task ID: `{bundle.manifest.task_id}`.",
             "- Result evidence: `results.json`, `version_info.json`, "

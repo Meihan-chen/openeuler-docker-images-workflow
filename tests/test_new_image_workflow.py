@@ -126,6 +126,37 @@ def test_issue_trigger_reuses_scenario_one_and_finalizes_the_source_issue():
     assert '${SOURCE_ISSUE#issue:}' in text
     assert "needs.deliver_fork_pr.outputs.pr_url" in text
     assert "GITCODE_TOKEN" in text
+    for name in DECISIONS:
+        assert f"needs.{name}.result == 'success'" in text
+        assert f"needs.{name}.outputs.terminal_status" in text
+    assert "needs-human-review" in text
+
+
+def test_repair_budget_terminal_is_preserved_without_emitting_round_five():
+    workflow = _workflow(DECIDE_PATH)
+    call = _trigger(workflow)["workflow_call"]
+    job = workflow["jobs"]["decide"]
+    steps = {step["name"]: step for step in job["steps"]}
+
+    assert "terminal_status" in call["outputs"]
+    assert job["outputs"]["terminal_status"] == (
+        "${{ steps.judge.outputs.terminal_status }}"
+    )
+    emit_condition = steps["Emit next round candidate"]["if"]
+    assert "terminal_status == ''" in emit_condition
+    terminal_emit = steps["Emit terminal candidate"]
+    assert "needs-human-review" in terminal_emit["if"]
+    assert terminal_emit["with"]["output-dir"].endswith(
+        "/phase1-terminal-candidate"
+    )
+    assert "phase1-terminal-candidate/changes.patch" in steps[
+        "Collect needs-human-review evidence"
+    ]["run"]
+    terminal_upload = steps["Upload needs-human-review evidence"]
+    assert "needs-human-review" in terminal_upload["if"]
+    assert terminal_upload["with"]["name"] == (
+        "phase1-needs-human-${{ github.run_id }}"
+    )
 
 
 def test_issue_watcher_is_lightweight_serial_and_test_allowlisted():
@@ -255,6 +286,10 @@ def test_every_round_validates_one_candidate_on_both_architectures():
             f"needs.{DECISIONS[index]}.outputs.converged != 'true'"
             in condition
         )
+        assert (
+            f"needs.{DECISIONS[index]}.outputs.terminal_status == ''"
+            in condition
+        )
 
     workflow_text = WORKFLOW_PATH.read_text()
     assert "scripts/harness/run.py" not in workflow_text
@@ -333,6 +368,60 @@ def test_artifact_producers_cover_each_package_input_mode():
     assert "inputs.source_run_id || github.run_id" in package_text
 
 
+def test_round_artifact_producers_and_consumers_use_the_same_templates():
+    """Cross-check reusable workflow boundaries instead of isolated strings."""
+
+    def artifact_names(path, action):
+        steps = [
+            step
+            for job in _workflow(path)["jobs"].values()
+            for step in job.get("steps", [])
+        ]
+        return {
+            step["with"]["name"]
+            for step in steps
+            if action in step.get("uses", "")
+            and isinstance(step.get("with", {}).get("name"), str)
+        }
+
+    round_uploads = artifact_names(ROUND_PATH, "upload-artifact")
+    round_downloads = artifact_names(ROUND_PATH, "download-artifact")
+    decide_uploads = artifact_names(DECIDE_PATH, "upload-artifact")
+    decide_downloads = artifact_names(DECIDE_PATH, "download-artifact")
+    main_uploads = artifact_names(WORKFLOW_PATH, "upload-artifact")
+
+    assert {
+        "phase1-round${{ inputs.round }}-x86_64-${{ github.run_id }}",
+        "phase1-round${{ inputs.round }}-aarch64-${{ github.run_id }}",
+    }.issubset(round_uploads & decide_downloads)
+    current_patch = "phase1-patch${{ inputs.round }}-${{ github.run_id }}"
+    assert current_patch in round_downloads
+    assert current_patch in decide_downloads
+    assert (
+        "phase1-patch${{ inputs.next_round }}-${{ github.run_id }}"
+        in decide_uploads
+    )
+
+    jobs = _workflow()["jobs"]
+    prepare = _job_text(jobs["prepare"])
+    seed = _job_text(jobs["seed_resume"])
+    package = _job_text(jobs["package_candidate"])
+    delivery = _job_text(jobs["deliver_fork_pr"])
+    assert "phase1-patch1-${{ github.run_id }}" in prepare
+    assert "phase1-patch${{ inputs.resume_from_round }}-${{" in seed
+    assert "phase1-converged-${{" in package
+    assert "phase1-converged-${{ github.run_id }}" in decide_uploads
+    assert "phase1-candidate-${{" in delivery
+    assert (
+        "phase1-${{ inputs.operation == 'pipeline_smoke' && 'smoke-' || '' }}"
+        "candidate-${{ github.run_id }}"
+        in main_uploads
+    )
+    # Terminal evidence is for human diagnosis and must never be promoted.
+    assert "phase1-needs-human-" not in package
+    assert "phase1-needs-human-" not in delivery
+
+
 def test_candidate_verify_workflow_does_not_claim_to_check_current_base():
     package = _workflow()["jobs"]["package_candidate"]
     seal = next(
@@ -345,6 +434,19 @@ def test_candidate_verify_workflow_does_not_claim_to_check_current_base():
     assert "--current-base-sha" not in seal["run"]
     # The similarly named argument remains meaningful for recovered patches.
     assert "--current-base-sha" in WORKFLOW_PATH.read_text()
+
+
+def test_sealed_candidate_preserves_both_junit_reports():
+    seal = next(
+        step
+        for step in _workflow()["jobs"]["package_candidate"]["steps"]
+        if step.get("name") == "Seal immutable candidate bundle"
+    )
+
+    assert "native-reports/x86_64.junit.xml" in seal["run"]
+    assert "candidate/reports/x86_64.junit.xml" in seal["run"]
+    assert "native-reports/aarch64.junit.xml" in seal["run"]
+    assert "candidate/reports/aarch64.junit.xml" in seal["run"]
 
 
 def test_recover_package_combines_generation_and_validation_runs():
@@ -440,8 +542,8 @@ def test_the_smoke_path_can_never_reach_the_fixer():
     for name in DECISIONS:
         assert "pipeline_smoke" in jobs[name]["with"]["max_rounds"]
         assert "'0'" in jobs[name]["with"]["max_rounds"]
-    # A zero budget makes decide_round raise before it ever builds a prompt,
-    # so a flaky smoke build fails loudly instead of silently repairing.
+    # A zero budget makes a smoke regression fail before it ever builds a
+    # prompt, so pipeline_smoke cannot go green via a business terminal state.
     decide_call = _trigger(_workflow(DECIDE_PATH))["workflow_call"]
     assert decide_call["secrets"]["DEEPSEEK_API_KEY"]["required"] is False
 
@@ -515,7 +617,7 @@ def test_legacy_evidence_is_allowed_only_on_the_reviewed_recovery_path():
 
     # Reports predating validated_patch_sha256 may only be accepted for the
     # one reviewed run whose report bytes are already pinned by SHA256.
-    assert workflow_text.count("--allow-legacy-evidence") == 1
+    assert workflow_text.count("--allow-legacy-evidence") == 2
     assert 'legacy_evidence=""' in aggregate
     assert '"${{ inputs.operation }}" = "recover_package"' in aggregate
     assert "TODO(test-recovery-cleanup)" in aggregate

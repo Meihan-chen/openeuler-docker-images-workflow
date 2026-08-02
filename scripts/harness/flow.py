@@ -462,12 +462,14 @@ def cmd_phase1_decide(args: argparse.Namespace) -> None:
         "round": decision.round_number,
         "repair_attempts": decision.repair_attempts,
         "validated_patch_sha256": decision.validated_patch_sha256,
+        "terminal_status": decision.terminal_status,
     }
     if args.github_output:
         with args.github_output.open("a", encoding="utf-8") as stream:
             stream.write(
                 f"converged={'true' if decision.converged else 'false'}\n"
             )
+            stream.write(f"terminal_status={decision.terminal_status}\n")
     _print_json(summary)
 
 
@@ -601,7 +603,7 @@ def _add_delivery_commands(commands: argparse._SubParsersAction) -> None:
     issue_finalize.add_argument(
         "--outcome",
         required=True,
-        choices=("success", "failure"),
+        choices=("success", "failure", "needs-human-review"),
     )
     issue_finalize.add_argument("--run-url", required=True)
     issue_finalize.add_argument("--pr-url", default="")

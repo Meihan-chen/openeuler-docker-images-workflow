@@ -220,8 +220,10 @@ def finalize_new_image_issue(
 ) -> Any | None:
     """Write the terminal scenario-one result back to its source Issue."""
 
-    if outcome not in {"success", "failure"}:
-        raise ValueError("outcome must be success or failure")
+    if outcome not in {"success", "failure", "needs-human-review"}:
+        raise ValueError(
+            "outcome must be success, failure or needs-human-review"
+        )
     if not run_url.startswith("https://"):
         raise ValueError("run_url must be an HTTPS URL")
     if outcome == "success" and not pr_url.startswith("https://"):
@@ -250,9 +252,14 @@ def finalize_new_image_issue(
             )
         )
     else:
+        terminal = (
+            "needs-human-review: 三轮自动修复后候选仍未收敛。"
+            if outcome == "needs-human-review"
+            else "自动镜像流水线未完成，Issue 已挂起等待人工处理。"
+        )
         comment = "\n".join(
             (
-                "自动镜像流水线未完成，Issue 已挂起等待人工处理。",
+                terminal,
                 "",
                 f"- Workflow: {run_url}",
                 f"- Failure summary: {failure_summary or 'see workflow run'}",

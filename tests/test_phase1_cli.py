@@ -40,9 +40,22 @@ def _run_script(script, *args):
 def _write_candidate_payload(root):
     (root / "reports").mkdir(parents=True)
     (root / "changes.patch").write_text("diff --git a/a b/a\n")
-    (root / "reports" / "x86_64.json").write_text('{"status":"passed"}\n')
-    (root / "reports" / "aarch64.json").write_text('{"status":"passed"}\n')
+    report = {
+        "status": "passed",
+        "checks": {
+            "native_build": True,
+            "dgoss": True,
+            "shared_tests": True,
+        },
+    }
+    (root / "reports" / "x86_64.json").write_text(json.dumps(report) + "\n")
+    (root / "reports" / "aarch64.json").write_text(json.dumps(report) + "\n")
+    for architecture in ("x86_64", "aarch64"):
+        (root / "reports" / f"{architecture}.junit.xml").write_text(
+            '<testsuite tests="1" failures="0" errors="0"/>'
+        )
     (root / "reports" / "gates.json").write_text('{"status":"passed"}\n')
+    (root / "reports" / "hadolint.txt").write_text("")
 
 
 def _git(repo, *args):

@@ -63,10 +63,25 @@ def _candidate(tmp_path, upstream):
     candidate = tmp_path / "candidate"
     (candidate / "reports").mkdir(parents=True)
     generated.create_patch(candidate / "changes.patch")
-    for report in ("x86_64", "aarch64", "gates"):
+    native = {
+        "status": "passed",
+        "checks": {
+            "native_build": True,
+            "dgoss": True,
+            "shared_tests": True,
+        },
+    }
+    for report in ("x86_64", "aarch64"):
         (candidate / "reports" / f"{report}.json").write_text(
-            json.dumps({"status": "passed"}) + "\n"
+            json.dumps(native) + "\n"
         )
+        (candidate / "reports" / f"{report}.junit.xml").write_text(
+            '<testsuite tests="1" failures="0" errors="0"/>'
+        )
+    (candidate / "reports" / "gates.json").write_text(
+        json.dumps({"status": "passed"}) + "\n"
+    )
+    (candidate / "reports" / "hadolint.txt").write_text("")
     CandidateBundle.create(
         candidate,
         task=_task(),

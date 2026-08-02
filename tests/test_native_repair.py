@@ -17,6 +17,16 @@ def _task():
     )
 
 
+def _passing_gate():
+    return {
+        "status": "passed",
+        "build_allowed": True,
+        "test_allowed": True,
+        "delivery_allowed": True,
+        "findings": [],
+    }
+
+
 class NativeValidator:
     def __init__(self, failures):
         self.failures = failures
@@ -39,7 +49,11 @@ class NativeValidator:
         report = {
             "status": "passed",
             "architecture": kwargs["architecture"],
-            "checks": {"native_build": True},
+            "checks": {
+                "native_build": True,
+                "dgoss": True,
+                "shared_tests": True,
+            },
         }
         kwargs["report_path"].write_text(json.dumps(report))
         kwargs["junit_path"].write_text("<testsuite failures='0'/>")
@@ -103,7 +117,7 @@ def test_zero_repair_success_writes_nonempty_agent_artifact_directory(
         api_key="deepseek-secret",
         native_validator=NativeValidator(failures=0),
         agent_runner=Fixer(),
-        target_validator=lambda **_: {"status": "passed"},
+        target_validator=lambda **_: _passing_gate(),
     )
 
     summary_path = evidence / "agents" / "native-repair-x86_64.json"
@@ -114,6 +128,34 @@ def test_zero_repair_success_writes_nonempty_agent_artifact_directory(
         "repair_attempts": 0,
         "status": "passed",
     }
+
+
+def test_native_gate_requires_explicit_build_and_test_permissions(tmp_path):
+    from scripts.lib.native_repair import NativeRepairError, decide_round
+
+    workspace = tmp_path / "target"
+    workspace.mkdir()
+    fixer = Fixer()
+
+    with pytest.raises(NativeRepairError, match="target contract"):
+        decide_round(
+            workspace=workspace,
+            task=_task(),
+            base_sha="1" * 40,
+            round_number=1,
+            max_rounds=3,
+            reports={
+                "x86_64": _report("x86_64", status="failed"),
+                "aarch64": _report("aarch64"),
+            },
+            report_dir=tmp_path / "reports",
+            executable=tmp_path / "opencode",
+            api_key="deepseek-secret",
+            agent_runner=fixer,
+            target_validator=lambda **_: {"status": "passed"},
+        )
+
+    assert len(fixer.calls) == 1
 
 
 def test_native_failure_is_fixed_gated_and_retried_up_to_success(tmp_path):
@@ -134,7 +176,7 @@ def test_native_failure_is_fixed_gated_and_retried_up_to_success(tmp_path):
                 "base_sha": base_sha,
             }
         )
-        return {"status": "passed"}
+        return _passing_gate()
 
     result = validate_native_with_repairs(
         workspace=workspace,
@@ -208,7 +250,7 @@ def test_native_fixer_can_edit_existing_auxiliary_candidate_files(tmp_path):
         api_key="deepseek-secret",
         native_validator=NativeValidator(failures=1),
         agent_runner=fixer,
-        target_validator=lambda **_: {"status": "passed"},
+        target_validator=lambda **_: _passing_gate(),
     )
 
     assert result.status == "passed"
@@ -218,7 +260,7 @@ def test_native_fixer_can_edit_existing_auxiliary_candidate_files(tmp_path):
     )
 
 
-def test_initial_target_gate_is_fixed_before_native_validation(tmp_path):
+def test_delivery_only_gate_finding_does_not_block_native_validation(tmp_path):
     from scripts.lib.native_repair import validate_native_with_repairs
 
     workspace = tmp_path / "target"
@@ -226,12 +268,21 @@ def test_initial_target_gate_is_fixed_before_native_validation(tmp_path):
     workspace.mkdir()
     validator = NativeValidator(failures=0)
     fixer = Fixer()
-    gates = iter(
-        (
-            {"status": "failed", "errors": ["tcp:6666 is missing"]},
-            {"status": "passed"},
-        )
-    )
+    gate = {
+        "status": "passed",
+        "build_allowed": True,
+        "test_allowed": True,
+        "delivery_allowed": False,
+        "errors": ["README metadata is incomplete"],
+        "findings": [
+            {
+                "code": "readme.required",
+                "level": "delivery_stop",
+                "owner": "image_creator",
+                "message": "README metadata is incomplete",
+            }
+        ],
+    }
 
     result = validate_native_with_repairs(
         workspace=workspace,
@@ -248,46 +299,42 @@ def test_initial_target_gate_is_fixed_before_native_validation(tmp_path):
         api_key="deepseek-secret",
         native_validator=validator,
         agent_runner=fixer,
-        target_validator=lambda **_: next(gates),
+        target_validator=lambda **_: gate,
     )
 
     assert result.status == "passed"
-    assert result.repair_attempts == 1
+    assert result.repair_attempts == 0
     assert len(validator.calls) == 1
-    assert len(fixer.calls) == 1
-    assert "tcp:6666 is missing" in fixer.calls[0]["prompt"]
+    assert fixer.calls == []
 
 
-def test_native_repair_fails_closed_after_exactly_three_fixes(tmp_path):
-    from scripts.lib.native_repair import (
-        NativeRepairError,
-        validate_native_with_repairs,
-    )
+def test_native_repair_returns_needs_human_after_exactly_three_fixes(tmp_path):
+    from scripts.lib.native_repair import validate_native_with_repairs
 
     workspace = tmp_path / "target"
     workspace.mkdir()
     validator = NativeValidator(failures=4)
     fixer = Fixer()
 
-    with pytest.raises(NativeRepairError, match="after 3 repair attempts"):
-        validate_native_with_repairs(
-            workspace=workspace,
-            task=_task(),
-            base_sha="1" * 40,
-            architecture="x86_64",
-            run_id="123456",
-            dgoss=tmp_path / "dgoss",
-            goss=tmp_path / "goss",
-            report_path=tmp_path / "x86_64.json",
-            junit_path=tmp_path / "x86_64.junit.xml",
-            repair_report_dir=tmp_path / "agents",
-            executable=tmp_path / "opencode",
-            api_key="deepseek-secret",
-            native_validator=validator,
-            agent_runner=fixer,
-            target_validator=lambda **_: {"status": "passed"},
-        )
+    result = validate_native_with_repairs(
+        workspace=workspace,
+        task=_task(),
+        base_sha="1" * 40,
+        architecture="x86_64",
+        run_id="123456",
+        dgoss=tmp_path / "dgoss",
+        goss=tmp_path / "goss",
+        report_path=tmp_path / "x86_64.json",
+        junit_path=tmp_path / "x86_64.junit.xml",
+        repair_report_dir=tmp_path / "agents",
+        executable=tmp_path / "opencode",
+        api_key="deepseek-secret",
+        native_validator=validator,
+        agent_runner=fixer,
+        target_validator=lambda **_: _passing_gate(),
+    )
 
+    assert result.status == "needs-human-review"
     assert len(validator.calls) == 4
     assert len(fixer.calls) == 3
 
@@ -305,9 +352,23 @@ def test_post_fixer_target_gate_is_returned_before_native_retry(
     fixer = Fixer()
     gates = iter(
         (
-            {"status": "passed"},
-            {"status": "failed", "errors": ["goss_wait timeout is invalid"]},
-            {"status": "passed"},
+            _passing_gate(),
+            {
+                "status": "passed",
+                "build_allowed": True,
+                "test_allowed": False,
+                "delivery_allowed": False,
+                "errors": ["goss_wait timeout is invalid"],
+                "findings": [
+                    {
+                        "code": "tests.wait_timeout",
+                        "level": "delivery_stop",
+                        "owner": "testcase_creator",
+                        "message": "goss_wait timeout is invalid",
+                    }
+                ],
+            },
+            _passing_gate(),
         )
     )
 
@@ -352,43 +413,51 @@ def test_post_fixer_target_gate_is_returned_before_native_retry(
 
 
 def test_target_gate_failure_remains_bounded_by_total_fixer_budget(tmp_path):
-    from scripts.lib.native_repair import (
-        NativeRepairError,
-        validate_native_with_repairs,
-    )
+    from scripts.lib.native_repair import validate_native_with_repairs
 
     workspace = tmp_path / "target"
     workspace.mkdir()
     validator = NativeValidator(failures=1)
     fixer = Fixer()
 
-    with pytest.raises(
-        NativeRepairError,
-        match="target contract.*3 repair attempts",
-    ):
-        validate_native_with_repairs(
-            workspace=workspace,
-            task=_task(),
-            base_sha="1" * 40,
-            architecture="x86_64",
-            run_id="123456",
-            dgoss=tmp_path / "dgoss",
-            goss=tmp_path / "goss",
-            report_path=tmp_path / "x86_64.json",
-            junit_path=tmp_path / "x86_64.junit.xml",
-            repair_report_dir=tmp_path / "agents",
-            executable=tmp_path / "opencode",
-            api_key="deepseek-secret",
-            native_validator=validator,
-            agent_runner=fixer,
-            target_validator=lambda **_: {
-                "status": "failed",
-                "errors": ["still invalid"],
-            },
-        )
+    result = validate_native_with_repairs(
+        workspace=workspace,
+        task=_task(),
+        base_sha="1" * 40,
+        architecture="x86_64",
+        run_id="123456",
+        dgoss=tmp_path / "dgoss",
+        goss=tmp_path / "goss",
+        report_path=tmp_path / "x86_64.json",
+        junit_path=tmp_path / "x86_64.junit.xml",
+        repair_report_dir=tmp_path / "agents",
+        executable=tmp_path / "opencode",
+        api_key="deepseek-secret",
+        native_validator=validator,
+        agent_runner=fixer,
+        target_validator=lambda **_: {
+            "status": "passed",
+            "build_allowed": True,
+            "test_allowed": False,
+            "delivery_allowed": False,
+            "errors": ["still invalid"],
+            "findings": [
+                {
+                    "code": "tests.invalid",
+                    "level": "delivery_stop",
+                    "owner": "testcase_creator",
+                    "message": "still invalid",
+                }
+            ],
+        },
+    )
 
+    assert result.status == "needs-human-review"
+    assert result.repair_attempts == 3
     assert len(validator.calls) == 0
     assert len(fixer.calls) == 3
+    terminal = json.loads((tmp_path / "agents/convergence-report.json").read_text())
+    assert terminal["reason"] == "target-contract-repair-exhausted"
 
 
 def test_initial_gate_infrastructure_error_does_not_call_fixer(tmp_path):
@@ -451,7 +520,7 @@ def test_unsuccessful_fixer_report_is_retained_before_failure(tmp_path):
             api_key="deepseek-secret",
             native_validator=NativeValidator(failures=1),
             agent_runner=UnsuccessfulFixer(),
-            target_validator=lambda **_: {"status": "passed"},
+            target_validator=lambda **_: _passing_gate(),
         )
 
     report = json.loads(
@@ -464,7 +533,15 @@ DIGEST = "c" * 64
 
 
 def _report(architecture, *, status="passed", digest=DIGEST):
-    report = {"status": status, "architecture": architecture}
+    report = {
+        "status": status,
+        "architecture": architecture,
+        "checks": {
+            "native_build": status == "passed",
+            "dgoss": status == "passed",
+            "shared_tests": status == "passed",
+        },
+    }
     if status == "passed":
         report["validated_patch_sha256"] = digest
     else:
@@ -486,7 +563,7 @@ def _decide(tmp_path, reports, **kwargs):
         executable=tmp_path / "opencode",
         api_key="deepseek-secret",
         agent_runner=Fixer(),
-        target_validator=lambda **_: {"status": "passed"},
+        target_validator=lambda **_: _passing_gate(),
     )
     (tmp_path / "target").mkdir(exist_ok=True)
     return decide_round(**{**defaults, **kwargs})
@@ -522,6 +599,22 @@ def test_both_passing_on_different_candidates_is_never_convergence(tmp_path):
         )
 
 
+def test_round_rejects_passed_report_with_incomplete_check_set(tmp_path):
+    from scripts.lib.native_repair import NativeRepairError
+
+    partial = _report("x86_64")
+    partial["checks"] = {"native_build": True}
+
+    with pytest.raises(NativeRepairError, match="checks are incomplete"):
+        _decide(
+            tmp_path,
+            {
+                "x86_64": partial,
+                "aarch64": _report("aarch64"),
+            },
+        )
+
+
 def test_one_failing_architecture_repairs_once_with_both_reports(tmp_path):
     fixer = Fixer()
 
@@ -543,31 +636,69 @@ def test_one_failing_architecture_repairs_once_with_both_reports(tmp_path):
     assert "deepseek-secret" not in review
 
 
-def test_a_repair_breaking_the_target_contract_is_re_asked_not_rebuilt(
-    tmp_path,
-):
+def test_a_repair_breaking_a_hard_boundary_stops_without_reasking_fixer(tmp_path):
+    from scripts.lib.native_repair import NativeRepairError
+
     fixer = Fixer()
-    gates = iter(
-        [
-            {"status": "failed", "errors": ["USER must map to UID 999"]},
-            {"status": "passed"},
-        ]
-    )
+    hard_stop = {
+        "status": "failed",
+        "build_allowed": False,
+        "errors": ["change outside task scope"],
+        "findings": [
+            {
+                "code": "scope.changed_path",
+                "level": "hard_stop",
+                "owner": "workflow",
+                "message": "change outside task scope",
+            }
+        ],
+    }
 
-    decision = _decide(
-        tmp_path,
-        {
-            "x86_64": _report("x86_64", status="failed"),
-            "aarch64": _report("aarch64"),
-        },
-        agent_runner=fixer,
-        target_validator=lambda **_: next(gates),
-    )
+    with pytest.raises(NativeRepairError, match="hard stop"):
+        _decide(
+            tmp_path,
+            {
+                "x86_64": _report("x86_64", status="failed"),
+                "aarch64": _report("aarch64"),
+            },
+            agent_runner=fixer,
+            target_validator=lambda **_: hard_stop,
+        )
 
-    # The gate is free and a dual-architecture build is not, so the contract
-    # violation is resolved here rather than by spending another round.
-    assert decision.repair_attempts == 2
-    assert "USER must map to UID 999" in fixer.calls[1]["prompt"]
+    assert len(fixer.calls) == 1
+
+
+def test_target_contract_exception_preserves_hard_stop_findings(tmp_path):
+    from scripts.lib.native_repair import NativeRepairError
+    from scripts.lib.target_contract import TargetContractError
+
+    fixer = Fixer()
+
+    def hard_stop(**_):
+        raise TargetContractError(
+            "meta.yml is invalid",
+            findings=[
+                {
+                    "code": "meta.invalid_yaml",
+                    "level": "hard_stop",
+                    "owner": "workflow",
+                    "message": "meta.yml is invalid",
+                }
+            ],
+        )
+
+    with pytest.raises(NativeRepairError, match="meta.invalid_yaml"):
+        _decide(
+            tmp_path,
+            {
+                "x86_64": _report("x86_64", status="failed"),
+                "aarch64": _report("aarch64"),
+            },
+            agent_runner=fixer,
+            target_validator=hard_stop,
+        )
+
+    assert len(fixer.calls) == 1
 
 
 def test_a_repair_leaving_tests_unexecutable_is_re_asked_before_rebuild(
@@ -615,19 +746,108 @@ def test_a_repair_leaving_tests_unexecutable_is_re_asked_before_rebuild(
     assert "tests.goss_yaml" in fixer.calls[1]["prompt"]
 
 
-def test_exhausting_the_repair_budget_fails_the_round(tmp_path):
+def test_exhausting_the_repair_budget_returns_auditable_needs_human_state(tmp_path):
+    decision = _decide(
+        tmp_path,
+        {
+            "x86_64": _report("x86_64", status="failed"),
+            "aarch64": _report("aarch64"),
+        },
+        round_number=4,
+        max_rounds=3,
+    )
+
+    assert decision.converged is False
+    assert decision.terminal_status == "needs-human-review"
+    report = json.loads(
+        (tmp_path / "evidence" / "convergence-report.json").read_text()
+    )
+    assert report["status"] == "needs-human-review"
+    assert report["repair_attempts"] == 3
+    assert report["architectures"]["x86_64"]["status"] == "failed"
+    assert report["architectures"]["aarch64"]["status"] == "passed"
+
+
+def test_redaction_leaves_evidence_readable_without_a_secret():
+    from scripts.lib.native_repair import _redact
+
+    report = {"status": "failed", "failure": "build failed"}
+
+    assert _redact(report, "") == report
+
+
+def test_zero_repair_budget_fails_smoke_instead_of_returning_needs_human(
+    tmp_path,
+):
     from scripts.lib.native_repair import NativeRepairError
 
-    with pytest.raises(NativeRepairError, match="after 3 repair attempts"):
+    with pytest.raises(NativeRepairError, match="zero-repair validation"):
         _decide(
             tmp_path,
             {
                 "x86_64": _report("x86_64", status="failed"),
                 "aarch64": _report("aarch64"),
             },
+            round_number=1,
+            max_rounds=0,
+            api_key="",
+        )
+
+
+def test_exhausted_infrastructure_failures_are_not_needs_human(tmp_path):
+    from scripts.lib.native_repair import NativeRepairError
+
+    failed = _report("x86_64", status="failed")
+    failed.update(
+        {
+            "failed_stage": "native_build",
+            "failure": "timed out",
+            "failure_details": {"returncode": 124},
+        }
+    )
+
+    with pytest.raises(NativeRepairError, match="infrastructure"):
+        _decide(
+            tmp_path,
+            {"x86_64": failed, "aarch64": _report("aarch64")},
             round_number=4,
             max_rounds=3,
         )
+
+
+def test_round_gate_repair_exhaustion_returns_needs_human(tmp_path):
+    fixer = Fixer()
+    gate = {
+        "status": "passed",
+        "build_allowed": True,
+        "test_allowed": False,
+        "delivery_allowed": False,
+        "findings": [
+            {
+                "code": "tests.invalid",
+                "level": "delivery_stop",
+                "owner": "testcase_creator",
+                "message": "tests remain invalid",
+            }
+        ],
+    }
+
+    decision = _decide(
+        tmp_path,
+        {
+            "x86_64": _report("x86_64", status="failed"),
+            "aarch64": _report("aarch64"),
+        },
+        agent_runner=fixer,
+        target_validator=lambda **_: gate,
+    )
+
+    assert len(fixer.calls) == 3
+    assert decision.terminal_status == "needs-human-review"
+    terminal = json.loads(
+        (tmp_path / "evidence" / "convergence-report.json").read_text()
+    )
+    assert terminal["reason"] == "target-contract-repair-exhausted"
 
 
 def test_a_round_decision_needs_both_architectures(tmp_path):
@@ -637,9 +857,7 @@ def test_a_round_decision_needs_both_architectures(tmp_path):
         _decide(tmp_path, {"x86_64": _report("x86_64")})
 
 
-def test_fixer_receives_the_deterministic_classification_of_the_failure(
-    tmp_path,
-):
+def test_workspace_hygiene_hard_stops_before_calling_fixer(tmp_path):
     """Run 30567356119 handed the Fixer 496 scope errors for one stray tarball.
 
     The obvious repair for "change outside task scope" is to revert candidate
@@ -653,51 +871,39 @@ def test_fixer_receives_the_deterministic_classification_of_the_failure(
     workspace.mkdir()
     validator = NativeValidator(failures=0)
     fixer = Fixer()
-    gates = iter(
-        (
-            {
-                "status": "failed",
-                "errors": [
-                    "change outside task scope or wrong status: A "
-                    "kvrocks-2.16.0/CMakeLists.txt",
-                    "change outside task scope or wrong status: A "
-                    "kvrocks-2.16.0/src/cli/main.cc",
-                ],
-            },
-            {"status": "passed"},
+    gate = {
+        "status": "failed",
+        "build_allowed": False,
+        "errors": [
+            "change outside task scope or wrong status: A "
+            "kvrocks-2.16.0/CMakeLists.txt",
+            "change outside task scope or wrong status: A "
+            "kvrocks-2.16.0/src/cli/main.cc",
+        ],
+    }
+
+    from scripts.lib.native_repair import NativeRepairError
+    with pytest.raises(NativeRepairError, match="hard stop"):
+        validate_native_with_repairs(
+            workspace=workspace,
+            task=_task(),
+            base_sha="1" * 40,
+            architecture="x86_64",
+            run_id="123456",
+            dgoss=tmp_path / "dgoss",
+            goss=tmp_path / "goss",
+            report_path=evidence / "x86_64.json",
+            junit_path=evidence / "x86_64.junit.xml",
+            repair_report_dir=evidence / "agents",
+            executable=tmp_path / "opencode",
+            api_key="deepseek-secret",
+            native_validator=validator,
+            agent_runner=fixer,
+            target_validator=lambda **_: gate,
         )
-    )
 
-    validate_native_with_repairs(
-        workspace=workspace,
-        task=_task(),
-        base_sha="1" * 40,
-        architecture="x86_64",
-        run_id="123456",
-        dgoss=tmp_path / "dgoss",
-        goss=tmp_path / "goss",
-        report_path=evidence / "x86_64.json",
-        junit_path=evidence / "x86_64.junit.xml",
-        repair_report_dir=evidence / "agents",
-        executable=tmp_path / "opencode",
-        api_key="deepseek-secret",
-        native_validator=validator,
-        agent_runner=fixer,
-        target_validator=lambda **_: next(gates),
-    )
-
-    prompt = fixer.calls[0]["prompt"]
-    assert "workspace-hygiene" in prompt
-    assert "do not revert candidate files" in prompt
-    report = json.loads(
-        (
-            evidence / "agents" / "fixer-native-x86_64-round1.json"
-        ).read_text()
-    )
-    assert (
-        report["_input_review"]["classification"]["category"]
-        == "workspace-hygiene"
-    )
+    assert fixer.calls == []
+    assert validator.calls == []
 
 
 def test_each_architecture_is_classified_before_the_fixer_is_asked(tmp_path):
@@ -738,7 +944,7 @@ def test_each_architecture_is_classified_before_the_fixer_is_asked(tmp_path):
         executable=tmp_path / "opencode",
         api_key="deepseek-secret",
         agent_runner=fixer,
-        target_validator=lambda **_: {"status": "passed"},
+        target_validator=lambda **_: _passing_gate(),
     )
 
     prompt = fixer.calls[0]["prompt"]
@@ -782,7 +988,7 @@ def test_an_infrastructure_failure_does_not_pay_for_a_fixer_call(tmp_path):
         executable=tmp_path / "opencode",
         api_key="deepseek-secret",
         agent_runner=fixer,
-        target_validator=lambda **_: {"status": "passed"},
+        target_validator=lambda **_: _passing_gate(),
     )
 
     assert fixer.calls == []

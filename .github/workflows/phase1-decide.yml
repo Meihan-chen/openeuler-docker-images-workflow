@@ -30,6 +30,9 @@ on:
       converged:
         description: "true when both architectures passed on one candidate"
         value: ${{ jobs.decide.outputs.converged }}
+      terminal_status:
+        description: "needs-human-review when the repair budget is exhausted"
+        value: ${{ jobs.decide.outputs.terminal_status }}
 
 permissions:
   actions: read
@@ -46,6 +49,7 @@ jobs:
     timeout-minutes: 60
     outputs:
       converged: ${{ steps.judge.outputs.converged }}
+      terminal_status: ${{ steps.judge.outputs.terminal_status }}
     steps:
       - name: Check out workflow source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -115,7 +119,9 @@ jobs:
             "${RUNNER_TEMP}/phase1-converged/"
 
       - name: Emit next round candidate
-        if: ${{ steps.judge.outputs.converged != 'true' }}
+        if: >-
+          ${{ steps.judge.outputs.converged != 'true' &&
+              steps.judge.outputs.terminal_status == '' }}
         uses: ./.github/actions/phase1-emit-patch
         with:
           workspace: ${{ runner.temp }}/phase1-target
@@ -132,11 +138,45 @@ jobs:
           retention-days: 30
 
       - name: Upload next round candidate
-        if: ${{ steps.judge.outputs.converged != 'true' }}
+        if: >-
+          ${{ steps.judge.outputs.converged != 'true' &&
+              steps.judge.outputs.terminal_status == '' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: phase1-patch${{ inputs.next_round }}-${{ github.run_id }}
           path: ${{ runner.temp }}/phase1-next/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Emit terminal candidate
+        if: ${{ steps.judge.outputs.terminal_status == 'needs-human-review' }}
+        uses: ./.github/actions/phase1-emit-patch
+        with:
+          workspace: ${{ runner.temp }}/phase1-target
+          input-dir: ${{ runner.temp }}/phase1-input
+          output-dir: ${{ runner.temp }}/phase1-terminal-candidate
+
+      - name: Collect needs-human-review evidence
+        if: ${{ steps.judge.outputs.terminal_status == 'needs-human-review' }}
+        run: |
+          mkdir -p "${RUNNER_TEMP}/phase1-terminal/decision"
+          cp "${RUNNER_TEMP}/phase1-terminal-candidate/task-spec.json" \
+            "${RUNNER_TEMP}/phase1-terminal-candidate/base-sha.txt" \
+            "${RUNNER_TEMP}/phase1-terminal-candidate/changes.patch" \
+            "${RUNNER_TEMP}/phase1-x86/x86_64.json" \
+            "${RUNNER_TEMP}/phase1-x86/x86_64.junit.xml" \
+            "${RUNNER_TEMP}/phase1-arm/aarch64.json" \
+            "${RUNNER_TEMP}/phase1-arm/aarch64.junit.xml" \
+            "${RUNNER_TEMP}/phase1-terminal/"
+          cp -a "${RUNNER_TEMP}/phase1-decide/." \
+            "${RUNNER_TEMP}/phase1-terminal/decision/"
+
+      - name: Upload needs-human-review evidence
+        if: ${{ steps.judge.outputs.terminal_status == 'needs-human-review' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: phase1-needs-human-${{ github.run_id }}
+          path: ${{ runner.temp }}/phase1-terminal/
           if-no-files-found: error
           retention-days: 30
 

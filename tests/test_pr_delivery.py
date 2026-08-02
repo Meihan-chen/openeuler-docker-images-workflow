@@ -25,7 +25,7 @@ def _candidate(
     testcase_repaired=False,
     native_fixer=False,
     hadolint_output="",
-    gate_delivery_allowed=None,
+    gate_delivery_allowed=True,
 ):
     from scripts.lib.candidate_bundle import CandidateBundle
 
@@ -65,17 +65,18 @@ def _candidate(
                         "native_build": True,
                         "dgoss": True,
                         "shared_tests": True,
-                        "restart_persistence": True,
                     },
                 }
             )
+        )
+        (root / "reports" / f"{architecture}.junit.xml").write_text(
+            '<testsuite tests="1" failures="0" errors="0"/>'
         )
     gate_report = {"status": "passed", "added_files": 14}
     if gate_delivery_allowed is not None:
         gate_report["delivery_allowed"] = gate_delivery_allowed
     (root / "reports" / "gates.json").write_text(json.dumps(gate_report))
-    if hadolint_output:
-        (root / "reports" / "hadolint.txt").write_text(hadolint_output)
+    (root / "reports" / "hadolint.txt").write_text(hadolint_output)
     (root / "reports" / "agents" / "image-qa-round1.json").write_text(
         json.dumps(
             {
@@ -239,14 +240,15 @@ def test_pr_content_contains_candidate_and_dual_architecture_evidence(tmp_path):
     ) in content.body
     assert "x86_64" in content.body
     assert "aarch64" in content.body
-    assert "restart_persistence" in content.body
+    assert "shared_tests" in content.body
     assert bundle.manifest.content_sha256 in content.body
     assert "validated run `123456`" in content.body
     assert "Final result: `approved` after 1 round." in content.body
     assert "Image metadata and runtime contract are consistent." in content.body
     assert "Result evidence: `results.json`, `version_info.json`" in content.body
     assert "https://github.com/apache/kvrocks/tree/v2.16.0" in content.body
-    assert "Confidence Score" not in content.body
+    assert "### Confidence Score" in content.body
+    assert "`1.0` (`auto-merge`)" in content.body
     assert "Apache Kvrocks" not in content.body
     assert "Redis-protocol" not in content.body
     assert "`Database/image-list.yml`" not in content.body.split(
@@ -331,12 +333,57 @@ def test_pr_content_reports_hadolint_findings_as_advisory(tmp_path):
     assert "DL3041" in content.body
     assert "DL3002" in content.body
     assert "SC2086" in content.body
+    assert "`0.94` (`auto-merge`)" in content.body
+
+
+@pytest.mark.parametrize("prefix", ("image-qa", "testcase-qa"))
+def test_pr_content_rejects_missing_adversarial_qa_evidence(tmp_path, prefix):
+    from scripts.harness.compose_pr import PRDeliveryError, compose_pull_request
+
+    bundle = _candidate(tmp_path)
+    for path in (bundle.root / "reports" / "agents").glob(f"{prefix}-round*.json"):
+        path.unlink()
+
+    with pytest.raises(PRDeliveryError, match="QA evidence is required"):
+        compose_pull_request(bundle)
+
+
+def test_pr_content_rejects_an_incomplete_qa_round_chain(tmp_path):
+    from scripts.harness.compose_pr import PRDeliveryError, compose_pull_request
+
+    bundle = _candidate(tmp_path, testcase_qa_status="needs_fix")
+    (bundle.root / "reports" / "agents" / "testcase-qa-round2.json").unlink()
+
+    with pytest.raises(PRDeliveryError, match="QA round sequence"):
+        compose_pull_request(bundle)
+
+
+def test_pr_content_rejects_noncanonical_native_check_set(tmp_path):
+    from scripts.harness.compose_pr import PRDeliveryError, compose_pull_request
+
+    bundle = _candidate(tmp_path)
+    report_path = bundle.root / "reports" / "x86_64.json"
+    report = json.loads(report_path.read_text())
+    report["checks"] = {"native_build": True}
+    report_path.write_text(json.dumps(report))
+
+    with pytest.raises(PRDeliveryError, match="checks are incomplete"):
+        compose_pull_request(bundle)
 
 
 def test_pr_content_rejects_buildable_but_not_deliverable_gate(tmp_path):
     from scripts.harness.compose_pr import PRDeliveryError, compose_pull_request
 
     bundle = _candidate(tmp_path, gate_delivery_allowed=False)
+
+    with pytest.raises(PRDeliveryError, match="delivery contract"):
+        compose_pull_request(bundle)
+
+
+def test_pr_content_rejects_gate_without_explicit_delivery_permission(tmp_path):
+    from scripts.harness.compose_pr import PRDeliveryError, compose_pull_request
+
+    bundle = _candidate(tmp_path, gate_delivery_allowed=None)
 
     with pytest.raises(PRDeliveryError, match="delivery contract"):
         compose_pull_request(bundle)

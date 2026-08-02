@@ -307,7 +307,8 @@ jobs:
     if: >-
       ${{ always() &&
           ((needs.decide1.result == 'success' &&
-            needs.decide1.outputs.converged != 'true') ||
+            needs.decide1.outputs.converged != 'true' &&
+            needs.decide1.outputs.terminal_status == '') ||
            (needs.seed_resume.result == 'success' &&
             inputs.resume_from_round == '2')) }}
     uses: ./.github/workflows/phase1-round.yml
@@ -335,7 +336,8 @@ jobs:
     if: >-
       ${{ always() &&
           ((needs.decide2.result == 'success' &&
-            needs.decide2.outputs.converged != 'true') ||
+            needs.decide2.outputs.converged != 'true' &&
+            needs.decide2.outputs.terminal_status == '') ||
            (needs.seed_resume.result == 'success' &&
             inputs.resume_from_round == '3')) }}
     uses: ./.github/workflows/phase1-round.yml
@@ -363,7 +365,8 @@ jobs:
     if: >-
       ${{ always() &&
           ((needs.decide3.result == 'success' &&
-            needs.decide3.outputs.converged != 'true') ||
+            needs.decide3.outputs.converged != 'true' &&
+            needs.decide3.outputs.terminal_status == '') ||
            (needs.seed_resume.result == 'success' &&
             inputs.resume_from_round == '4')) }}
     uses: ./.github/workflows/phase1-round.yml
@@ -683,8 +686,10 @@ jobs:
       - name: Enforce final target gates and lint
         run: |
           evidence_run_id="${{ github.run_id }}"
+          legacy_evidence=""
           if [ "${{ inputs.operation }}" = "recover_package" ]; then
             evidence_run_id="${{ inputs.source_run_id }}"
+            legacy_evidence="--allow-legacy-evidence"
           fi
           app="$("${{ steps.tools.outputs.jq_path }}" \
             -r .app "${RUNNER_TEMP}/arm/task-spec.json")"
@@ -712,6 +717,7 @@ jobs:
             --task-spec "${RUNNER_TEMP}/arm/task-spec.json" \
             --base-sha "${base_sha}" \
             --expected-run-id "${evidence_run_id}" \
+            ${legacy_evidence} \
             > "${RUNNER_TEMP}/candidate/reports/gates.json"
 
       - name: Seal immutable candidate bundle
@@ -721,8 +727,12 @@ jobs:
           )"
           cp "${RUNNER_TEMP}/native-reports/x86_64.json" \
             "${RUNNER_TEMP}/candidate/reports/x86_64.json"
+          cp "${RUNNER_TEMP}/native-reports/x86_64.junit.xml" \
+            "${RUNNER_TEMP}/candidate/reports/x86_64.junit.xml"
           cp "${RUNNER_TEMP}/native-reports/aarch64.json" \
             "${RUNNER_TEMP}/candidate/reports/aarch64.json"
+          cp "${RUNNER_TEMP}/native-reports/aarch64.junit.xml" \
+            "${RUNNER_TEMP}/candidate/reports/aarch64.junit.xml"
           cp -a "${RUNNER_TEMP}/generation/generation-reports/." \
             "${RUNNER_TEMP}/candidate/reports/agents/"
           cp -a "${RUNNER_TEMP}/x86/x86-repair-agents/." \
@@ -1017,7 +1027,19 @@ jobs:
           SOURCE_ISSUE: ${{ inputs.source_run_id }}
           OUTCOME: >-
             ${{ needs.deliver_fork_pr.result == 'success' &&
-                'success' || 'failure' }}
+                'success' ||
+                ((needs.decide1.result == 'success' &&
+                  needs.decide1.outputs.terminal_status ==
+                  'needs-human-review') ||
+                 (needs.decide2.result == 'success' &&
+                  needs.decide2.outputs.terminal_status ==
+                  'needs-human-review') ||
+                 (needs.decide3.result == 'success' &&
+                  needs.decide3.outputs.terminal_status ==
+                  'needs-human-review') ||
+                 (needs.decide4.result == 'success' &&
+                  needs.decide4.outputs.terminal_status ==
+                  'needs-human-review')) && 'needs-human-review' || 'failure' }}
           RUN_URL: >-
             ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{
                 github.run_id }}
@@ -1032,6 +1054,10 @@ jobs:
             decide3=${{ needs.decide3.result }},
             round4=${{ needs.round4.result }},
             decide4=${{ needs.decide4.result }},
+            terminal1=${{ needs.decide1.outputs.terminal_status }},
+            terminal2=${{ needs.decide2.outputs.terminal_status }},
+            terminal3=${{ needs.decide3.outputs.terminal_status }},
+            terminal4=${{ needs.decide4.outputs.terminal_status }},
             package=${{ needs.package_candidate.result }},
             delivery=${{ needs.deliver_fork_pr.result }}
         run: |

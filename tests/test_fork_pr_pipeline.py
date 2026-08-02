@@ -40,14 +40,17 @@ def _candidate(tmp_path):
                         "native_build": True,
                         "dgoss": True,
                         "shared_tests": True,
-                        "restart_persistence": True,
                     },
                 }
             )
         )
+        (root / "reports" / f"{architecture}.junit.xml").write_text(
+            '<testsuite tests="1" failures="0" errors="0"/>'
+        )
     (root / "reports" / "gates.json").write_text(
-        '{"status":"passed","added_files":14}\n'
+        '{"status":"passed","delivery_allowed":true,"added_files":14}\n'
     )
+    (root / "reports" / "hadolint.txt").write_text("")
     for name in ("image-qa", "testcase-qa"):
         (agents / f"{name}-round1.json").write_text(
             '{"status":"approved"}\n'

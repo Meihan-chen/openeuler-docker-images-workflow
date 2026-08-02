@@ -24,9 +24,22 @@ def _task():
 def _payload(root: Path):
     (root / "reports").mkdir(parents=True)
     (root / "changes.patch").write_text("diff --git a/a b/a\n")
-    (root / "reports" / "x86_64.json").write_text('{"status":"passed"}\n')
-    (root / "reports" / "aarch64.json").write_text('{"status":"passed"}\n')
+    report = {
+        "status": "passed",
+        "checks": {
+            "native_build": True,
+            "dgoss": True,
+            "shared_tests": True,
+        },
+    }
+    (root / "reports" / "x86_64.json").write_text(json.dumps(report) + "\n")
+    (root / "reports" / "aarch64.json").write_text(json.dumps(report) + "\n")
+    for architecture in ("x86_64", "aarch64"):
+        (root / "reports" / f"{architecture}.junit.xml").write_text(
+            '<testsuite tests="1" failures="0" errors="0"/>'
+        )
     (root / "reports" / "gates.json").write_text('{"status":"passed"}\n')
+    (root / "reports" / "hadolint.txt").write_text("")
 
 
 def test_candidate_bundle_records_task_base_run_and_checksums(tmp_path):
@@ -47,8 +60,11 @@ def test_candidate_bundle_records_task_base_run_and_checksums(tmp_path):
     assert sorted(manifest["files"]) == [
         "changes.patch",
         "reports/aarch64.json",
+        "reports/aarch64.junit.xml",
         "reports/gates.json",
+        "reports/hadolint.txt",
         "reports/x86_64.json",
+        "reports/x86_64.junit.xml",
         "task-spec.json",
     ]
     assert len(manifest["content_sha256"]) == 64
@@ -115,6 +131,106 @@ def test_candidate_bundle_requires_both_architectures_and_gates(tmp_path):
             base_sha=BASE_SHA,
             validated_run_id="123456",
         )
+
+
+def test_candidate_bundle_requires_hadolint_evidence_even_when_clean(tmp_path):
+    from scripts.lib.candidate_bundle import CandidateBundle, CandidateBundleError
+
+    _payload(tmp_path)
+    (tmp_path / "reports" / "hadolint.txt").unlink()
+
+    with pytest.raises(CandidateBundleError, match="hadolint"):
+        CandidateBundle.create(
+            tmp_path,
+            task=_task(),
+            base_sha=BASE_SHA,
+            validated_run_id="123456",
+        )
+
+
+@pytest.mark.parametrize(
+    "junit",
+    (
+        '<testsuite tests="1" failures="1" errors="0"/>',
+        '<testsuite tests="1" failures="-1" errors="1"/>',
+        '<testsuite tests="0" failures="0" errors="0"/>',
+        '<testsuite tests="1" failures="0" errors="0" skipped="1"/>',
+    ),
+)
+def test_candidate_bundle_requires_passing_junit_evidence(tmp_path, junit):
+    from scripts.lib.candidate_bundle import CandidateBundle, CandidateBundleError
+
+    _payload(tmp_path)
+    (tmp_path / "reports" / "aarch64.junit.xml").write_text(junit)
+
+    with pytest.raises(CandidateBundleError, match="aarch64 JUnit"):
+        CandidateBundle.create(
+            tmp_path,
+            task=_task(),
+            base_sha=BASE_SHA,
+            validated_run_id="123456",
+        )
+
+
+def test_legacy_checks_need_validated_recovery_provenance_not_just_a_file(
+    tmp_path,
+):
+    from scripts.lib.candidate_bundle import CandidateBundle, CandidateBundleError
+
+    _payload(tmp_path)
+    for architecture in ("x86_64", "aarch64"):
+        path = tmp_path / "reports" / f"{architecture}.json"
+        report = json.loads(path.read_text())
+        report["checks"]["restart_persistence"] = True
+        path.write_text(json.dumps(report))
+    (tmp_path / "reports" / "recovery-provenance.json").write_text("{}\n")
+
+    with pytest.raises(CandidateBundleError, match="recovery provenance"):
+        CandidateBundle.create(
+            tmp_path,
+            task=_task(),
+            base_sha=BASE_SHA,
+            validated_run_id="123456",
+        )
+
+
+def test_validated_recovery_provenance_allows_the_sealed_legacy_check_set(
+    tmp_path,
+):
+    from scripts.lib.candidate_bundle import CandidateBundle
+
+    _payload(tmp_path)
+    for architecture in ("x86_64", "aarch64"):
+        path = tmp_path / "reports" / f"{architecture}.json"
+        report = json.loads(path.read_text())
+        report["checks"]["restart_persistence"] = True
+        path.write_text(json.dumps(report))
+    (tmp_path / "reports" / "recovery-provenance.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "mode": "recover_package",
+                "status": "passed",
+                "generation_run_id": "111111",
+                "validation_run_id": "222222",
+                "packaging_run_id": "123456",
+                "validated_base_sha": "2" * 40,
+                "current_base_sha": BASE_SHA,
+                "upstream_changed_paths": ["Security/report.md"],
+                "candidate_changed_paths": ["Database/kvrocks/meta.yml"],
+                "promotable": True,
+            }
+        )
+    )
+
+    bundle = CandidateBundle.create(
+        tmp_path,
+        task=_task(),
+        base_sha=BASE_SHA,
+        validated_run_id="123456",
+    )
+
+    assert bundle.manifest.validated_run_id == "123456"
 
 
 def test_candidate_bundle_requires_passed_reports(tmp_path):
