@@ -87,6 +87,20 @@ def test_testcase_prompts_make_wait_and_helper_files_conditional():
         assert "test_helpers.sh is optional" in prompt
 
 
+def test_testcase_prompts_define_service_and_cli_native_modes():
+    testcase_creator = " ".join(
+        (AGENTS_DIR / "testcase-creator.md").read_text().lower().split()
+    )
+    testcase_qa = " ".join(
+        (AGENTS_DIR / "testcase-qa.md").read_text().lower().split()
+    )
+
+    for prompt in (testcase_creator, testcase_qa):
+        assert "absence declares cli/one-shot mode" in prompt
+        assert "bounded readiness" in prompt
+    assert "read back after restart by the harness" not in testcase_qa
+
+
 def test_shared_prompts_derive_application_behavior_instead_of_assuming_it():
     image_creator = (AGENTS_DIR / "image-creator.md").read_text().lower()
     image_qa = (AGENTS_DIR / "image-qa.md").read_text().lower()

@@ -15,7 +15,10 @@ You receive the Testcase Creator's complete output:
 ## Review Checklist
 
 `goss_wait.yaml is optional` and `test_helpers.sh is optional`. Their absence
-is not a finding; when present, review whether they are necessary and valid.
+is not automatically a finding. `goss_wait.yaml` is also the Native Harness
+mode marker: long-running services must provide it; its absence declares
+CLI/one-shot mode. In service mode, verify that `test.sh` performs bounded
+readiness before functional assertions.
 
 Challenge from these angles:
 
@@ -41,7 +44,9 @@ Challenge from these angles:
 - What would break the image that these tests would NOT catch?
 - Are there application-specific behaviors that should be tested?
 - Is the version check actually verifying the right binary and exact release?
-- If persistence is required, is a written value read back after restart by the harness?
+- If persistence is required, does the available test protocol actually prove
+  it? Do not claim a restart by the harness when no explicit restart protocol
+  exists.
 
 ### Test Correctness
 - Are goss assertions syntactically valid?

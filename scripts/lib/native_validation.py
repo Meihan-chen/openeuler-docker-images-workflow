@@ -1,4 +1,4 @@
-"""Native Docker build, runtime, persistence, evidence, and exact cleanup."""
+"""Application-neutral native build, runtime tests, evidence, and cleanup."""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ from typing import Callable, Mapping, Sequence
 
 from scripts.lib.progress import log, run_streaming
 from scripts.lib.task_spec import TaskSpec
+from scripts.lib.target_contract import validate_test_contract
 
 
 class NativeValidationError(RuntimeError):
@@ -55,7 +56,6 @@ _E2E_CHECKS = (
     "native_build",
     "dgoss",
     "shared_tests",
-    "restart_persistence",
 )
 _SMOKE_CHECKS = ("native_build", "dgoss")
 
@@ -179,7 +179,10 @@ def _write_evidence(
     suite = ET.Element(
         "testsuite",
         {
-            "name": f"kvrocks-{report['architecture']}",
+            "name": (
+                f"{report['environment']['software_name']}-"
+                f"{report['architecture']}"
+            ),
             "tests": "1",
             "failures": "1" if failure else "0",
             "errors": "0",
@@ -191,7 +194,7 @@ def _write_evidence(
         "testcase",
         {
             "classname": "native-image-validation",
-            "name": "build-runtime-persistence",
+            "name": "build-runtime-tests",
             "time": str(report["duration_seconds"]),
         },
     )
@@ -377,37 +380,6 @@ def _environment_evidence(task: TaskSpec, architecture: str) -> dict[str, object
     }
 
 
-def _wait_for_ping(
-    *,
-    runner: CommandRunner,
-    workspace: Path,
-    container: str,
-    sleep: Callable[[float], None],
-) -> None:
-    last_detail = "Kvrocks did not become ready"
-    for _ in range(30):
-        result = _run(
-            runner,
-            [
-                "docker",
-                "exec",
-                container,
-                "redis-cli",
-                "-p",
-                "6666",
-                "PING",
-            ],
-            cwd=workspace,
-            timeout=10,
-            check=False,
-        )
-        if result.returncode == 0 and "PONG" in str(result.stdout or ""):
-            return
-        last_detail = str(result.stderr or result.stdout or last_detail).strip()
-        sleep(2)
-    raise NativeValidationError(f"Kvrocks readiness failed: {last_detail}")
-
-
 def validate_native_image(
     *,
     workspace: Path,
@@ -437,24 +409,20 @@ def validate_native_image(
     image_root = app_root / task.version / task.os_version
     tests_root = app_root / "tests"
     dockerfile = image_root / "Dockerfile"
-    for required in (
-        dockerfile,
-        tests_root / "goss.yaml",
-        tests_root / "goss_wait.yaml",
-        tests_root / "test.sh",
-    ):
-        if not required.is_file():
-            raise NativeValidationError(f"native validation input is missing: {required}")
+    if not dockerfile.is_file():
+        raise NativeValidationError(
+            f"native validation input is missing: {dockerfile}"
+        )
+    test_contract = validate_test_contract(repo=workspace, task=task)
+    service_mode = (tests_root / "goss_wait.yaml").is_file()
 
     platform = _PLATFORMS[architecture]
     slug = architecture.replace("_", "-")
     prefix = f"oe-e2e-{run_id}-{slug}"
     builder = f"{prefix}-builder"
     dgoss_container = f"{prefix}-dgoss"
-    container = f"{prefix}-persistence"
-    volume = f"{prefix}-data"
+    container = f"{prefix}-runtime"
     image = f"oe-autopilot/{task.app}:{task.version}-{run_id}-{slug}"
-    persistence_value = f"run-{run_id}"
     validated_patch_sha256 = validated_patch_digest(workspace)
     start = time.monotonic()
     image_id = ""
@@ -462,7 +430,7 @@ def validate_native_image(
     failure_details: dict[str, object] = {}
     container_evidence: dict[str, object] = {}
     # None means the check was never reached. Sharing one boolean across all
-    # four made a dgoss failure look like a build failure to the Fixer.
+    # checks made a dgoss failure look like a build failure to the Fixer.
     checks: dict[str, bool | None] = {name: None for name in _E2E_CHECKS}
     current_check = ""
     stage = f"native:{architecture}"
@@ -496,146 +464,101 @@ def validate_native_image(
         )
         checks["native_build"] = True
         log(stage, "PASS build")
-        current_check = "dgoss"
-        log(stage, "START dgoss")
-        _run(
-            runner,
-            [
-                str(dgoss),
-                "run",
-                "--name",
-                dgoss_container,
-                "--env",
-                f"EXPECTED_VERSION={task.version}",
-                image,
-            ],
-            cwd=workspace,
-            env={
-                "GOSS_PATH": str(goss),
-                "GOSS_FILES_PATH": str(tests_root),
-                "GOSS_FILE": "goss.yaml",
-                "GOSS_WAIT_OPTS": "-r 30s -s 1s",
-                "EXPECTED_VERSION": task.version,
-            },
-            timeout=300,
-        )
-        checks["dgoss"] = True
-        log(stage, "PASS dgoss")
-        current_check = "shared_tests"
-        log(stage, "START shared tests")
-        _run(
-            runner,
-            ["docker", "volume", "create", volume],
-            cwd=workspace,
-        )
-        _run(
-            runner,
-            [
-                "docker",
-                "run",
-                "--detach",
-                "--name",
-                container,
-                "--label",
-                f"oe.autopilot.run={run_id}",
-                "--volume",
-                f"{volume}:/var/lib/kvrocks",
-                "--volume",
-                f"{tests_root}:/opt/oe-tests:ro",
-                image,
-            ],
-            cwd=workspace,
-        )
-        _wait_for_ping(
-            runner=runner,
-            workspace=workspace,
-            container=container,
-            sleep=sleep,
-        )
-        _run(
-            runner,
-            [
-                "docker",
-                "exec",
-                "--env",
-                f"EXPECTED_VERSION={task.version}",
-                container,
-                "/opt/oe-tests/test.sh",
-            ],
-            cwd=workspace,
-            timeout=300,
-        )
-        checks["shared_tests"] = True
-        log(stage, "PASS shared tests")
-        current_check = "restart_persistence"
-        log(stage, "START persistence")
-        _run(
-            runner,
-            [
-                "docker",
-                "exec",
-                container,
-                "redis-cli",
-                "-p",
-                "6666",
-                "SET",
-                "oe-e2e-persistence",
-                persistence_value,
-            ],
-            cwd=workspace,
-        )
-        _run(runner, ["docker", "stop", container], cwd=workspace)
-        _run(runner, ["docker", "rm", container], cwd=workspace)
-        _run(
-            runner,
-            [
-                "docker",
-                "run",
-                "--detach",
-                "--name",
-                container,
-                "--label",
-                f"oe.autopilot.run={run_id}",
-                "--volume",
-                f"{volume}:/var/lib/kvrocks",
-                image,
-            ],
-            cwd=workspace,
-        )
-        _wait_for_ping(
-            runner=runner,
-            workspace=workspace,
-            container=container,
-            sleep=sleep,
-        )
-        persisted = _run(
-            runner,
-            [
-                "docker",
-                "exec",
-                container,
-                "redis-cli",
-                "-p",
-                "6666",
-                "GET",
-                "oe-e2e-persistence",
-            ],
-            cwd=workspace,
-        )
-        if str(persisted.stdout or "").strip() != persistence_value:
-            raise NativeValidationError("Kvrocks persistence value did not survive restart")
         inspected = _run(
             runner,
             ["docker", "image", "inspect", "--format", "{{.Id}}", image],
             cwd=workspace,
         )
         image_id = str(inspected.stdout or "").strip()
-        checks["restart_persistence"] = True
-        log(stage, "PASS persistence")
+        if test_contract["test_allowed"] is not True:
+            current_check = "test_contract"
+            raise NativeValidationError(
+                "native test contract is not executable: "
+                + "; ".join(str(error) for error in test_contract["errors"]),
+                details={"findings": test_contract["findings"]},
+            )
+        current_check = "dgoss"
+        log(stage, "START dgoss")
+        dgoss_command = [
+            str(dgoss),
+            "run",
+            "--name",
+            dgoss_container,
+        ]
+        if not service_mode:
+            dgoss_command.extend(("--entrypoint", "/bin/sh"))
+        dgoss_command.extend(
+            (
+                "--env",
+                f"EXPECTED_VERSION={task.version}",
+                image,
+            )
+        )
+        if not service_mode:
+            dgoss_command.extend(("-c", "sleep 300"))
+        dgoss_env = {
+            "GOSS_PATH": str(goss),
+            "GOSS_FILES_PATH": str(tests_root),
+            "GOSS_FILE": "goss.yaml",
+            "EXPECTED_VERSION": task.version,
+        }
+        if service_mode:
+            dgoss_env["GOSS_WAIT_OPTS"] = "-r 30s -s 1s"
+        _run(
+            runner,
+            dgoss_command,
+            cwd=workspace,
+            env=dgoss_env,
+            timeout=300,
+        )
+        checks["dgoss"] = True
+        log(stage, "PASS dgoss")
+        current_check = "shared_tests"
+        log(stage, "START shared tests")
+        runtime_command = [
+            "docker",
+            "run",
+            "--name",
+            container,
+            "--label",
+            f"oe.autopilot.run={run_id}",
+            "--volume",
+            f"{tests_root}:/opt/oe-tests:ro",
+        ]
+        if service_mode:
+            runtime_command.insert(2, "--detach")
+            runtime_command.append(image)
+            _run(runner, runtime_command, cwd=workspace)
+            _run(
+                runner,
+                [
+                    "docker",
+                    "exec",
+                    "--env",
+                    f"EXPECTED_VERSION={task.version}",
+                    container,
+                    "/opt/oe-tests/test.sh",
+                ],
+                cwd=workspace,
+                timeout=300,
+            )
+        else:
+            runtime_command.extend(
+                (
+                    "--env",
+                    f"EXPECTED_VERSION={task.version}",
+                    "--entrypoint",
+                    "/opt/oe-tests/test.sh",
+                    image,
+                )
+            )
+            _run(runner, runtime_command, cwd=workspace, timeout=300)
+        checks["shared_tests"] = True
+        log(stage, "PASS shared tests")
     except NativeValidationError as error:
         failure = str(error)
         failure_details = dict(error.details)
-        if current_check:
+        if current_check in checks:
             checks[current_check] = False
         # Must run before the finally block force-removes the containers.
         container_evidence = _container_evidence(
@@ -650,7 +573,6 @@ def validate_native_image(
         cleanup_commands = (
             ["docker", "rm", "--force", dgoss_container],
             ["docker", "rm", "--force", container],
-            ["docker", "volume", "rm", "--force", volume],
             ["docker", "image", "rm", "--force", image],
         )
         for command in cleanup_commands:

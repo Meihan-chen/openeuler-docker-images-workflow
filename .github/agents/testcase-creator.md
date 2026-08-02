@@ -57,7 +57,9 @@ file:
     mode: "0755"
 ```
 
-**goss_wait.yaml is optional** — 仅服务类应用确实需要在断言前等待就绪时生成：
+**goss_wait.yaml is optional** — 但它同时是 Native Harness 的运行模式标记：
+long-running service 必须生成；its absence declares CLI/one-shot mode。内容只描述从
+Dockerfile 与上游证据得到的就绪事实，不包含应用外的固定端口或命令：
 ```yaml
 port:
   tcp:{port}:
@@ -89,6 +91,10 @@ final Dockerfile rather than an earlier candidate snapshot.
 ### 步骤 4：生成共享 test.sh
 
 在 `{category}/{package_name}/tests/test.sh` 创建唯一的功能测试入口。原生验证流程会将该目录挂载到已经启动的容器内，注入 `EXPECTED_VERSION` 后执行脚本。脚本不得自行 build、run、stop 或删除容器。
+
+service 模式下 Harness 不执行应用专用探针，因此 `test.sh` 必须在功能断言前执行
+bounded readiness，并在超时时输出可操作证据；CLI/one-shot 模式下 Harness 直接把
+`test.sh` 作为容器入口运行。
 
 ```bash
 #!/bin/bash

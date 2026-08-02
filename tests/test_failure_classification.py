@@ -90,6 +90,20 @@ def test_failed_stage_separates_build_from_runtime(stage, category):
     assert classify_failure(report=report)["category"] == category
 
 
+def test_invalid_generated_tests_are_returned_to_testcase_creator():
+    from scripts.lib.failure_classification import classify_failure
+
+    result = classify_failure(
+        report={
+            "status": "failed",
+            "failed_stage": "test_contract",
+            "failure": "native test contract is not executable",
+        }
+    )
+
+    assert result["category"] == "test-contract"
+
+
 def test_a_timeout_is_infrastructure_and_names_no_candidate_repair():
     from scripts.lib.failure_classification import classify_failure
 

@@ -169,6 +169,8 @@ def classify_failure(
         stage = str(report.get("failed_stage", ""))
         if details.get("returncode") == _TIMEOUT_RETURNCODE:
             category = "infra"
+        elif stage == "test_contract":
+            category = "test-contract"
         elif stage == _CONFIG_PARSE_STAGE and any(
             marker in failure for marker in _CONFIG_PARSE_MARKERS
         ):

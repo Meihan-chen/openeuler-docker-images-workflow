@@ -92,6 +92,20 @@ def _task():
     )
 
 
+def _generic_task(*, app, domain="Others"):
+    from scripts.lib.task_spec import TaskSpec
+
+    return TaskSpec.from_workflow_dispatch(
+        {
+            "app": app,
+            "version": "1.2.3",
+            "os_version": "24.03-lts-sp4",
+            "domain": domain,
+            "source_url": f"https://github.com/example/{app}/tree/v1.2.3",
+        }
+    )
+
+
 def _git_init(workspace):
     """A validated workspace is a checkout at base SHA with the patch applied."""
     subprocess.run(["git", "init", "-q", str(workspace)], check=True)
@@ -123,6 +137,27 @@ def _workspace(tmp_path):
     return _git_init(workspace)
 
 
+def _generic_workspace(tmp_path, task, *, service):
+    workspace = tmp_path / "target"
+    image = (
+        workspace
+        / task.domain
+        / task.app
+        / task.version
+        / task.os_version
+    )
+    tests = workspace / task.domain / task.app / "tests"
+    image.mkdir(parents=True)
+    tests.mkdir(parents=True)
+    (image / "Dockerfile").write_text("FROM scratch\n")
+    (tests / "goss.yaml").write_text("{}\n")
+    if service:
+        (tests / "goss_wait.yaml").write_text("{}\n")
+    (tests / "test.sh").write_text("#!/bin/sh\nexit 0\n")
+    (tests / "test.sh").chmod(0o755)
+    return _git_init(workspace)
+
+
 def _tools(tmp_path):
     dgoss = tmp_path / "dgoss"
     goss = tmp_path / "goss"
@@ -133,7 +168,7 @@ def _tools(tmp_path):
     return dgoss, goss
 
 
-def test_native_validation_uses_dedicated_builder_and_full_runtime_checks(
+def test_native_validation_uses_dedicated_builder_and_generated_runtime_checks(
     tmp_path,
     capsys,
 ):
@@ -202,9 +237,6 @@ def test_native_validation_uses_dedicated_builder_and_full_runtime_checks(
         "EXPECTED_VERSION=2.16.0",
         "oe-autopilot/kvrocks:2.16.0-123456-x86-64",
     ]
-    assert " SET oe-e2e-persistence run-123456" in flattened
-    assert " GET oe-e2e-persistence" in flattened
-    assert "docker volume rm" in flattened
     assert "docker image rm" in flattened
     assert "system prune" not in flattened
     assert "setup-qemu" not in flattened
@@ -220,12 +252,136 @@ def test_native_validation_uses_dedicated_builder_and_full_runtime_checks(
         "[flow][native:x86_64] PASS build",
         "[flow][native:x86_64] START dgoss",
         "[flow][native:x86_64] PASS dgoss",
-        "[flow][native:x86_64] START persistence",
-        "[flow][native:x86_64] PASS persistence",
         "[flow][native:x86_64] PASS validation",
     ]
     positions = [output.index(marker) for marker in markers]
     assert positions == sorted(positions)
+
+
+def test_native_service_uses_test_assets_without_application_hardcoding(
+    tmp_path,
+):
+    from scripts.lib.native_validation import validate_native_image
+
+    task = _generic_task(app="echo-server")
+    workspace = _generic_workspace(tmp_path, task, service=True)
+    dgoss, goss = _tools(tmp_path)
+    runner = DockerRunner()
+
+    report = validate_native_image(
+        workspace=workspace,
+        task=task,
+        architecture="x86_64",
+        run_id="123456",
+        dgoss=dgoss,
+        goss=goss,
+        report_path=tmp_path / "reports/x86_64.json",
+        junit_path=tmp_path / "reports/x86_64.junit.xml",
+        runner=runner,
+        sleep=lambda _: None,
+    )
+
+    assert report["checks"] == {
+        "native_build": True,
+        "dgoss": True,
+        "shared_tests": True,
+    }
+    commands = "\n".join(
+        " ".join(call["command"]) for call in runner.calls
+    ).lower()
+    for application_literal in (
+        "kvrocks",
+        "redis-cli",
+        "6666",
+        "/var/lib/kvrocks",
+    ):
+        assert application_literal not in commands
+    assert "docker run --detach" in commands
+    assert "docker exec" in commands
+
+
+def test_native_cli_runs_shared_tests_without_a_detached_service(tmp_path):
+    from scripts.lib.native_validation import validate_native_image
+
+    task = _generic_task(app="batch-tool", domain="HPC")
+    workspace = _generic_workspace(tmp_path, task, service=False)
+    dgoss, goss = _tools(tmp_path)
+    runner = DockerRunner()
+
+    report = validate_native_image(
+        workspace=workspace,
+        task=task,
+        architecture="aarch64",
+        run_id="123456",
+        dgoss=dgoss,
+        goss=goss,
+        report_path=tmp_path / "reports/aarch64.json",
+        junit_path=tmp_path / "reports/aarch64.junit.xml",
+        runner=runner,
+        sleep=lambda _: None,
+    )
+
+    assert report["status"] == "passed"
+    assert report["checks"]["shared_tests"] is True
+    commands = [call["command"] for call in runner.calls]
+    assert not any(
+        command[:3] == ["docker", "run", "--detach"]
+        for command in commands
+    )
+    assert not any(
+        command[:2] == ["docker", "exec"] for command in commands
+    )
+    assert any(
+        command[:2] == ["docker", "run"]
+        and "--entrypoint" in command
+        and "/opt/oe-tests/test.sh" in command
+        for command in commands
+    )
+
+
+def test_native_builds_but_skips_runtime_tests_for_invalid_test_contract(
+    tmp_path,
+):
+    from scripts.lib.native_validation import (
+        NativeValidationError,
+        validate_native_image,
+    )
+
+    task = _generic_task(app="broken-tests")
+    workspace = _generic_workspace(tmp_path, task, service=True)
+    tests = workspace / task.domain / task.app / "tests"
+    (tests / "goss.yaml").write_text("command: [\n")
+    dgoss, goss = _tools(tmp_path)
+    runner = DockerRunner()
+    report_path = tmp_path / "reports/x86_64.json"
+
+    with pytest.raises(NativeValidationError, match="test contract"):
+        validate_native_image(
+            workspace=workspace,
+            task=task,
+            architecture="x86_64",
+            run_id="123456",
+            dgoss=dgoss,
+            goss=goss,
+            report_path=report_path,
+            junit_path=tmp_path / "reports/x86_64.junit.xml",
+            runner=runner,
+            sleep=lambda _: None,
+        )
+
+    report = json.loads(report_path.read_text())
+    assert report["failed_stage"] == "test_contract"
+    assert report["checks"] == {
+        "native_build": True,
+        "dgoss": None,
+        "shared_tests": None,
+    }
+    commands = "\n".join(
+        " ".join(call["command"]) for call in runner.calls
+    )
+    assert "docker buildx build" in commands
+    assert str(dgoss) not in commands
+    assert "docker exec" not in commands
 
 
 def test_native_validation_failure_still_cleans_exact_resources(tmp_path):
@@ -262,7 +418,6 @@ def test_native_validation_failure_still_cleans_exact_resources(tmp_path):
     flattened = "\n".join(
         " ".join(call["command"]) for call in runner.calls
     )
-    assert "docker volume rm" in flattened
     assert "docker image rm" in flattened
     assert "system prune" not in flattened
     # A failed round is exactly when the next round needs the cached builder.
@@ -352,7 +507,6 @@ def test_native_validation_failure_records_the_stage_that_actually_failed(
         "native_build": True,
         "dgoss": False,
         "shared_tests": None,
-        "restart_persistence": None,
     }
 
 

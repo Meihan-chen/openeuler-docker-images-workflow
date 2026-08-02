@@ -570,6 +570,51 @@ def test_a_repair_breaking_the_target_contract_is_re_asked_not_rebuilt(
     assert "USER must map to UID 999" in fixer.calls[1]["prompt"]
 
 
+def test_a_repair_leaving_tests_unexecutable_is_re_asked_before_rebuild(
+    tmp_path,
+):
+    fixer = Fixer()
+    gates = iter(
+        [
+            {
+                "status": "passed",
+                "build_allowed": True,
+                "test_allowed": False,
+                "delivery_allowed": False,
+                "errors": ["goss.yaml must be valid YAML"],
+                "findings": [
+                    {
+                        "code": "tests.goss_yaml",
+                        "level": "delivery_stop",
+                        "owner": "testcase_creator",
+                        "message": "goss.yaml must be valid YAML",
+                    }
+                ],
+            },
+            {
+                "status": "passed",
+                "build_allowed": True,
+                "test_allowed": True,
+                "delivery_allowed": True,
+                "findings": [],
+            },
+        ]
+    )
+
+    decision = _decide(
+        tmp_path,
+        {
+            "x86_64": _report("x86_64", status="failed"),
+            "aarch64": _report("aarch64"),
+        },
+        agent_runner=fixer,
+        target_validator=lambda **_: next(gates),
+    )
+
+    assert decision.repair_attempts == 2
+    assert "tests.goss_yaml" in fixer.calls[1]["prompt"]
+
+
 def test_exhausting_the_repair_budget_fails_the_round(tmp_path):
     from scripts.lib.native_repair import NativeRepairError
 

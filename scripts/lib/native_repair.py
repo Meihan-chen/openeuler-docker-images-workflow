@@ -115,6 +115,15 @@ def _passed(report: Mapping[str, object]) -> bool:
     return report.get("status") == "passed"
 
 
+def _native_gate_ready(gate: Mapping[str, object]) -> bool:
+    """Require safe build input and executable tests before paying for Docker."""
+    return (
+        gate.get("status") == "passed"
+        and gate.get("build_allowed", True) is True
+        and gate.get("test_allowed", True) is True
+    )
+
+
 def _classified(
     review: Mapping[str, object],
     *,
@@ -276,7 +285,7 @@ def decide_round(
             task=task,
             base_sha=base_sha,
         )
-        if gate.get("status") == "passed":
+        if _native_gate_ready(gate):
             log(stage, f"PASS fixer attempt={attempt}")
             return RoundDecision(
                 converged=False,
@@ -340,7 +349,7 @@ def validate_native_with_repairs(
         base_sha=base_sha,
     )
     pending_review: Mapping[str, object] | None = None
-    if initial_gate.get("status") != "passed":
+    if not _native_gate_ready(initial_gate):
         pending_review = _classified(
             {
                 "kind": "deterministic_target_contract",
@@ -458,7 +467,7 @@ def validate_native_with_repairs(
                 task=task,
                 base_sha=base_sha,
             )
-            if gate.get("status") != "passed":
+            if not _native_gate_ready(gate):
                 log(
                     f"native:{architecture}",
                     f"NEEDS_FIX target_contract round={repair_attempts}",

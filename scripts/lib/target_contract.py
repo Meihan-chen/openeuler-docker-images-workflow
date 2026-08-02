@@ -248,8 +248,6 @@ def _changed_files(repo: Path, base_sha: str) -> list[tuple[str, str]]:
 
 def _required_paths(
     task: TaskSpec,
-    *,
-    phase: str,
 ) -> tuple[str, list[str]]:
     app_root = f"{task.domain}/{task.app}"
     image_root = f"{app_root}/{task.version}/{task.os_version}"
@@ -258,12 +256,7 @@ def _required_paths(
         f"{app_root}/meta.yml",
         f"{image_root}/Dockerfile",
     ]
-    if phase == "image":
-        return app_root, image_paths
-    return app_root, image_paths + [
-        f"{app_root}/tests/goss.yaml",
-        f"{app_root}/tests/test.sh",
-    ]
+    return app_root, image_paths
 
 
 def _validate_image_list(
@@ -454,6 +447,42 @@ def _validate_tests(
                 owner="testcase_creator",
             )
         )
+
+
+def validate_test_contract(
+    *,
+    repo: Path,
+    task: TaskSpec,
+) -> dict[str, object]:
+    """Validate test assets without requiring the full delivery contract."""
+    repo = Path(repo)
+    app_root = f"{task.domain}/{task.app}"
+    findings: list[dict[str, str]] = []
+    for relative in (
+        f"{app_root}/tests/goss.yaml",
+        f"{app_root}/tests/test.sh",
+    ):
+        path = repo / relative
+        if not path.is_file() or path.stat().st_size == 0:
+            findings.append(
+                _delivery_finding(
+                    "tests.required",
+                    f"required generated file is missing or empty: {relative}",
+                    owner="testcase_creator",
+                )
+            )
+    _validate_tests(repo, app_root, findings)
+    blocking = [
+        finding
+        for finding in findings
+        if finding["level"] == "delivery_stop"
+    ]
+    return {
+        "status": "passed" if not blocking else "failed",
+        "test_allowed": not blocking,
+        "findings": findings,
+        "errors": [finding["message"] for finding in blocking],
+    }
 
 
 def _validate_link_hosts(
@@ -652,7 +681,7 @@ def validate_generated_target(
     if not (repo / ".git").is_dir():
         raise TargetContractError("target repository is not a Git workspace")
 
-    app_root, required = _required_paths(task, phase=phase)
+    app_root, required = _required_paths(task)
     if _git(
         repo,
         "cat-file",
@@ -761,7 +790,9 @@ def validate_generated_target(
         )
     _validate_docs(repo, task, app_root, findings)
     if phase == "full":
-        _validate_tests(repo, app_root, findings)
+        findings.extend(
+            validate_test_contract(repo=repo, task=task)["findings"]
+        )
 
     if hard_findings:
         raise TargetContractError(
