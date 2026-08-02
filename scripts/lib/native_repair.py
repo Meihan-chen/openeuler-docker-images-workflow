@@ -209,6 +209,39 @@ def _needs_human_decision(
     )
 
 
+def _hard_stop_decision(
+    *,
+    report_dir: Path,
+    round_number: int,
+    repair_attempts: int,
+    reports: Mapping[str, Mapping[str, object]],
+    api_key: str,
+    gate: Mapping[str, object],
+) -> RoundDecision:
+    terminal = {
+        "status": "hard-stop",
+        "reason": "target-contract-hard-stop",
+        "repair_attempts": repair_attempts,
+        "round": round_number,
+        "architectures": {
+            name: _redact(dict(reports[name]), api_key)
+            for name in _ARCHITECTURES
+        },
+        "gate": _redact(dict(gate), api_key),
+    }
+    (report_dir / "convergence-report.json").write_text(
+        json.dumps(terminal, ensure_ascii=False, indent=2, sort_keys=True)
+        + "\n"
+    )
+    return RoundDecision(
+        converged=False,
+        round_number=round_number,
+        repair_attempts=repair_attempts,
+        validated_patch_sha256="",
+        terminal_status="hard-stop",
+    )
+
+
 def _classified(
     review: Mapping[str, object],
     *,
@@ -383,17 +416,32 @@ def decide_round(
             api_key=api_key,
             attempt=attempt,
         )
-        if fixed.payload.get("success") is not True:
-            raise NativeRepairError(
-                f"fixer failed in round {round_number} attempt {attempt}"
-            )
         gate = _target_gate_report(
             target_validator=target_validator,
             workspace=workspace,
             task=task,
             base_sha=base_sha,
         )
+        hard_stop_reasons = _hard_stop_reasons(gate)
+        if hard_stop_reasons:
+            log(
+                stage,
+                "HARD_STOP target_contract "
+                + ",".join(hard_stop_reasons),
+            )
+            return _hard_stop_decision(
+                report_dir=report_dir,
+                round_number=round_number,
+                repair_attempts=attempt,
+                reports=reports,
+                api_key=api_key,
+                gate=gate,
+            )
         _raise_for_invalid_gate(gate)
+        if fixed.payload.get("success") is not True:
+            raise NativeRepairError(
+                f"fixer failed in round {round_number} attempt {attempt}"
+            )
         if _native_gate_ready(gate):
             log(stage, f"PASS fixer attempt={attempt}")
             return RoundDecision(

@@ -145,18 +145,30 @@ def test_repair_budget_terminal_is_preserved_without_emitting_round_five():
     emit_condition = steps["Emit next round candidate"]["if"]
     assert "terminal_status == ''" in emit_condition
     terminal_emit = steps["Emit terminal candidate"]
-    assert "needs-human-review" in terminal_emit["if"]
+    assert "terminal_status != ''" in terminal_emit["if"]
     assert terminal_emit["with"]["output-dir"].endswith(
         "/phase1-terminal-candidate"
     )
     assert "phase1-terminal-candidate/changes.patch" in steps[
-        "Collect needs-human-review evidence"
+        "Collect terminal evidence"
     ]["run"]
     terminal_upload = steps["Upload needs-human-review evidence"]
     assert "needs-human-review" in terminal_upload["if"]
     assert terminal_upload["with"]["name"] == (
         "phase1-needs-human-${{ github.run_id }}"
     )
+    hard_stop_upload = steps["Upload hard-stop evidence"]
+    assert "hard-stop" in hard_stop_upload["if"]
+    assert hard_stop_upload["with"]["name"] == (
+        "phase1-hard-stop-${{ github.run_id }}"
+    )
+    names = list(steps)
+    assert names.index("Fail hard-stop decision") > names.index(
+        "Upload hard-stop evidence"
+    )
+    hard_stop_failure = steps["Fail hard-stop decision"]
+    assert "hard-stop" in hard_stop_failure["if"]
+    assert "exit 1" in hard_stop_failure["run"]
 
 
 def test_issue_watcher_is_lightweight_serial_and_test_allowlisted():

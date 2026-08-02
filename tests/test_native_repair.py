@@ -637,8 +637,6 @@ def test_one_failing_architecture_repairs_once_with_both_reports(tmp_path):
 
 
 def test_a_repair_breaking_a_hard_boundary_stops_without_reasking_fixer(tmp_path):
-    from scripts.lib.native_repair import NativeRepairError
-
     fixer = Fixer()
     hard_stop = {
         "status": "failed",
@@ -654,22 +652,28 @@ def test_a_repair_breaking_a_hard_boundary_stops_without_reasking_fixer(tmp_path
         ],
     }
 
-    with pytest.raises(NativeRepairError, match="hard stop"):
-        _decide(
-            tmp_path,
-            {
-                "x86_64": _report("x86_64", status="failed"),
-                "aarch64": _report("aarch64"),
-            },
-            agent_runner=fixer,
-            target_validator=lambda **_: hard_stop,
-        )
+    decision = _decide(
+        tmp_path,
+        {
+            "x86_64": _report("x86_64", status="failed"),
+            "aarch64": _report("aarch64"),
+        },
+        agent_runner=fixer,
+        target_validator=lambda **_: hard_stop,
+    )
 
     assert len(fixer.calls) == 1
+    assert decision.converged is False
+    assert decision.terminal_status == "hard-stop"
+    report = json.loads(
+        (tmp_path / "evidence" / "convergence-report.json").read_text()
+    )
+    assert report["status"] == "hard-stop"
+    assert report["reason"] == "target-contract-hard-stop"
+    assert report["gate"]["findings"][0]["code"] == "scope.changed_path"
 
 
 def test_target_contract_exception_preserves_hard_stop_findings(tmp_path):
-    from scripts.lib.native_repair import NativeRepairError
     from scripts.lib.target_contract import TargetContractError
 
     fixer = Fixer()
@@ -687,18 +691,64 @@ def test_target_contract_exception_preserves_hard_stop_findings(tmp_path):
             ],
         )
 
-    with pytest.raises(NativeRepairError, match="meta.invalid_yaml"):
-        _decide(
-            tmp_path,
-            {
-                "x86_64": _report("x86_64", status="failed"),
-                "aarch64": _report("aarch64"),
-            },
-            agent_runner=fixer,
-            target_validator=hard_stop,
-        )
+    decision = _decide(
+        tmp_path,
+        {
+            "x86_64": _report("x86_64", status="failed"),
+            "aarch64": _report("aarch64"),
+        },
+        agent_runner=fixer,
+        target_validator=hard_stop,
+    )
 
     assert len(fixer.calls) == 1
+    assert decision.terminal_status == "hard-stop"
+    report = json.loads(
+        (tmp_path / "evidence" / "convergence-report.json").read_text()
+    )
+    assert report["gate"]["findings"][0]["code"] == "meta.invalid_yaml"
+
+
+def test_unsuccessful_fixer_cannot_hide_a_hard_boundary_change(tmp_path):
+    hard_stop = {
+        "status": "failed",
+        "build_allowed": False,
+        "test_allowed": False,
+        "delivery_allowed": False,
+        "errors": ["change outside task scope"],
+        "findings": [
+            {
+                "code": "scope.changed_path",
+                "level": "hard_stop",
+                "owner": "workflow",
+                "message": "change outside task scope",
+            }
+        ],
+    }
+
+    decision = _decide(
+        tmp_path,
+        {
+            "x86_64": _report("x86_64", status="failed"),
+            "aarch64": _report("aarch64"),
+        },
+        agent_runner=UnsuccessfulFixer(),
+        target_validator=lambda **_: hard_stop,
+    )
+
+    assert decision.terminal_status == "hard-stop"
+    report = json.loads(
+        (tmp_path / "evidence" / "convergence-report.json").read_text()
+    )
+    assert report["gate"]["findings"][0]["code"] == "scope.changed_path"
+    fixer_report = json.loads(
+        (
+            tmp_path
+            / "evidence"
+            / "fixer-native-dual-round1-attempt1.json"
+        ).read_text()
+    )
+    assert fixer_report["success"] is False
 
 
 def test_a_repair_leaving_tests_unexecutable_is_re_asked_before_rebuild(

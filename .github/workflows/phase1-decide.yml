@@ -31,7 +31,7 @@ on:
         description: "true when both architectures passed on one candidate"
         value: ${{ jobs.decide.outputs.converged }}
       terminal_status:
-        description: "needs-human-review when the repair budget is exhausted"
+        description: "needs-human-review or hard-stop terminal outcome"
         value: ${{ jobs.decide.outputs.terminal_status }}
 
 permissions:
@@ -149,15 +149,15 @@ jobs:
           retention-days: 30
 
       - name: Emit terminal candidate
-        if: ${{ steps.judge.outputs.terminal_status == 'needs-human-review' }}
+        if: ${{ steps.judge.outputs.terminal_status != '' }}
         uses: ./.github/actions/phase1-emit-patch
         with:
           workspace: ${{ runner.temp }}/phase1-target
           input-dir: ${{ runner.temp }}/phase1-input
           output-dir: ${{ runner.temp }}/phase1-terminal-candidate
 
-      - name: Collect needs-human-review evidence
-        if: ${{ steps.judge.outputs.terminal_status == 'needs-human-review' }}
+      - name: Collect terminal evidence
+        if: ${{ steps.judge.outputs.terminal_status != '' }}
         run: |
           mkdir -p "${RUNNER_TEMP}/phase1-terminal/decision"
           cp "${RUNNER_TEMP}/phase1-terminal-candidate/task-spec.json" \
@@ -180,6 +180,15 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      - name: Upload hard-stop evidence
+        if: ${{ steps.judge.outputs.terminal_status == 'hard-stop' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: phase1-hard-stop-${{ github.run_id }}
+          path: ${{ runner.temp }}/phase1-terminal/
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Upload round decision evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -188,3 +197,9 @@ jobs:
           path: ${{ runner.temp }}/phase1-decide/
           if-no-files-found: ignore
           retention-days: 30
+
+      - name: Fail hard-stop decision
+        if: ${{ steps.judge.outputs.terminal_status == 'hard-stop' }}
+        run: |
+          echo "A hard target-contract boundary was violated; evidence was uploaded."
+          exit 1
