@@ -14,31 +14,74 @@ inputs:
     description: "Optional file that records the replayed base SHA"
     required: false
     default: ""
+  architecture:
+    description: "Optional native architecture for retry-exhausted evidence"
+    required: false
+    default: ""
+  evidence-dir:
+    description: "Optional directory for retry-exhausted clone evidence"
+    required: false
+    default: ""
+
+outputs:
+  replayed:
+    description: "true when clone and patch replay both completed"
+    value: ${{ steps.replay.outputs.replayed }}
 
 runs:
   using: composite
   steps:
     - name: Replay exact candidate
+      id: replay
       shell: bash
       env:
         INPUT_DIR: ${{ inputs.input-dir }}
         WORKSPACE: ${{ inputs.workspace }}
         BASE_SHA_OUTPUT: ${{ inputs.base-sha-output }}
+        ARCHITECTURE: ${{ inputs.architecture }}
+        EVIDENCE_DIR: ${{ inputs.evidence-dir }}
       run: |
         base_sha="$(tr -d '\n' < "${INPUT_DIR}/base-sha.txt")"
+        clone_log="${RUNNER_TEMP}/phase1-clone.log"
+        if [ -n "${EVIDENCE_DIR}" ]; then
+          mkdir -p "${EVIDENCE_DIR}"
+          clone_log="${EVIDENCE_DIR}/clone.log"
+        fi
+        set +e
         "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
           target-clone \
           --source \
             https://gitcode.com/openeuler/openeuler-docker-images.git \
           --destination "${WORKSPACE}" \
           --branch master \
-          --expected-sha "${base_sha}"
+          --expected-sha "${base_sha}" 2>&1 | tee "${clone_log}"
+        clone_status="${PIPESTATUS[0]}"
+        set -e
+        if [ "${clone_status}" -ne 0 ]; then
+          if [ "${clone_status}" -eq 75 ] && \
+             [ -n "${ARCHITECTURE}" ] && [ -n "${EVIDENCE_DIR}" ]; then
+            "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
+              phase1-infra-evidence \
+              --task-spec "${INPUT_DIR}/task-spec.json" \
+              --architecture "${ARCHITECTURE}" \
+              --failed-stage target_clone \
+              --failure-log "${clone_log}" \
+              --report "${EVIDENCE_DIR}/${ARCHITECTURE}.json" \
+              --junit "${EVIDENCE_DIR}/${ARCHITECTURE}.junit.xml" \
+              --attempts 2
+            echo "replayed=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          exit "${clone_status}"
+        fi
         "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
           target-apply-patch \
           --workspace "${WORKSPACE}" \
           --branch master \
           --base-sha "${base_sha}" \
           --patch "${INPUT_DIR}/changes.patch"
+        echo "replayed=true" >> "${GITHUB_OUTPUT}"
+        rm -f "${clone_log}"
         if [ -n "${BASE_SHA_OUTPUT}" ]; then
           printf '%s\n' "${base_sha}" > "${BASE_SHA_OUTPUT}"
         fi

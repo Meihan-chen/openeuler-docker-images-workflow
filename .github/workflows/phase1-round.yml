@@ -48,13 +48,18 @@ jobs:
           path: ${{ runner.temp }}/phase1-input
 
       - name: Replay round candidate
+        id: replay
         uses: ./.github/actions/phase1-replay
         with:
           input-dir: ${{ runner.temp }}/phase1-input
           workspace: ${{ runner.temp }}/phase1-target
+          architecture: x86_64
+          evidence-dir: ${{ runner.temp }}/phase1-round
 
       - name: Validate natively on x86_64
-        if: ${{ inputs.operation != 'pipeline_smoke' }}
+        if: >-
+          ${{ steps.replay.outputs.replayed == 'true' &&
+              inputs.operation != 'pipeline_smoke' }}
         continue-on-error: true
         run: |
           mkdir -p "${RUNNER_TEMP}/phase1-round"
@@ -70,7 +75,9 @@ jobs:
             --junit "${RUNNER_TEMP}/phase1-round/x86_64.junit.xml"
 
       - name: Run native pipeline smoke on x86_64
-        if: ${{ inputs.operation == 'pipeline_smoke' }}
+        if: >-
+          ${{ steps.replay.outputs.replayed == 'true' &&
+              inputs.operation == 'pipeline_smoke' }}
         continue-on-error: true
         run: |
           mkdir -p "${RUNNER_TEMP}/phase1-round"
@@ -117,13 +124,18 @@ jobs:
           path: ${{ runner.temp }}/phase1-input
 
       - name: Replay round candidate
+        id: replay
         uses: ./.github/actions/phase1-replay
         with:
           input-dir: ${{ runner.temp }}/phase1-input
           workspace: ${{ runner.temp }}/phase1-target
+          architecture: aarch64
+          evidence-dir: ${{ runner.temp }}/phase1-round
 
       - name: Validate natively on aarch64
-        if: ${{ inputs.operation != 'pipeline_smoke' }}
+        if: >-
+          ${{ steps.replay.outputs.replayed == 'true' &&
+              inputs.operation != 'pipeline_smoke' }}
         continue-on-error: true
         run: |
           mkdir -p "${RUNNER_TEMP}/phase1-round"
@@ -139,7 +151,9 @@ jobs:
             --junit "${RUNNER_TEMP}/phase1-round/aarch64.junit.xml"
 
       - name: Run native pipeline smoke on aarch64
-        if: ${{ inputs.operation == 'pipeline_smoke' }}
+        if: >-
+          ${{ steps.replay.outputs.replayed == 'true' &&
+              inputs.operation == 'pipeline_smoke' }}
         continue-on-error: true
         run: |
           mkdir -p "${RUNNER_TEMP}/phase1-round"

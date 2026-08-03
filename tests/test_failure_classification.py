@@ -121,6 +121,22 @@ def test_a_build_timeout_is_infrastructure_and_names_no_candidate_repair():
     assert "do not" in result["guidance"].lower()
 
 
+def test_a_target_clone_disconnect_is_infrastructure_not_candidate_failure():
+    from scripts.lib.failure_classification import classify_failure
+
+    result = classify_failure(
+        report={
+            "status": "failed",
+            "failed_stage": "target_clone",
+            "failure": "fatal: early EOF",
+            "failure_details": {"attempts": 2, "retryable": True},
+        }
+    )
+
+    assert result["category"] == "infra"
+    assert "do not modify" in result["guidance"].lower()
+
+
 @pytest.mark.parametrize("stage", ("dgoss", "shared_tests"))
 def test_a_candidate_runtime_timeout_is_not_misclassified_as_infra(stage):
     from scripts.lib.failure_classification import classify_failure

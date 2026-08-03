@@ -78,6 +78,46 @@ class DockerRunner:
         return subprocess.CompletedProcess(command, 0, "", "")
 
 
+def test_infrastructure_failure_evidence_preserves_clone_error(tmp_path):
+    from scripts.lib.native_validation import (
+        write_infrastructure_failure_evidence,
+    )
+
+    report_path = tmp_path / "round" / "aarch64.json"
+    junit_path = tmp_path / "round" / "aarch64.junit.xml"
+    failure = (
+        "error: RPC failed; curl 18 transfer closed with outstanding read "
+        "data remaining\nfatal: early EOF"
+    )
+
+    report = write_infrastructure_failure_evidence(
+        task=_task(),
+        architecture="aarch64",
+        failed_stage="target_clone",
+        failure=failure,
+        report_path=report_path,
+        junit_path=junit_path,
+        attempts=2,
+    )
+
+    assert json.loads(report_path.read_text()) == report
+    assert report["status"] == "failed"
+    assert report["failed_stage"] == "target_clone"
+    assert report["failure"] == failure
+    assert report["failure_details"] == {
+        "attempts": 2,
+        "retryable": True,
+    }
+    assert report["checks"] == {
+        "native_build": None,
+        "dgoss": None,
+        "shared_tests": None,
+    }
+    suite = ET.parse(junit_path).getroot()
+    assert suite.attrib["failures"] == "1"
+    assert failure in suite.find("testcase/failure").text
+
+
 def _task():
     from scripts.lib.task_spec import TaskSpec
 

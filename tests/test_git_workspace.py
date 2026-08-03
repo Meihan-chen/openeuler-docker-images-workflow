@@ -45,6 +45,113 @@ def test_workspace_clones_master_and_records_exact_base(tmp_path):
     assert (workspace.path / "README.md").read_text() == "upstream\n"
 
 
+def test_workspace_retries_one_interrupted_clone_and_cleans_partial_checkout(
+    tmp_path,
+    monkeypatch,
+):
+    from scripts.lib import git_workspace
+    from scripts.lib.git_workspace import TargetWorkspace
+
+    upstream = _upstream(tmp_path)
+    destination = tmp_path / "workspace"
+    real_run = subprocess.run
+    attempts = 0
+
+    def interrupt_once(command, **kwargs):
+        nonlocal attempts
+        if command[:2] == ["git", "clone"]:
+            attempts += 1
+            if attempts == 1:
+                destination.mkdir()
+                (destination / "partial-pack").write_text("incomplete")
+                raise subprocess.CalledProcessError(
+                    128,
+                    command,
+                    stderr=(
+                        "error: RPC failed; curl 18 transfer closed with "
+                        "outstanding read data remaining\n"
+                        "fatal: early EOF"
+                    ),
+                )
+        return real_run(command, **kwargs)
+
+    monkeypatch.setattr(git_workspace.subprocess, "run", interrupt_once)
+
+    workspace = TargetWorkspace.clone(
+        str(upstream),
+        destination,
+        branch="master",
+    )
+
+    assert attempts == 2
+    assert workspace.path == destination
+    assert not (destination / "partial-pack").exists()
+    assert (destination / "README.md").read_text() == "upstream\n"
+
+
+def test_workspace_does_not_retry_a_non_transient_clone_error(
+    tmp_path,
+    monkeypatch,
+):
+    from scripts.lib import git_workspace
+    from scripts.lib.git_workspace import GitWorkspaceError, TargetWorkspace
+
+    attempts = 0
+
+    def repository_not_found(command, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise subprocess.CalledProcessError(
+            128,
+            command,
+            stderr="fatal: repository not found",
+        )
+
+    monkeypatch.setattr(git_workspace.subprocess, "run", repository_not_found)
+
+    with pytest.raises(GitWorkspaceError, match="repository not found"):
+        TargetWorkspace.clone(
+            str(tmp_path / "missing"),
+            tmp_path / "workspace",
+            branch="master",
+        )
+
+    assert attempts == 1
+
+
+def test_workspace_marks_exhausted_interrupted_clone_as_transient(
+    tmp_path,
+    monkeypatch,
+):
+    from scripts.lib import git_workspace
+    from scripts.lib.git_workspace import (
+        TransientGitWorkspaceError,
+        TargetWorkspace,
+    )
+
+    attempts = 0
+
+    def always_disconnect(command, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise subprocess.CalledProcessError(
+            128,
+            command,
+            stderr="fetch-pack: unexpected disconnect\nfatal: early EOF",
+        )
+
+    monkeypatch.setattr(git_workspace.subprocess, "run", always_disconnect)
+
+    with pytest.raises(TransientGitWorkspaceError, match="2 attempts"):
+        TargetWorkspace.clone(
+            str(tmp_path / "upstream"),
+            tmp_path / "workspace",
+            branch="master",
+        )
+
+    assert attempts == 2
+
+
 def test_workspace_rejects_clone_url_with_credentials(tmp_path):
     from scripts.lib.git_workspace import GitWorkspaceError, TargetWorkspace
 

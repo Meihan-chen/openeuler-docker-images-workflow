@@ -3,19 +3,35 @@
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from urllib.parse import urlparse
+
+from scripts.lib.progress import log
 
 
 class GitWorkspaceError(RuntimeError):
     """Raised when a Git workspace operation cannot be completed safely."""
 
 
+class TransientGitWorkspaceError(GitWorkspaceError):
+    """Raised after a retryable Git transport failure exhausts its attempts."""
+
+
 BOT_NAME = "openEuler Docker Autopilot Bot"
 BOT_EMAIL = "jcccx.cmh@gmail.com"
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_CLONE_ATTEMPTS = 2
+_TRANSIENT_CLONE_MARKERS = (
+    "rpc failed; curl",
+    "transfer closed with outstanding read data remaining",
+    "unexpected disconnect",
+    "early eof",
+    "invalid index-pack output",
+    "connection reset by peer",
+)
 
 
 @dataclass(frozen=True)
@@ -56,6 +72,19 @@ def _validate_clone_source(source: str) -> None:
             raise GitWorkspaceError("clone URL must not contain credentials")
     elif "@" in source or source.startswith(("git:", "ssh:")):
         raise GitWorkspaceError("clone URL must not contain credentials")
+
+
+def _retryable_clone_failure(error: GitWorkspaceError) -> bool:
+    message = str(error).lower()
+    return any(marker in message for marker in _TRANSIENT_CLONE_MARKERS)
+
+
+def _clear_partial_clone(destination: Path) -> None:
+    if not destination.exists():
+        return
+    if destination.is_symlink() or not destination.is_dir():
+        raise GitWorkspaceError("failed clone destination is not a directory")
+    shutil.rmtree(destination)
 
 
 def _patch_paths(repo: Path, patch: Path) -> tuple[str, ...]:
@@ -99,16 +128,32 @@ class TargetWorkspace:
         if destination.exists() and any(destination.iterdir()):
             raise GitWorkspaceError("clone destination must be absent or empty")
         destination.parent.mkdir(parents=True, exist_ok=True)
-        _run(
-            None,
-            "clone",
-            "--branch",
-            branch,
-            "--single-branch",
-            "--no-tags",
-            source,
-            str(destination),
-        )
+        for attempt in range(1, _CLONE_ATTEMPTS + 1):
+            try:
+                _run(
+                    None,
+                    "clone",
+                    "--branch",
+                    branch,
+                    "--single-branch",
+                    "--no-tags",
+                    source,
+                    str(destination),
+                )
+                break
+            except GitWorkspaceError as error:
+                if not _retryable_clone_failure(error):
+                    raise
+                if attempt == _CLONE_ATTEMPTS:
+                    raise TransientGitWorkspaceError(
+                        "target clone failed after "
+                        f"{_CLONE_ATTEMPTS} attempts: {error}"
+                    ) from error
+                log(
+                    "target-clone",
+                    f"RETRY transient transport failure attempt={attempt}",
+                )
+                _clear_partial_clone(destination)
         base_sha = _run(destination, "rev-parse", "HEAD").stdout.strip()
         return cls(path=destination, branch=branch, base_sha=base_sha)
 

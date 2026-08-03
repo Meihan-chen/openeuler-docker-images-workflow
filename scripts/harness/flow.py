@@ -26,7 +26,11 @@ from scripts.lib.generation_pipeline import (
     run_generation_pipeline,
     write_smoke_candidate,
 )
-from scripts.lib.git_workspace import GitWorkspaceError, TargetWorkspace
+from scripts.lib.git_workspace import (
+    GitWorkspaceError,
+    TargetWorkspace,
+    TransientGitWorkspaceError,
+)
 from scripts.lib.gitcode_client import (
     DeliveryConfig,
     DeliveryConfigError,
@@ -50,6 +54,7 @@ from scripts.lib.native_validation import (
     release_run_builders,
     validate_native_image,
     validate_native_smoke,
+    write_infrastructure_failure_evidence,
 )
 from scripts.lib.pr_delivery import (
     ForkPRPipelineError,
@@ -431,6 +436,19 @@ def cmd_phase1_native_validate(args: argparse.Namespace) -> None:
     _print_json(report)
 
 
+def cmd_phase1_infra_evidence(args: argparse.Namespace) -> None:
+    report = write_infrastructure_failure_evidence(
+        task=_load_task(args.task_spec),
+        architecture=args.architecture,
+        failed_stage=args.failed_stage,
+        failure=args.failure_log.read_text(errors="replace").strip(),
+        report_path=args.report,
+        junit_path=args.junit,
+        attempts=args.attempts,
+    )
+    _print_json(report)
+
+
 def cmd_phase1_native_smoke(args: argparse.Namespace) -> None:
     report = validate_native_smoke(
         workspace=args.workspace,
@@ -675,6 +693,27 @@ def _add_native_commands(commands: argparse._SubParsersAction) -> None:
     _add_native_arguments(validate)
     validate.set_defaults(handler=cmd_phase1_native_validate)
 
+    infra = commands.add_parser(
+        "phase1-infra-evidence",
+        help="Record a retry-exhausted pre-validation infrastructure failure",
+    )
+    infra.add_argument("--task-spec", required=True, type=Path)
+    infra.add_argument(
+        "--architecture",
+        required=True,
+        choices=("x86_64", "aarch64"),
+    )
+    infra.add_argument(
+        "--failed-stage",
+        required=True,
+        choices=("target_clone",),
+    )
+    infra.add_argument("--failure-log", required=True, type=Path)
+    infra.add_argument("--report", required=True, type=Path)
+    infra.add_argument("--junit", required=True, type=Path)
+    infra.add_argument("--attempts", required=True, type=int)
+    infra.set_defaults(handler=cmd_phase1_infra_evidence)
+
     smoke = commands.add_parser(
         "phase1-native-smoke",
         help="Exercise native Docker and dgoss plumbing without AI",
@@ -732,6 +771,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         args.handler(args)
+    except TransientGitWorkspaceError as error:
+        print(f"flow: error: {error}", file=sys.stderr)
+        return 75
     except (
         AgentRuntimeError,
         CandidateBundleError,

@@ -865,6 +865,34 @@ def test_a_failed_round_still_publishes_the_evidence_the_decision_needs():
         assert upload["with"]["if-no-files-found"] == "error"
 
 
+def test_round_replay_turns_only_exhausted_clone_disconnects_into_infra_evidence():
+    round_jobs = _workflow(ROUND_PATH)["jobs"]
+
+    for name, architecture in (("x86_64", "x86_64"), ("aarch64", "aarch64")):
+        steps = {step.get("name"): step for step in round_jobs[name]["steps"]}
+        replay = steps["Replay round candidate"]
+        assert replay["id"] == "replay"
+        assert replay["with"]["architecture"] == architecture
+        assert replay["with"]["evidence-dir"] == (
+            "${{ runner.temp }}/phase1-round"
+        )
+
+        validate = steps[f"Validate natively on {architecture}"]
+        smoke = steps[f"Run native pipeline smoke on {architecture}"]
+        assert "steps.replay.outputs.replayed == 'true'" in validate["if"]
+        assert "steps.replay.outputs.replayed == 'true'" in smoke["if"]
+
+    replay_action = _action("phase1-replay")
+    assert replay_action["outputs"]["replayed"]["value"] == (
+        "${{ steps.replay.outputs.replayed }}"
+    )
+    replay_body = replay_action["runs"]["steps"][0]["run"]
+    assert "clone_status" in replay_body
+    assert 'if [ "${clone_status}" -eq 75 ]' in replay_body
+    assert "phase1-infra-evidence" in replay_body
+    assert "exit \"${clone_status}\"" in replay_body
+
+
 def test_summary_markdown_does_not_trigger_single_quote_shellcheck_warning():
     text = WORKFLOW_PATH.read_text()
 

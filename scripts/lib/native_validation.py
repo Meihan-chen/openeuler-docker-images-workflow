@@ -208,6 +208,47 @@ def _write_evidence(
     )
 
 
+def write_infrastructure_failure_evidence(
+    *,
+    task: TaskSpec,
+    architecture: str,
+    failed_stage: str,
+    failure: str,
+    report_path: Path,
+    junit_path: Path,
+    attempts: int,
+) -> dict[str, object]:
+    """Record a pre-validation infrastructure failure for round evaluation."""
+    if architecture not in _PLATFORMS:
+        raise NativeValidationError(
+            "architecture must be the native runner name x86_64 or aarch64"
+        )
+    report: dict[str, object] = {
+        "status": "failed",
+        "task_id": task.task_id,
+        "architecture": architecture,
+        "platform": _PLATFORMS[architecture],
+        "image_id": "",
+        "validated_patch_sha256": "",
+        "duration_seconds": 0.0,
+        "environment": _environment_evidence(task, architecture),
+        "checks": {name: None for name in _E2E_CHECKS},
+        "failure": failure,
+        "failed_stage": failed_stage,
+        "failure_details": {
+            "attempts": attempts,
+            "retryable": True,
+        },
+    }
+    _write_evidence(
+        report_path=Path(report_path),
+        junit_path=Path(junit_path),
+        report=report,
+        failure=failure,
+    )
+    return report
+
+
 def validated_patch_digest(workspace: Path) -> str:
     """Digest the candidate content this workspace actually holds.
 

@@ -36,6 +36,7 @@ _CONFIG_PARSE_MARKERS = (
 _CONFIG_PARSE_STAGE = "dgoss"
 _TIMEOUT_RETURNCODE = 124
 _RUNTIME_STAGES = ("dgoss", "shared_tests", "restart_persistence")
+_INFRA_STAGES = ("target_clone",)
 
 _GUIDANCE = {
     "workspace-hygiene": (
@@ -186,7 +187,7 @@ def classify_failure(
         details = details if isinstance(details, Mapping) else {}
         failure = str(report.get("failure", "")).lower()
         stage = str(report.get("failed_stage", ""))
-        if (
+        if stage in _INFRA_STAGES or (
             details.get("returncode") == _TIMEOUT_RETURNCODE
             and stage not in _RUNTIME_STAGES
         ):
