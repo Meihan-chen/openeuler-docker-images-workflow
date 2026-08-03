@@ -14,6 +14,7 @@ on:
         options:
           - pipeline_smoke
           - validate_only
+          - existing_as_new_probe
           - scenario_one
           - resume_round
           - resume_package
@@ -81,6 +82,7 @@ jobs:
     if: >-
       ${{ inputs.operation == 'pipeline_smoke' ||
           inputs.operation == 'validate_only' ||
+          inputs.operation == 'existing_as_new_probe' ||
           inputs.operation == 'scenario_one' }}
     runs-on: [self-hosted, Linux, X64, oe-image-x86]
     timeout-minutes: 120
@@ -99,16 +101,21 @@ jobs:
 
       - name: Normalize TaskSpec
         env:
+          OPERATION: ${{ inputs.operation }}
           APP: ${{ inputs.app }}
           VERSION: ${{ inputs.version }}
           OS_VERSION: ${{ inputs.os_version }}
           DOMAIN: ${{ inputs.domain }}
           SOURCE_URL: ${{ inputs.source_url }}
         run: |
+          target_app="${APP}"
+          if [ "${OPERATION}" = "existing_as_new_probe" ]; then
+            target_app="${APP}-e2e-probe"
+          fi
           mkdir -p "${RUNNER_TEMP}/phase1-prepare"
           "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
             task-spec \
-            --app "${APP}" \
+            --app "${target_app}" \
             --version "${VERSION}" \
             --os-version "${OS_VERSION}" \
             --domain "${DOMAIN}" \
@@ -132,9 +139,44 @@ jobs:
             > "${RUNNER_TEMP}/phase1-prepare/base-sha.txt"
           printf 'sha=%s\n' "${base_sha}" >> "${GITHUB_OUTPUT}"
 
+      - name: Hide existing application from the probe
+        if: ${{ inputs.operation == 'existing_as_new_probe' }}
+        env:
+          SOURCE_APP: ${{ inputs.app }}
+          DOMAIN: ${{ inputs.domain }}
+        run: |
+          set -euo pipefail
+          workspace="${RUNNER_TEMP}/phase1-target"
+          relative="${DOMAIN}/${SOURCE_APP}"
+          reference="${workspace}/${relative}"
+          hidden="${RUNNER_TEMP}/phase1-hidden-reference"
+          state="${RUNNER_TEMP}/phase1-prepare/hidden-reference-paths.bin"
+
+          if [ ! -d "${reference}" ]; then
+            echo "probe reference does not exist: ${relative}" >&2
+            exit 2
+          fi
+          if [ -e "${hidden}" ]; then
+            echo "probe hidden reference already exists" >&2
+            exit 2
+          fi
+          git -C "${workspace}" ls-files -z -- "${relative}" > "${state}"
+          if [ ! -s "${state}" ]; then
+            echo "probe reference has no tracked files: ${relative}" >&2
+            exit 2
+          fi
+          xargs -0 git -C "${workspace}" update-index --skip-worktree -- \
+            < "${state}"
+          mv "${reference}" "${hidden}"
+          if [ -n "$(git -C "${workspace}" status --porcelain -- "${relative}")" ]; then
+            echo "probe reference is still visible to the working tree" >&2
+            exit 2
+          fi
+
       - name: Generate and review candidate content
         if: >-
           ${{ inputs.operation == 'validate_only' ||
+              inputs.operation == 'existing_as_new_probe' ||
               inputs.operation == 'scenario_one' }}
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
@@ -148,6 +190,47 @@ jobs:
               "${RUNNER_TEMP}/phase1-prepare/generation-reports" \
             --opencode "${{ steps.tools.outputs.opencode_path }}" \
             --hadolint "${{ steps.tools.outputs.hadolint_path }}"
+
+      - name: Restore existing application after the probe
+        if: >-
+          ${{ always() &&
+              inputs.operation == 'existing_as_new_probe' }}
+        env:
+          SOURCE_APP: ${{ inputs.app }}
+          DOMAIN: ${{ inputs.domain }}
+        run: |
+          set -euo pipefail
+          workspace="${RUNNER_TEMP}/phase1-target"
+          relative="${DOMAIN}/${SOURCE_APP}"
+          reference="${workspace}/${relative}"
+          hidden="${RUNNER_TEMP}/phase1-hidden-reference"
+          collision="${RUNNER_TEMP}/phase1-probe-reference-collision"
+          state="${RUNNER_TEMP}/phase1-prepare/hidden-reference-paths.bin"
+          restore_status=0
+
+          if [ -d "${hidden}" ]; then
+            if [ -e "${reference}" ]; then
+              mv "${reference}" "${collision}"
+              echo "probe recreated the hidden reference path" >&2
+              restore_status=2
+            fi
+            mv "${hidden}" "${reference}" || restore_status=2
+          fi
+          if [ -s "${state}" ]; then
+            xargs -0 git -C "${workspace}" update-index \
+              --no-skip-worktree -- < "${state}" || restore_status=2
+          else
+            echo "probe restore state is missing" >&2
+            restore_status=2
+          fi
+          if [ ! -d "${reference}" ]; then
+            echo "probe failed to restore ${relative}" >&2
+            restore_status=2
+          elif [ -n "$(git -C "${workspace}" status --porcelain -- "${relative}")" ]; then
+            echo "restored reference differs from the target base" >&2
+            restore_status=2
+          fi
+          exit "${restore_status}"
 
       - name: Create deterministic smoke candidate
         if: ${{ inputs.operation == 'pipeline_smoke' }}
@@ -818,6 +901,22 @@ jobs:
             printf -- '- No GitCode branch, PR, or Issue was written.\n'
           } >> "${GITHUB_STEP_SUMMARY}"
 
+      - name: Publish existing-as-new probe handoff
+        if: ${{ inputs.operation == 'existing_as_new_probe' }}
+        env:
+          SOURCE_APP: ${{ inputs.app }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          {
+            printf '## Existing-as-new probe passed\n\n'
+            printf -- "- Generated alias: \`%s-e2e-probe\`\n" \
+              "${SOURCE_APP}"
+            printf -- "- Candidate artifact: \`phase1-candidate-%s\`\n" \
+              "${RUN_ID}"
+            printf -- '- The current run will create a real fork PR.\n'
+            printf -- '- This diagnostic PR must not be merged.\n'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
       - name: Publish pipeline smoke result
         if: ${{ inputs.operation == 'pipeline_smoke' }}
         run: |
@@ -916,7 +1015,8 @@ jobs:
     if: >-
       ${{ always() &&
           (inputs.operation == 'fork_pr' ||
-           (inputs.operation == 'scenario_one' &&
+           ((inputs.operation == 'scenario_one' ||
+             inputs.operation == 'existing_as_new_probe') &&
             needs.package_candidate.result == 'success')) }}
     # Cleanup is ordered before delivery for a complete lifecycle, but a
     # cleanup failure must not block a PR for an already validated candidate.
@@ -949,13 +1049,15 @@ jobs:
         with:
           name: >-
             phase1-candidate-${{
-            inputs.operation == 'scenario_one' &&
+            (inputs.operation == 'scenario_one' ||
+             inputs.operation == 'existing_as_new_probe') &&
             github.run_id || inputs.validated_run_id }}
           path: ${{ runner.temp }}/candidate
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
           run-id: >-
-            ${{ inputs.operation == 'scenario_one' &&
+            ${{ (inputs.operation == 'scenario_one' ||
+                inputs.operation == 'existing_as_new_probe') &&
             github.run_id || inputs.validated_run_id }}
 
       - name: Promote candidate and create fork PR
@@ -979,7 +1081,8 @@ jobs:
             fork-deliver \
             --candidate-dir "${RUNNER_TEMP}/candidate" \
             --expected-run-id \
-              "${{ inputs.operation == 'scenario_one' &&
+              "${{ (inputs.operation == 'scenario_one' ||
+                    inputs.operation == 'existing_as_new_probe') &&
                   github.run_id || inputs.validated_run_id }}" \
             --delivery-run-id "${{ github.run_id }}" \
             --delivery-run-attempt "${{ github.run_attempt }}" \

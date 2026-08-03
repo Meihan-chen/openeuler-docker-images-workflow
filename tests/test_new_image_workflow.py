@@ -1,4 +1,6 @@
+import os
 import re
+import subprocess
 from pathlib import Path
 
 import yaml
@@ -54,6 +56,7 @@ def test_phase1_is_manual_only_with_explicit_operations():
     assert operation["options"] == [
         "pipeline_smoke",
         "validate_only",
+        "existing_as_new_probe",
         "scenario_one",
         "resume_round",
         "resume_package",
@@ -66,6 +69,153 @@ def test_phase1_is_manual_only_with_explicit_operations():
     assert "generation_run_id" in trigger["workflow_dispatch"]["inputs"]
     assert "resume_from_round" in trigger["workflow_dispatch"]["inputs"]
     assert len(trigger["workflow_dispatch"]["inputs"]) <= 10
+
+
+def test_existing_as_new_probe_hides_reference_and_delivers_alias_pr():
+    jobs = _workflow()["jobs"]
+    prepare = jobs["prepare"]
+    steps = prepare["steps"]
+    by_name = {step["name"]: step for step in steps}
+
+    assert "existing_as_new_probe" in prepare["if"]
+    normalize = by_name["Normalize TaskSpec"]
+    assert "existing_as_new_probe" in normalize["run"]
+    assert '${APP}-e2e-probe' in normalize["run"]
+
+    hide = by_name["Hide existing application from the probe"]
+    restore = by_name["Restore existing application after the probe"]
+    generate = by_name["Generate and review candidate content"]
+    assert "existing_as_new_probe" in hide["if"]
+    assert "update-index --skip-worktree" in hide["run"]
+    assert "phase1-hidden-reference" in hide["run"]
+    assert "existing_as_new_probe" in generate["if"]
+    assert "always()" in restore["if"]
+    assert "existing_as_new_probe" in restore["if"]
+    assert "update-index" in restore["run"]
+    assert "--no-skip-worktree" in restore["run"]
+    assert "phase1-hidden-reference" in restore["run"]
+
+    names = [step["name"] for step in steps]
+    assert names.index(hide["name"]) < names.index(generate["name"])
+    assert names.index(generate["name"]) < names.index(restore["name"])
+    assert names.index(restore["name"]) < names.index(
+        "Create generation patch"
+    )
+
+    delivery = jobs["deliver_fork_pr"]
+    delivery_text = _job_text(delivery)
+    assert "inputs.operation == 'existing_as_new_probe'" in delivery["if"]
+    assert "needs.package_candidate.result == 'success'" in delivery["if"]
+    assert "inputs.operation == 'existing_as_new_probe'" in delivery_text
+    assert "github.run_id" in delivery_text
+    assert "phase1-candidate-" in delivery_text
+
+    package_text = _job_text(jobs["package_candidate"])
+    assert "Existing-as-new probe passed" in package_text
+    assert "must not be merged" in package_text
+
+
+def test_existing_as_new_probe_shell_restores_reference_without_diff(tmp_path):
+    steps = {
+        step["name"]: step
+        for step in _workflow()["jobs"]["prepare"]["steps"]
+    }
+    workspace = tmp_path / "phase1-target"
+    reference = workspace / "Bigdata" / "kylin"
+    reference.mkdir(parents=True)
+    (reference / "Dockerfile").write_text("existing\n")
+    (workspace / "Bigdata" / "image-list.yml").write_text(
+        "images:\n  kylin: kylin\n"
+    )
+    subprocess.run(
+        ["git", "init", "-b", "master", str(workspace)],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(workspace), "config", "user.name", "Fixture"],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(workspace),
+            "config",
+            "user.email",
+            "fixture@example.com",
+        ],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(workspace), "add", "."],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(workspace), "commit", "-m", "base"],
+        check=True,
+        capture_output=True,
+    )
+    (tmp_path / "phase1-prepare").mkdir()
+    env = {
+        **os.environ,
+        "RUNNER_TEMP": str(tmp_path),
+        "SOURCE_APP": "kylin",
+        "DOMAIN": "Bigdata",
+    }
+
+    hidden = subprocess.run(
+        ["bash", "-c", steps["Hide existing application from the probe"]["run"]],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert hidden.returncode == 0, hidden.stderr
+    assert not reference.exists()
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(workspace),
+            "add",
+            "--intent-to-add",
+            "--",
+            ".",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    assert subprocess.run(
+        ["git", "-C", str(workspace), "status", "--porcelain"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout == ""
+
+    alias = workspace / "Bigdata" / "kylin-e2e-probe"
+    alias.mkdir()
+    (alias / "Dockerfile").write_text("generated\n")
+    restored = subprocess.run(
+        [
+            "bash",
+            "-c",
+            steps["Restore existing application after the probe"]["run"],
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert restored.returncode == 0, restored.stderr
+    assert (reference / "Dockerfile").read_text() == "existing\n"
+    status = subprocess.run(
+        ["git", "-C", str(workspace), "status", "--porcelain"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert "Bigdata/kylin-e2e-probe/" in status
+    assert "Bigdata/kylin/" not in status
 
 
 
