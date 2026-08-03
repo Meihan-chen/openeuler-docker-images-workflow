@@ -42,7 +42,7 @@ _REQUIRED_KEYS = {
     "testcase_qa": ("status", "issues", "coverage_score", "summary"),
     "fixer": ("success", "changes"),
 }
-_QA_TIMEOUT_SECONDS = 180
+_QA_TIMEOUT_SECONDS = 900
 _DEFAULT_AGENT_TIMEOUT_SECONDS = 1800
 _QA_SNAPSHOT_MAX_CHARS = 64_000
 _PHASE1_TASK = (
