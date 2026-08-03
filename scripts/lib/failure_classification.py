@@ -181,7 +181,18 @@ def classify_failure(
         details = details if isinstance(details, Mapping) else {}
         failure = str(report.get("failure", "")).lower()
         stage = str(report.get("failed_stage", ""))
-        if stage in _INFRA_STAGES or (
+        if stage == "upstream_format":
+            format_check = report.get("format_check")
+            format_check = (
+                format_check if isinstance(format_check, Mapping) else {}
+            )
+            kind = str(details.get("kind") or format_check.get("kind") or "")
+            if kind == "infra":
+                category = "infra"
+            elif kind == "candidate":
+                category = "image-contract"
+                owner = "image_creator"
+        elif stage in _INFRA_STAGES or (
             details.get("returncode") == _TIMEOUT_RETURNCODE
             and stage not in _RUNTIME_STAGES
         ):

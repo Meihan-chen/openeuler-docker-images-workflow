@@ -128,6 +128,13 @@ def _passed(report: Mapping[str, object]) -> bool:
     )
 
 
+def _format_checker_commit(report: Mapping[str, object]) -> str:
+    result = report.get("format_check")
+    if not isinstance(result, Mapping):
+        return ""
+    return str(result.get("commit_sha") or "")
+
+
 def _native_gate_ready(gate: Mapping[str, object]) -> bool:
     """Require safe build input and executable tests before paying for Docker."""
     return (
@@ -312,6 +319,22 @@ def decide_round(
         raise NativeRepairError(
             "native report checks are incomplete: "
             + ", ".join(invalid_passed)
+        )
+
+    format_commits = [
+        _format_checker_commit(reports[name]) for name in _ARCHITECTURES
+    ]
+    if all(format_commits) and len(set(format_commits)) != 1:
+        if max_rounds == 0 or round_number > max_rounds:
+            raise NativeRepairError(
+                "format checker infrastructure retries were exhausted"
+            )
+        log(stage, "SKIP fixer reason=format-checker-commit-mismatch")
+        return RoundDecision(
+            converged=False,
+            round_number=round_number,
+            repair_attempts=0,
+            validated_patch_sha256="",
         )
 
     if all(_passed(reports[name]) for name in _ARCHITECTURES):

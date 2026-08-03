@@ -561,6 +561,62 @@ def test_native_validation_failure_records_the_stage_that_actually_failed(
     }
 
 
+def test_format_failure_is_recorded_but_native_validation_still_runs(tmp_path):
+    from scripts.lib.native_validation import (
+        NativeValidationError,
+        validate_native_image,
+    )
+
+    workspace = _workspace(tmp_path)
+    dgoss, goss = _tools(tmp_path)
+    runner = DockerRunner()
+    report_path = tmp_path / "reports" / "aarch64.json"
+
+    def failing_format_check(**_):
+        return {
+            "status": "failed",
+            "kind": "candidate",
+            "stage": "execute",
+            "repository": "https://gitcode.com/openeuler/eulerpublisher.git",
+            "commit_sha": "a" * 40,
+            "runner_architecture": "aarch64",
+            "compatibility_override": True,
+            "fail_count": 1,
+            "output": "image-info.yml is missing environment",
+            "failure": "upstream format check reported 1 failure",
+        }
+
+    with pytest.raises(NativeValidationError, match="format check"):
+        validate_native_image(
+            workspace=workspace,
+            task=_task(),
+            architecture="aarch64",
+            run_id="123456",
+            dgoss=dgoss,
+            goss=goss,
+            report_path=report_path,
+            junit_path=tmp_path / "reports" / "aarch64.junit.xml",
+            runner=runner,
+            sleep=lambda _: None,
+            format_validator=failing_format_check,
+        )
+
+    report = json.loads(report_path.read_text())
+    assert report["status"] == "failed"
+    assert report["failed_stage"] == "upstream_format"
+    assert report["format_check"]["kind"] == "candidate"
+    assert report["format_check"]["commit_sha"] == "a" * 40
+    assert report["checks"] == {
+        "native_build": True,
+        "dgoss": True,
+        "shared_tests": True,
+    }
+    commands = "\n".join(" ".join(call["command"]) for call in runner.calls)
+    assert "docker buildx build" in commands
+    assert str(dgoss) in commands
+    assert "docker exec" in commands
+
+
 def test_native_validation_failure_captures_container_state_before_cleanup(
     tmp_path,
 ):
@@ -666,6 +722,51 @@ def test_native_pipeline_smoke_builds_and_runs_dgoss_without_ai(
     assert (
         repair_dir / "native-repair-x86_64.json"
     ).is_file()
+
+
+def test_smoke_format_failure_does_not_skip_native_plumbing(tmp_path):
+    from scripts.lib.native_validation import (
+        NativeValidationError,
+        validate_native_smoke,
+    )
+
+    workspace = _git_init(tmp_path / "target")
+    dgoss, goss = _tools(tmp_path)
+    runner = DockerRunner()
+    report_path = tmp_path / "reports" / "x86_64.json"
+
+    def failing_format_check(**_):
+        return {
+            "status": "failed",
+            "kind": "candidate",
+            "stage": "execute",
+            "commit_sha": "a" * 40,
+            "failure": "upstream format check reported 1 failure",
+        }
+
+    with pytest.raises(NativeValidationError, match="format check"):
+        validate_native_smoke(
+            workspace=workspace,
+            task=_task(),
+            architecture="x86_64",
+            run_id="123456",
+            dgoss=dgoss,
+            goss=goss,
+            report_path=report_path,
+            junit_path=tmp_path / "reports" / "x86_64.junit.xml",
+            repair_report_dir=tmp_path / "reports" / "agents",
+            runner=runner,
+            format_validator=failing_format_check,
+        )
+
+    report = json.loads(report_path.read_text())
+    assert report["failed_stage"] == "upstream_format"
+    assert report["format_check"]["commit_sha"] == "a" * 40
+    assert report["checks"] == {
+        "native_build": True,
+        "dgoss": True,
+        "shared_tests": True,
+    }
 
 
 def test_repeated_validation_reuses_the_run_builder_and_its_layer_cache(

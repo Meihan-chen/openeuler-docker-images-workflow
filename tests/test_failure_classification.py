@@ -137,6 +137,37 @@ def test_a_target_clone_disconnect_is_infrastructure_not_candidate_failure():
     assert "do not modify" in result["guidance"].lower()
 
 
+@pytest.mark.parametrize(
+    ("kind", "category", "owner"),
+    (
+        ("candidate", "image-contract", "image_creator"),
+        ("infra", "infra", None),
+    ),
+)
+def test_upstream_format_failure_routes_by_evidence_kind(kind, category, owner):
+    from scripts.lib.failure_classification import classify_failure
+
+    result = classify_failure(
+        report={
+            "status": "failed",
+            "failed_stage": "upstream_format",
+            "failure": "upstream format check failed",
+            "failure_details": {"kind": kind},
+            "format_check": {
+                "status": "failed",
+                "kind": kind,
+                "output": "image-info.yml is missing environment",
+            },
+        }
+    )
+
+    assert result["category"] == category
+    if owner is None:
+        assert "owner" not in result
+    else:
+        assert result["owner"] == owner
+
+
 @pytest.mark.parametrize("stage", ("dgoss", "shared_tests"))
 def test_a_candidate_runtime_timeout_is_not_misclassified_as_infra(stage):
     from scripts.lib.failure_classification import classify_failure

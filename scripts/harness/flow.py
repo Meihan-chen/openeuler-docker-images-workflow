@@ -69,6 +69,7 @@ from scripts.lib.target_contract import (
     TargetContractError,
     validate_generated_target,
 )
+from scripts.lib.upstream_format_check import run_upstream_format_check
 from scripts.harness.parse_issue import parse_issue_request
 
 
@@ -434,6 +435,7 @@ def cmd_phase1_native_validate(args: argparse.Namespace) -> None:
         goss=args.goss,
         report_path=args.report,
         junit_path=args.junit,
+        format_validator=run_upstream_format_check,
     )
     _print_json(report)
 
@@ -462,6 +464,7 @@ def cmd_phase1_native_smoke(args: argparse.Namespace) -> None:
         report_path=args.report,
         junit_path=args.junit,
         repair_report_dir=args.repair_report_dir,
+        format_validator=run_upstream_format_check,
     )
     _print_json(report)
 

@@ -41,6 +41,7 @@ CommandRunner = Callable[
     [Sequence[str], Path, Mapping[str, str], int],
     subprocess.CompletedProcess,
 ]
+FormatValidator = Callable[..., Mapping[str, object]]
 
 _PLATFORMS = {
     "x86_64": "linux/amd64",
@@ -74,6 +75,61 @@ def _default_runner(
         env=process_env,
         timeout=timeout,
     )
+
+
+def _run_optional_format_check(
+    *,
+    format_validator: FormatValidator | None,
+    workspace: Path,
+    architecture: str,
+    report_path: Path,
+) -> dict[str, object] | None:
+    if format_validator is None:
+        return None
+    try:
+        result = dict(
+            format_validator(
+                workspace=workspace,
+                architecture=architecture,
+                temp_root=report_path.parent / "upstream-format",
+            )
+        )
+    except Exception as error:
+        return {
+            "status": "failed",
+            "kind": "infra",
+            "stage": "integration",
+            "runner_architecture": architecture,
+            "failure": str(error) or error.__class__.__name__,
+        }
+    if result.get("status") not in {"passed", "failed"}:
+        return {
+            **result,
+            "status": "failed",
+            "kind": "infra",
+            "stage": "integration",
+            "runner_architecture": architecture,
+            "failure": "format validator returned an invalid status",
+        }
+    return result
+
+
+def _format_failure(result: Mapping[str, object] | None) -> str | None:
+    if result is None or result.get("status") == "passed":
+        return None
+    return str(
+        result.get("failure")
+        or result.get("output")
+        or "upstream format check failed"
+    )
+
+
+def _format_failure_details(result: Mapping[str, object]) -> dict[str, object]:
+    return {
+        key: result[key]
+        for key in ("kind", "stage", "commit_sha")
+        if key in result
+    }
 
 
 def _merged_output(result: subprocess.CompletedProcess) -> str:
@@ -521,6 +577,7 @@ def validate_native_image(
     junit_path: Path,
     runner: CommandRunner = _default_runner,
     sleep: Callable[[float], None] = time.sleep,
+    format_validator: FormatValidator | None = None,
 ) -> dict[str, object]:
     if architecture not in _PLATFORMS:
         raise NativeValidationError(
@@ -531,6 +588,15 @@ def validate_native_image(
     workspace = Path(workspace)
     if not workspace.is_dir():
         raise NativeValidationError("target workspace does not exist")
+    report_path = Path(report_path)
+    junit_path = Path(junit_path)
+    start = time.monotonic()
+    format_check = _run_optional_format_check(
+        format_validator=format_validator,
+        workspace=workspace,
+        architecture=architecture,
+        report_path=report_path,
+    )
     dgoss = _validate_tool(dgoss, "dgoss")
     goss = _validate_tool(goss, "goss")
 
@@ -553,7 +619,6 @@ def validate_native_image(
     container = f"{prefix}-runtime"
     image = f"oe-autopilot/{task.app}:{task.version}-{run_id}-{slug}"
     validated_patch_sha256 = validated_patch_digest(workspace)
-    start = time.monotonic()
     image_id = ""
     failure: str | None = None
     failure_details: dict[str, object] = {}
@@ -664,8 +729,10 @@ def validate_native_image(
                 check=False,
             )
 
+    format_failure = _format_failure(format_check)
+    overall_failure = failure or format_failure
     report: dict[str, object] = {
-        "status": "failed" if failure else "passed",
+        "status": "failed" if overall_failure else "passed",
         "task_id": task.task_id,
         "architecture": architecture,
         "platform": platform,
@@ -675,22 +742,33 @@ def validate_native_image(
         "environment": _environment_evidence(task, architecture),
         "checks": checks,
     }
+    if format_check is not None:
+        report["format_check"] = format_check
     if failure:
         report["failure"] = failure
         report["failed_stage"] = current_check
         report["failure_details"] = failure_details
         if container_evidence:
             report["container_evidence"] = container_evidence
+    elif format_failure:
+        report["failure"] = format_failure
+        report["failed_stage"] = "upstream_format"
+        report["failure_details"] = _format_failure_details(format_check or {})
     _write_evidence(
-        report_path=Path(report_path),
-        junit_path=Path(junit_path),
+        report_path=report_path,
+        junit_path=junit_path,
         report=report,
-        failure=failure,
+        failure=overall_failure,
     )
-    if failure:
-        log(stage, f"FAIL validation: {failure}")
+    if overall_failure:
+        log(stage, f"FAIL validation: {overall_failure}")
         # Keep the structure a direct caller needs; only the report file had it.
-        raise NativeValidationError(failure, details=failure_details)
+        details = (
+            failure_details
+            if failure
+            else _format_failure_details(format_check or {})
+        )
+        raise NativeValidationError(overall_failure, details=details)
     log(stage, "PASS validation")
     return report
 
@@ -707,6 +785,7 @@ def validate_native_smoke(
     junit_path: Path,
     repair_report_dir: Path,
     runner: CommandRunner = _default_runner,
+    format_validator: FormatValidator | None = None,
 ) -> dict[str, object]:
     if architecture not in _PLATFORMS:
         raise NativeValidationError(
@@ -722,6 +801,13 @@ def validate_native_smoke(
     report_path = Path(report_path)
     junit_path = Path(junit_path)
     repair_report_dir = Path(repair_report_dir)
+    start = time.monotonic()
+    format_check = _run_optional_format_check(
+        format_validator=format_validator,
+        workspace=workspace,
+        architecture=architecture,
+        report_path=report_path,
+    )
 
     context = report_path.parent / "pipeline-smoke-context"
     contexts: dict[str, Path] = {}
@@ -772,7 +858,6 @@ def validate_native_smoke(
     }
     stage = f"smoke:{architecture}"
     validated_patch_sha256 = validated_patch_digest(workspace)
-    start = time.monotonic()
     image_id = ""
     failure: str | None = None
     failure_details: dict[str, object] = {}
@@ -866,8 +951,10 @@ def validate_native_smoke(
                 check=False,
             )
 
+    format_failure = _format_failure(format_check)
+    overall_failure = failure or format_failure
     report: dict[str, object] = {
-        "status": "failed" if failure else "passed",
+        "status": "failed" if overall_failure else "passed",
         "task_id": task.task_id,
         "architecture": architecture,
         "platform": platform,
@@ -877,15 +964,21 @@ def validate_native_smoke(
         "environment": _environment_evidence(task, architecture),
         "checks": checks,
     }
+    if format_check is not None:
+        report["format_check"] = format_check
     if failure:
         report["failure"] = failure
         report["failed_stage"] = current_check
         report["failure_details"] = failure_details
+    elif format_failure:
+        report["failure"] = format_failure
+        report["failed_stage"] = "upstream_format"
+        report["failure_details"] = _format_failure_details(format_check or {})
     _write_evidence(
         report_path=report_path,
         junit_path=junit_path,
         report=report,
-        failure=failure,
+        failure=overall_failure,
     )
     repair_report_dir.mkdir(parents=True, exist_ok=True)
     (repair_report_dir / f"native-repair-{architecture}.json").write_text(
@@ -902,8 +995,13 @@ def validate_native_smoke(
         )
         + "\n"
     )
-    if failure:
-        log(stage, f"FAIL native plumbing: {failure}")
-        raise NativeValidationError(failure, details=failure_details)
+    if overall_failure:
+        log(stage, f"FAIL native plumbing: {overall_failure}")
+        details = (
+            failure_details
+            if failure
+            else _format_failure_details(format_check or {})
+        )
+        raise NativeValidationError(overall_failure, details=details)
     log(stage, "PASS native plumbing")
     return report

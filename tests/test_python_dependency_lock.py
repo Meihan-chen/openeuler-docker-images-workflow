@@ -18,5 +18,11 @@ def test_phase1_python_dependency_is_version_and_dual_arch_hash_locked():
     assert content.startswith("PyYAML==6.0.3")
     assert f"--hash=sha256:{X86_64_WHEEL_SHA256}" in content
     assert f"--hash=sha256:{AARCH64_WHEEL_SHA256}" in content
-    assert content.count("--hash=sha256:") == 2
+    for requirement in (
+        "packaging==26.2",
+        "prettytable==3.18.0",
+        "wcwidth==0.8.2",
+    ):
+        assert requirement in content
+    assert content.count("--hash=sha256:") == 8
     assert "pytest" not in content

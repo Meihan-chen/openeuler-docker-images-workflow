@@ -1543,6 +1543,23 @@ def test_the_smoke_candidate_still_refuses_a_task_it_cannot_write(tmp_path):
         write_smoke_candidate(workspace=workspace, task=unsupported)
 
 
+def test_smoke_image_info_uses_the_upstream_format_block_style(tmp_path):
+    from scripts.lib.generation_pipeline import write_smoke_candidate
+
+    workspace = tmp_path / "target"
+    domain = workspace / "Database"
+    domain.mkdir(parents=True)
+    (domain / "image-list.yml").write_text("images: {}\n")
+
+    write_smoke_candidate(workspace=workspace, task=_task())
+
+    content = (
+        workspace / "Database" / "kvrocks" / "doc" / "image-info.yml"
+    ).read_text()
+    for key in ("environment", "tags", "download", "usage"):
+        assert f"{key}: |\n" in content
+
+
 def test_phase1_prompts_pin_task_paths_without_injecting_app_implementation():
     from scripts.lib.generation_pipeline import build_role_prompt
 

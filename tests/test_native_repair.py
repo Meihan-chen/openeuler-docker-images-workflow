@@ -599,6 +599,71 @@ def test_both_passing_on_different_candidates_is_never_convergence(tmp_path):
         )
 
 
+def test_different_format_checker_commits_retry_without_calling_fixer(tmp_path):
+    fixer = Fixer()
+    x86 = _report("x86_64")
+    arm = _report("aarch64")
+    x86["format_check"] = {
+        "status": "passed",
+        "kind": "candidate",
+        "commit_sha": "a" * 40,
+    }
+    arm["format_check"] = {
+        "status": "passed",
+        "kind": "candidate",
+        "commit_sha": "b" * 40,
+    }
+
+    decision = _decide(
+        tmp_path,
+        {"x86_64": x86, "aarch64": arm},
+        agent_runner=fixer,
+    )
+
+    assert decision.converged is False
+    assert decision.repair_attempts == 0
+    assert fixer.calls == []
+
+
+def test_format_failure_evidence_is_included_in_the_dual_arch_fixer(tmp_path):
+    fixer = Fixer()
+    reports = {}
+    for architecture in ("x86_64", "aarch64"):
+        report = _report(architecture)
+        report.update(
+            {
+                "status": "failed",
+                "failed_stage": "upstream_format",
+                "failure": "upstream format check reported 1 failure",
+                "failure_details": {"kind": "candidate"},
+                "format_check": {
+                    "status": "failed",
+                    "kind": "candidate",
+                    "commit_sha": "a" * 40,
+                    "output": "image-info.yml is missing environment",
+                },
+            }
+        )
+        reports[architecture] = report
+
+    _decide(tmp_path, reports, agent_runner=fixer)
+
+    prompt = fixer.calls[0]["prompt"]
+    assert "image-info.yml is missing environment" in prompt
+    assert "x86_64" in prompt
+    assert "aarch64" in prompt
+    fixer_report = json.loads(
+        (
+            tmp_path
+            / "evidence"
+            / "fixer-native-dual-round1-attempt1.json"
+        ).read_text()
+    )
+    classification = fixer_report["_input_review"]["classification"]
+    assert classification["x86_64"]["category"] == "image-contract"
+    assert classification["aarch64"]["category"] == "image-contract"
+
+
 def test_round_rejects_passed_report_with_incomplete_check_set(tmp_path):
     from scripts.lib.native_repair import NativeRepairError
 

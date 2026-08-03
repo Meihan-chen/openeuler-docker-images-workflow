@@ -30,6 +30,7 @@ Harness 在 `## Review report to resolve` 下附一个 JSON 对象，字段如�
 - `native_failure` — 门禁失败前的原生失败报告（如果有）
 
 每份原生报告包含 `failed_stage`、`checks`（`null` 表示该项从未执行）、
+以及独立的 `format_check`（上游格式检查的版本、类别和原始输出），
 `failure`、`failure_details`（`command`、`returncode`、`stdout_head`、
 `stdout_tail`）和 `container_evidence`（容器 `state` 与 `logs`）。
 可修改文件清单在 `## Fixer whitelist` 一节，不在本 JSON 内。
