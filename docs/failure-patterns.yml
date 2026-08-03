@@ -14,11 +14,11 @@ patterns:
       identifier is free.
     remediation:
       - Prefer dynamic allocation or reuse a compatible account created by an installed package.
-      - Use a fixed numeric identity only when the upstream contract requires it and Harness-resolved evidence proves the requirement.
+      - Use a fixed numeric identity only when the upstream contract requires it and QA verifies the Creator evidence against Harness-fixed source material.
       - Synchronize runtime ownership and identity assertions when the identity changes.
     prevention: >-
       Require a structured identity decision whose fixed identifiers reference
-      Harness-resolved upstream evidence, then let the native build validate the
+      QA-verified Creator evidence from Harness-fixed upstream material, then let the native build validate the
       final package set.
     verification:
       status: verified
@@ -85,12 +85,12 @@ patterns:
       target application implements asynchronous, cached, placeholder, or
       otherwise application-specific behavior.
     remediation:
-      - Compare the assertion with Harness-resolved evidence from the pinned upstream source.
+      - Compare the assertion with Creator evidence verified by QA against the Harness-fixed upstream source.
       - Replace an unsupported assumption with a semantically verified assertion that covers the same behavior.
       - Do not change a healthy image merely to satisfy an incorrect test expectation.
     prevention: >-
       Require every application command in the shared test entrypoint to
-      reference a Harness-resolved evidence request before QA review.
+      provide Creator evidence for QA to verify against Harness-fixed source material.
     verification:
       status: verified
       sources:

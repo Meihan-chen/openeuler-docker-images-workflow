@@ -40,11 +40,12 @@ official upstream 源码或文档中推导，不得假设固定运行身份、�
 `grep`、`stat` 等通用 shell 工具不算），逐条在固定版本的上游源码或官方文档中确认它在
 **这个应用**里的语义，并把结论写进返回 JSON 的 `command_evidence`。
 
-`command_evidence` 只表达“命令、语义主张、证据 ID”的关系；Creator 不能把自己填写的
-URL 当作已经验证的证据。对应的 `evidence_requests` 必须请求 Harness 从 TaskSpec 同源、
-ref 精确等于 TaskSpec 中的固定 revision 的上游文件中精确解析 locator，每次最多 12 条。
-QA 只以 Harness 返回的 resolved
-evidence bundle 为可信取证结果。
+`command_evidence` 表达“命令、语义主张、证据 ID”的关系；Creator 同时在 `evidence` 中
+直接提供对应的上游原文。每项 evidence 包含一个 claim、一个与 TaskSpec 同源且 ref 精确
+等于固定 revision 的 source，以及 1—2 段从原文件逐字复制的 `excerpts`；每次最多 6 项。
+claim、source、每段 excerpt 分别不超过 512、1024、512 个字符。同一 claim 需要两个位置
+时使用两个 excerpt，不得拼接不连续文本。Harness 固定原文件和哈希，QA 独立验证证据
+真实性与证明力。证据失败不阻断 QA，也不单独触发 Creator 修复。
 
 命令名相同不等于语义相同。兼容某个协议的实现常常只保证协议层可解析，命令行为却不同：
 可能返回后台异步计算的缓存值、可能是空实现的占位命令、可能需要先触发另一条命令。
@@ -187,12 +188,12 @@ main "$@"
       "evidence_id": "command-semantics-001"
     }
   ],
-  "evidence_requests": [
+  "evidence": [
     {
       "id": "command-semantics-001",
       "claim": "待验证的具体命令语义",
       "source": "固定到任务版本或提交 SHA 的 TaskSpec 上游文件 URL",
-      "locator": "能够精确定位实现或说明的符号或短文本"
+      "excerpts": ["直接支持该命令语义的上游原文"]
     }
   ],
   "summary": "...",
@@ -200,9 +201,9 @@ main "$@"
 }
 ```
 
-`command_evidence` 和 `evidence_requests` 都是必填字段。前者必须覆盖 `test.sh` 使用的
-每一条应用命令，三个子字段都不能为空，且每个 `evidence_id` 都必须引用后者中的真实 ID。
-Harness 会解析这些请求，Testcase QA 再逐条核对固定后的证据 bundle。
+`command_evidence` 必须覆盖 `test.sh` 使用的每一条应用命令，命令和语义不能为空；
+`evidence_id` 应引用 `evidence` 中对应的证据。证据元数据不完整不会阻断 QA，但 QA 不会把
+Creator 的引用自动视为已验证结论。
 
 ## 核心约束
 

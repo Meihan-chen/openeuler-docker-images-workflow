@@ -170,12 +170,13 @@ def test_image_prompts_treat_fixed_numeric_identity_as_a_collision_risk():
     # The default is an identity that cannot collide.
     assert "groupadd -r" in image_creator
     assert "useradd -r" in image_creator
-    assert "evidence_requests" in image_creator
+    assert '"evidence"' in image_creator
+    assert '"excerpts"' in image_creator
     assert "creator 不得自行声明" in image_creator
     assert "原生构建" in image_creator
 
     assert "fixed number" in image_qa
-    assert "harness-resolved" in image_qa
+    assert "harness-fixed" in image_qa
     assert "creator cannot prove" in image_qa
     assert "native build is authoritative" in image_qa
 
@@ -283,11 +284,11 @@ def test_testcase_prompts_require_command_semantics_evidence():
     assert "command_evidence" in creator
     assert '"semantics"' in creator
     assert '"evidence_id"' in creator
-    assert "evidence_requests" in creator
-    assert '"locator"' in creator
+    assert '"evidence"' in creator
+    assert '"excerpts"' in creator
 
     assert "command_evidence" in reviewer
-    assert "Harness-resolved evidence" in reviewer
+    assert "Harness-fixed" in reviewer
     assert "not a terminal veto" in reviewer
     assert "asynchronous cache" in reviewer
 
@@ -299,11 +300,40 @@ def test_testcase_qa_issues_must_cite_evidence():
     assert "does not count as a blocker or major" in reviewer
 
 
-def test_creator_prompts_keep_evidence_requests_within_harness_bounds():
+def test_creator_prompts_keep_evidence_within_harness_bounds():
     for name in ("image-creator.md", "testcase-creator.md"):
         prompt = " ".join((AGENTS_DIR / name).read_text().split())
-        assert "最多 12 条" in prompt
-        assert "TaskSpec 中的固定 revision" in prompt
+        assert "最多 6" in prompt
+        assert "1—2" in prompt
+        assert "逐字" in prompt
+        assert "TaskSpec 同源" in prompt
+        assert "固定 revision" in prompt
+
+
+def test_creator_provides_evidence_and_qa_reviews_it_without_a_gate():
+    creators = "\n".join(
+        (AGENTS_DIR / name).read_text()
+        for name in ("image-creator.md", "testcase-creator.md")
+    )
+    reviewers = "\n".join(
+        (AGENTS_DIR / name).read_text()
+        for name in ("image-qa.md", "testcase-qa.md")
+    )
+    normalized_reviewers = " ".join(reviewers.split())
+
+    assert '"excerpts"' in creators
+    assert "locator" not in creators
+    assert "evidence_reviews" in normalized_reviewers
+    assert "must not trigger" in normalized_reviewers
+    assert "original review" in normalized_reviewers
+    assert "Record one actionable concern for every missing command" not in reviewers
+
+
+def test_fixer_does_not_repair_evidence_metadata():
+    fixer = " ".join((AGENTS_DIR / "code-fixer.md").read_text().split())
+
+    assert "证据元数据" in fixer
+    assert "不得为了让证据审核通过" in fixer
 
 
 def test_testcase_prompts_only_defer_shell_syntax_to_the_generation_gate():

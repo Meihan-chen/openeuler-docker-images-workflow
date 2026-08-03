@@ -56,7 +56,7 @@ def _testcase_creator_output(**overrides):
                 "evidence_id": "command-ping-001",
             }
         ],
-        "evidence_requests": [
+        "evidence": [
             {
                 "id": "command-ping-001",
                 "claim": "PING returns PONG once the server accepts connections",
@@ -64,7 +64,7 @@ def _testcase_creator_output(**overrides):
                     "https://github.com/apache/kvrocks/blob/"
                     "v2.16.0/src/commands/cmd_server.cc"
                 ),
-                "locator": "Ping::Execute",
+                "excerpts": ["Ping::Execute"],
             }
         ],
     }
@@ -87,7 +87,7 @@ def _fully_approved_agent(*, image_summary="approved"):
                         "gid": None,
                         "requirement_evidence_ids": [],
                     },
-                    "evidence_requests": [],
+                    "evidence": [],
                 }
             ],
             "image_qa": [
@@ -782,10 +782,13 @@ def test_generation_runs_adversarial_pairs_and_records_evidence(
         "image-qa-round1.json",
         "image-qa-round2.json",
         "image-repair-gates.json",
+        "image-round1-evidence-bundle.json",
+        "image-round2-evidence-bundle.json",
         "precheck-gates.json",
         "testcase-creator.json",
         "testcase-ownership.json",
         "testcase-qa-round1.json",
+        "testcase-round1-evidence-bundle.json",
     ]
     gate_report = json.loads((reports / "gates.json").read_text())
     assert gate_report["status"] == "passed"
@@ -978,7 +981,7 @@ def test_testcase_qa_receives_latest_evidence_after_precheck_repair(tmp_path):
                 "evidence_id": "command-ping-initial",
             }
         ],
-        evidence_requests=[
+        evidence=[
             {
                 "id": "command-ping-initial",
                 "claim": "PING returns PONG",
@@ -986,7 +989,7 @@ def test_testcase_qa_receives_latest_evidence_after_precheck_repair(tmp_path):
                     "https://github.com/apache/kvrocks/blob/"
                     "v2.16.0/src/commands/cmd_server.cc"
                 ),
-                "locator": "Ping::Execute",
+                "excerpts": ["Ping::Execute"],
             }
         ],
     )
@@ -998,7 +1001,7 @@ def test_testcase_qa_receives_latest_evidence_after_precheck_repair(tmp_path):
                 "evidence_id": "command-exists-repaired",
             }
         ],
-        evidence_requests=[
+        evidence=[
             {
                 "id": "command-exists-repaired",
                 "claim": "EXISTS reports whether the exact key exists",
@@ -1006,7 +1009,7 @@ def test_testcase_qa_receives_latest_evidence_after_precheck_repair(tmp_path):
                     "https://github.com/apache/kvrocks/blob/"
                     "v2.16.0/src/commands/cmd_key.cc"
                 ),
-                "locator": "Exists::Execute",
+                "excerpts": ["Exists::Execute"],
             }
         ],
     )
@@ -1439,6 +1442,54 @@ def test_generation_reports_must_be_outside_target_workspace(tmp_path):
         )
 
 
+def test_unavailable_creator_evidence_reaches_qa_without_a_repair_round(tmp_path):
+    from scripts.lib.generation_pipeline import run_generation_pipeline
+
+    workspace = tmp_path / "target"
+    workspace.mkdir()
+    agent = _fully_approved_agent()
+    image_payload = agent.responses["image_creator"][0]
+    image_payload["evidence"] = [
+        {
+            "id": "identity-runtime-001",
+            "claim": "upstream runs as uid 999",
+            "source": (
+                "https://github.com/apache/kvrocks/blob/"
+                "v2.16.0/Dockerfile"
+            ),
+            "excerpts": ["USER 999"],
+        }
+    ]
+    resolver_calls = []
+
+    def unavailable_resolver(**kwargs):
+        resolver_calls.append(kwargs)
+        return {
+            "status": "unavailable",
+            "reason": "source could not be fetched",
+            "entries": [],
+        }
+
+    result = run_generation_pipeline(
+        workspace=workspace,
+        report_dir=tmp_path / "reports",
+        task=_task(),
+        base_sha="1" * 40,
+        executable=tmp_path / "opencode",
+        api_key="deepseek-secret",
+        agent_runner=agent,
+        target_validator=lambda **_: {"status": "passed"},
+        evidence_resolver=unavailable_resolver,
+    )
+
+    assert result.status == "passed"
+    assert len(resolver_calls) >= 1
+    assert resolver_calls[0]["evidence"] == image_payload["evidence"]
+    image_qa_call = next(call for call in agent.calls if call["role"] == "image_qa")
+    assert '"status": "unavailable"' in image_qa_call["prompt"]
+    assert [call["role"] for call in agent.calls].count("image_creator") == 1
+
+
 def test_generation_accepts_a_task_it_has_never_seen(tmp_path):
     """Generation carries no application knowledge, so it must not gate on one.
 
@@ -1464,7 +1515,7 @@ def test_generation_accepts_a_task_it_has_never_seen(tmp_path):
                 "gid": None,
                 "requirement_evidence_ids": [],
             },
-            "evidence_requests": [],
+            "evidence": [],
         }
     ]
     # The QA prompt echoes the Creator's command evidence, so the fixture has
@@ -1479,7 +1530,7 @@ def test_generation_accepts_a_task_it_has_never_seen(tmp_path):
                     "evidence_id": "command-version-001",
                 }
             ],
-            evidence_requests=[
+            evidence=[
                 {
                     "id": "command-version-001",
                     "claim": "caddy version prints the compiled release string",
@@ -1487,7 +1538,7 @@ def test_generation_accepts_a_task_it_has_never_seen(tmp_path):
                         "https://github.com/caddyserver/caddy/blob/"
                         "v2.11.4/cmd/commandfuncs.go"
                     ),
-                    "locator": "cmdVersion",
+                    "excerpts": ["cmdVersion"],
                 }
             ],
         )
@@ -1595,8 +1646,7 @@ def test_phase1_prompts_pin_task_paths_without_injecting_app_implementation():
     assert "downloads, archives and temporary files" in prompt
     assert "Your final response MUST be exactly one JSON object" in prompt
     assert (
-        "documented `success`, `files_created`, `identity_decision`, and "
-        "`evidence_requests` keys"
+        "documented `success`, `files_created`, and `identity_decision` keys"
     ) in prompt
     assert "tool output is not the final response" in prompt
     assert "deepseek-secret" not in prompt
@@ -1808,7 +1858,7 @@ def test_testcase_qa_prompt_carries_the_creator_command_evidence(tmp_path):
                     "evidence_id": "command-dbsize-001",
                 }
             ],
-            evidence_requests=[
+            evidence=[
                 {
                     "id": "command-dbsize-001",
                     "claim": "DBSIZE returns a cached count",
@@ -1816,19 +1866,25 @@ def test_testcase_qa_prompt_carries_the_creator_command_evidence(tmp_path):
                         "https://github.com/apache/kvrocks/blob/"
                         "v2.16.0/src/commands/cmd_server.cc"
                     ),
-                    "locator": "DBSize::Execute",
+                    "excerpts": ["DBSize::Execute"],
                 }
             ],
         )
     ]
 
-    resolved = {
-        "status": "resolved",
+    fixed = {
+        "status": "available",
         "entries": [
             {
                 "id": "command-dbsize-001",
-                "resolved": True,
-                "excerpt": "DBSize::Execute reads the cached key count",
+                "fetch_status": "available",
+                "excerpt_checks": [
+                    {
+                        "index": 0,
+                        "found": True,
+                        "context": "DBSize::Execute reads the cached key count",
+                    }
+                ],
                 "sha256": "b" * 64,
             }
         ],
@@ -1843,20 +1899,21 @@ def test_testcase_qa_prompt_carries_the_creator_command_evidence(tmp_path):
         api_key="deepseek-secret",
         agent_runner=agent,
         target_validator=lambda **_: {"status": "passed"},
-        evidence_resolver=lambda **_: resolved,
+        evidence_resolver=lambda **_: fixed,
     )
 
     image_qa_prompt = agent.calls[1]["prompt"]
     testcase_qa_prompt = agent.calls[3]["prompt"]
     assert "Testcase Creator command evidence" in testcase_qa_prompt
     assert "refreshed by DBSIZE SCAN" in testcase_qa_prompt
-    assert "Harness-resolved evidence bundle" in testcase_qa_prompt
+    assert "Harness-fixed Creator evidence bundle" in testcase_qa_prompt
     assert "DBSize::Execute reads the cached key count" in testcase_qa_prompt
+    assert "Record an actual candidate concern" not in testcase_qa_prompt
     # Image QA reviews image-owned content and never sees the test evidence.
     assert "Testcase Creator command evidence" not in image_qa_prompt
 
 
-def test_testcase_qa_receives_harness_resolved_evidence_bundle(tmp_path):
+def test_testcase_qa_receives_harness_fixed_evidence_bundle(tmp_path):
     from scripts.lib.generation_pipeline import run_generation_pipeline
 
     workspace = tmp_path / "target"
@@ -1873,7 +1930,7 @@ def test_testcase_qa_receives_harness_resolved_evidence_bundle(tmp_path):
                     "evidence_id": "command-exists-001",
                 }
             ],
-            evidence_requests=[
+            evidence=[
                 {
                     "id": "command-exists-001",
                     "claim": "EXISTS reports whether the exact key exists",
@@ -1881,28 +1938,34 @@ def test_testcase_qa_receives_harness_resolved_evidence_bundle(tmp_path):
                         "https://github.com/apache/kvrocks/blob/"
                         "v2.16.0/src/commands/cmd_key.cc"
                     ),
-                    "locator": "Exists::Execute",
+                    "excerpts": ["Exists::Execute"],
                 }
             ]
         )
     ]
-    resolved = {
-        "status": "resolved",
+    fixed = {
+        "status": "available",
         "scenario": "new-image",
         "entries": [
             {
                 "id": "command-exists-001",
-                "resolved": True,
-                "excerpt": "Exists::Execute returns the number of keys found",
+                "fetch_status": "available",
+                "excerpt_checks": [
+                    {
+                        "index": 0,
+                        "found": True,
+                        "context": "Exists::Execute returns the number of keys found",
+                    }
+                ],
                 "sha256": "a" * 64,
             }
         ],
     }
     resolver_calls = []
 
-    def resolver(*, task, requests):
-        resolver_calls.append((task, requests))
-        return resolved
+    def resolver(*, task, evidence):
+        resolver_calls.append((task, evidence))
+        return fixed
 
     run_generation_pipeline(
         workspace=workspace,
@@ -1919,80 +1982,174 @@ def test_testcase_qa_receives_harness_resolved_evidence_bundle(tmp_path):
     testcase_qa_prompt = next(
         call["prompt"] for call in agent.calls if call["role"] == "testcase_qa"
     )
-    assert "Harness-resolved evidence bundle" in testcase_qa_prompt
+    assert "Harness-fixed Creator evidence bundle" in testcase_qa_prompt
     assert "Exists::Execute returns the number of keys found" in testcase_qa_prompt
-    assert resolver_calls[0][1][0]["id"] == "command-exists-001"
+    assert resolver_calls[-1][1][0]["id"] == "command-exists-001"
     assert json.loads(
         (
             tmp_path
             / "evidence"
-            / "testcase-round1-resolved-evidence.json"
+            / "testcase-round1-evidence-bundle.json"
         ).read_text()
-    ) == resolved
+    ) == fixed
 
 
-def test_unresolved_creator_evidence_stops_before_qa_judgment(tmp_path):
-    from scripts.lib.generation_pipeline import (
-        GenerationPipelineError,
-        run_generation_pipeline,
-    )
+def test_unavailable_creator_evidence_continues_to_qa_judgment(tmp_path):
+    from scripts.lib.generation_pipeline import run_generation_pipeline
 
     workspace = tmp_path / "target"
     workspace.mkdir()
     agent = _fully_approved_agent()
-    unresolved = {
-        "status": "unresolved",
+    unavailable = {
+        "status": "unavailable",
         "entries": [
             {
                 "id": "command-ping-001",
-                "resolved": False,
-                "reason": "locator was not found",
+                "fetch_status": "unavailable",
+                "reason": "source could not be fetched",
             }
         ],
     }
 
-    with pytest.raises(GenerationPipelineError, match="evidence.*unresolved"):
-        run_generation_pipeline(
-            workspace=workspace,
-            report_dir=tmp_path / "evidence",
-            task=_task(),
-            base_sha="1" * 40,
-            executable=tmp_path / "opencode",
-            api_key="deepseek-secret",
-            agent_runner=agent,
-            target_validator=lambda **_: {"status": "passed"},
-            evidence_resolver=lambda **_: unresolved,
-        )
+    result = run_generation_pipeline(
+        workspace=workspace,
+        report_dir=tmp_path / "evidence",
+        task=_task(),
+        base_sha="1" * 40,
+        executable=tmp_path / "opencode",
+        api_key="deepseek-secret",
+        agent_runner=agent,
+        target_validator=lambda **_: {"status": "passed"},
+        evidence_resolver=lambda **_: unavailable,
+    )
 
-    assert "testcase_qa" not in [call["role"] for call in agent.calls]
+    assert result.status == "passed"
+    assert "testcase_qa" in [call["role"] for call in agent.calls]
     assert json.loads(
         (
             tmp_path
             / "evidence"
-            / "testcase-round1-resolved-evidence.json"
+            / "testcase-round1-evidence-bundle.json"
         ).read_text()
-    ) == unresolved
+    ) == unavailable
 
 
-def test_qa_prompt_has_a_final_size_limit_after_evidence_is_added(tmp_path):
-    from scripts.lib.generation_pipeline import GenerationPipelineError, _qa_prompt
+def test_evidence_only_needs_fix_does_not_start_a_creator_repair(tmp_path):
+    from scripts.lib.generation_pipeline import run_generation_pipeline
+
+    workspace = tmp_path / "target"
+    workspace.mkdir()
+    agent = _fully_approved_agent()
+    agent.responses["image_creator"].append(
+        dict(agent.responses["image_creator"][0])
+    )
+    agent.responses["image_qa"] = [
+        {
+            "status": "needs_fix",
+            "issues": [],
+            "evidence_reviews": [
+                {
+                    "evidence_id": "identity-001",
+                    "status": "unavailable",
+                    "reason": "source could not be fetched",
+                }
+            ],
+            "summary": "candidate is sound but evidence is unavailable",
+        },
+        _approved_image(),
+    ]
+
+    result = run_generation_pipeline(
+        workspace=workspace,
+        report_dir=tmp_path / "evidence",
+        task=_task(),
+        base_sha="1" * 40,
+        executable=tmp_path / "opencode",
+        api_key="deepseek-secret",
+        agent_runner=agent,
+        target_validator=lambda **_: {"status": "passed"},
+    )
+
+    roles = [call["role"] for call in agent.calls]
+    assert result.status == "passed"
+    assert result.qa_fix_rounds == 0
+    assert roles.count("image_creator") == 1
+    assert roles.count("image_qa") == 1
+
+
+def test_large_evidence_remains_reviewable_in_the_bounded_qa_prompt(tmp_path):
+    from scripts.lib.generation_pipeline import _qa_prompt
 
     workspace = tmp_path / "target"
     tests = workspace / "Database" / "kvrocks" / "tests"
     tests.mkdir(parents=True)
-    (tests / "goss.yaml").write_text("#" + "x" * 59_000)
+    (tests / "goss.yaml").write_text("#" + "c" * 59_000)
 
-    with pytest.raises(GenerationPipelineError, match="QA prompt is too large"):
-        _qa_prompt(
-            role="testcase_qa",
-            workspace=workspace,
-            task=_task(),
-            base_sha="1" * 40,
-            resolved_evidence={
-                "status": "resolved",
-                "entries": [{"excerpt": "y" * 45_000}],
-            },
-        )
+    creator_evidence = [
+        {
+            "id": f"evidence-{index}",
+            "claim": f"claim-{index} " + "x" * 500,
+            "source": (
+                "https://github.com/apache/kvrocks/blob/"
+                f"v2.16.0/docs/evidence-{index}.md"
+            ),
+            "excerpts": [
+                f"excerpt-{index}-{excerpt} " + "y" * 490
+                for excerpt in range(2)
+            ],
+        }
+        for index in range(6)
+    ]
+    fixed_entries = [
+        {
+            **creator_evidence[index],
+            "id": f"evidence-{index}",
+            "fetch_status": "available",
+            "sha256": str(index) * 64,
+            "excerpt_checks": [
+                {
+                    "index": excerpt,
+                    "found": True,
+                    "match_method": "exact",
+                    "context": f"context-{index}-{excerpt} " + "z" * 240,
+                }
+                for excerpt in range(2)
+            ],
+        }
+        for index in range(6)
+    ]
+
+    prompt = _qa_prompt(
+        role="testcase_qa",
+        workspace=workspace,
+        task=_task(),
+        base_sha="1" * 40,
+        creator_payload={
+            "success": True,
+            "files_created": ["Database/kvrocks/tests/goss.yaml"],
+            "command_evidence": [
+                {
+                    "command": f"command-{index}",
+                    "semantics": f"semantics-{index}",
+                    "evidence_id": f"evidence-{index}",
+                }
+                for index in range(6)
+            ],
+            "evidence": creator_evidence,
+        },
+        evidence_bundle={
+            "status": "available",
+            "entries": fixed_entries,
+        },
+    )
+
+    assert len(prompt) <= 100_000
+    assert "compacted" not in prompt
+    for index in range(6):
+        assert f"claim-{index}" in prompt
+        assert f"excerpt-{index}-0" in prompt
+        assert f"context-{index}-0" in prompt
+        assert str(index) * 64 in prompt
 
 
 def test_fixer_prompt_inlines_only_the_matching_failure_patterns(tmp_path):

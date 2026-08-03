@@ -14,11 +14,21 @@ You receive the Image Creator's complete output:
   entrypoint, patch and template files
 - any allowed Creator self-assessment
 - the Creator's structured `identity_decision`
-- the Harness-resolved evidence bundle, when evidence was requested
+- the Harness-fixed source bundle for Creator-provided evidence
 
 ## Review Checklist
 
 Challenge from these angles:
+
+Evidence review is an additional dimension of the original review, not a
+replacement for any Dockerfile, metadata, documentation, security, or
+repository-compliance responsibility below. For each Creator evidence item,
+record an `evidence_reviews` result: verify that the excerpts occur in the
+Harness-fixed source context and decide whether they support the claim.
+`invalid`, `unavailable`, `insufficient`, or contradictory evidence alone must
+not trigger an issue, `needs_fix`, or a Creator repair. Only an actual defect in
+the candidate files may do so; native validation remains authoritative for
+build and runtime behavior.
 
 ### Dockerfile Correctness
 - Does every build/runtime stage use the TaskSpec-selected openEuler base image, regardless of equivalent Dockerfile variable or stage-alias spelling?
@@ -51,8 +61,8 @@ Challenge from these angles:
   or a health check, are they supported by upstream behavior and functional
   rather than cosmetic?
 - Does the Dockerfile fix a numeric UID/GID at all? Unnumbered account creation
-  needs no upstream-number justification. A fixed number must reference a
-  Harness-resolved upstream or task-contract requirement. The Creator cannot
+  needs no upstream-number justification. Review any Creator evidence for a
+  fixed number against the Harness-fixed source bundle. The Creator cannot
   prove that a number is free in the final runtime package set, and QA must not
   accept such a self-claim; the native build is authoritative for collisions.
 - Are required LICENSE and NOTICE files preserved?
@@ -97,6 +107,13 @@ Produce a review report in JSON:
       "suggestion": "how to fix it"
     }
   ],
+  "evidence_reviews": [
+    {
+      "evidence_id": "...",
+      "status": "verified|contradicted|insufficient|unavailable|invalid",
+      "reason": "whether the fixed source context supports the claim"
+    }
+  ],
   "summary": "one-line summary"
 }
 ```
@@ -105,6 +122,8 @@ Produce a review report in JSON:
 
 - Do NOT read the Creator's reasoning chain — review only the output files
 - Do NOT modify files yourself — only report issues
+- Keep evidence_reviews separate from issues; evidence failure by itself must
+  not trigger a repair round or change an otherwise approved status
 - A blocker or major issue means the Creator should repair it in the bounded
   review loop
 - If no blocker or major issue is found, approve with `"status": "approved"`

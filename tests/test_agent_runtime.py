@@ -452,7 +452,7 @@ def test_shared_legacy_adversarial_entrypoint_records_disagreement_and_continues
                 "gid": None,
                 "requirement_evidence_ids": [],
             },
-            "evidence_requests": [],
+            "evidence": [],
         }
     )
     responses = [
@@ -689,7 +689,7 @@ def _testcase_creator_payload(**overrides):
                 "evidence_id": "command-get-001",
             }
         ],
-        "evidence_requests": [
+        "evidence": [
             {
                 "id": "command-get-001",
                 "claim": "GET returns the value stored for the key",
@@ -697,7 +697,7 @@ def _testcase_creator_payload(**overrides):
                     "https://github.com/apache/kvrocks/blob/"
                     "v2.16.0/src/commands/cmd_string.cc"
                 ),
-                "locator": "Get::Execute",
+                "excerpts": ["Get::Execute"],
             }
         ],
     }
@@ -724,7 +724,6 @@ def _run_testcase_creator(tmp_path, payload):
             "success",
             "files_created",
             "command_evidence",
-            "evidence_requests",
         ),
         runner=runner,
     )
@@ -754,7 +753,7 @@ def test_testcase_contract_rejects_empty_command_evidence(tmp_path):
         )
 
 
-@pytest.mark.parametrize("field", ["command", "semantics", "evidence_id"])
+@pytest.mark.parametrize("field", ["command", "semantics"])
 def test_testcase_contract_rejects_command_evidence_missing_a_field(
     tmp_path,
     field,
@@ -775,7 +774,7 @@ def test_testcase_contract_rejects_command_evidence_missing_a_field(
         )
 
 
-def _run_image_creator(tmp_path, identity_decision, evidence_requests=None):
+def _run_image_creator(tmp_path, identity_decision, evidence=None):
     from scripts.lib.agent_runtime import run_agent
 
     executable = _executable(tmp_path)
@@ -785,7 +784,7 @@ def _run_image_creator(tmp_path, identity_decision, evidence_requests=None):
         "success": True,
         "files_created": ["Database/kvrocks/meta.yml"],
         "identity_decision": identity_decision,
-        "evidence_requests": evidence_requests or [],
+        "evidence": evidence or [],
     }
     event = {"type": "text", "part": {"text": json.dumps(payload)}}
     runner = RecordingRunner(_completed(stdout=json.dumps(event) + "\n"))
@@ -799,7 +798,6 @@ def _run_image_creator(tmp_path, identity_decision, evidence_requests=None):
             "success",
             "files_created",
             "identity_decision",
-            "evidence_requests",
         ),
         runner=runner,
     )
@@ -823,20 +821,19 @@ def test_image_contract_accepts_dynamic_identity_decision(tmp_path):
 def test_image_contract_rejects_fixed_identity_without_requirement_evidence(
     tmp_path,
 ):
-    from scripts.lib.agent_runtime import AgentRuntimeError
+    result = _run_image_creator(
+        tmp_path,
+        {
+            "mode": "fixed",
+            "user": "kvrocks",
+            "group": "kvrocks",
+            "uid": 991,
+            "gid": 991,
+            "requirement_evidence_ids": [],
+        },
+    )
 
-    with pytest.raises(AgentRuntimeError, match="fixed identity.*evidence"):
-        _run_image_creator(
-            tmp_path,
-            {
-                "mode": "fixed",
-                "user": "kvrocks",
-                "group": "kvrocks",
-                "uid": 991,
-                "gid": 991,
-                "requirement_evidence_ids": [],
-            },
-        )
+    assert result.payload["identity_decision"]["mode"] == "fixed"
 
 
 def test_image_contract_rejects_dynamic_identity_with_numeric_ids(tmp_path):
@@ -871,112 +868,110 @@ def test_image_contract_accepts_fixed_identity_referencing_evidence_request(
         "id": "identity-001",
         "claim": "upstream requires uid 10001",
         "source": "https://github.com/acme/example/blob/v1.2.3/Dockerfile",
-        "locator": "USER 10001",
+        "excerpts": ["USER 10001"],
     }
 
     result = _run_image_creator(tmp_path, decision, [request])
 
-    assert result.payload["evidence_requests"] == [request]
+    assert result.payload["evidence"] == [request]
 
 
-def test_image_contract_rejects_unknown_identity_evidence_id(tmp_path):
-    from scripts.lib.agent_runtime import AgentRuntimeError
-
-    with pytest.raises(AgentRuntimeError, match="unknown evidence id"):
-        _run_image_creator(
-            tmp_path,
+def test_image_contract_leaves_unknown_evidence_id_for_qa(tmp_path):
+    result = _run_image_creator(
+        tmp_path,
+        {
+            "mode": "fixed",
+            "user": "example",
+            "group": "example",
+            "uid": 10001,
+            "gid": 10001,
+            "requirement_evidence_ids": ["identity-missing"],
+        },
+        [
             {
-                "mode": "fixed",
-                "user": "example",
-                "group": "example",
-                "uid": 10001,
-                "gid": 10001,
-                "requirement_evidence_ids": ["identity-missing"],
-            },
-            [
+                "id": "identity-other",
+                "claim": "another claim",
+                "source": (
+                    "https://github.com/acme/example/blob/v1.2.3/README.md"
+                ),
+                "excerpts": ["runtime user"],
+            }
+        ],
+    )
+
+    assert result.payload["identity_decision"]["requirement_evidence_ids"] == [
+        "identity-missing"
+    ]
+
+
+def test_testcase_contract_leaves_unknown_evidence_id_for_qa(tmp_path):
+    result = _run_testcase_creator(
+        tmp_path,
+        _testcase_creator_payload(
+            command_evidence=[
                 {
-                    "id": "identity-other",
-                    "claim": "another claim",
-                    "source": (
-                        "https://github.com/acme/example/blob/v1.2.3/README.md"
-                    ),
-                    "locator": "runtime user",
+                    "command": "redis-cli EXISTS key",
+                    "semantics": "returns whether the key exists",
+                    "evidence_id": "command-missing",
                 }
-            ],
-        )
+            ]
+        ),
+    )
+
+    assert result.payload["command_evidence"][0]["evidence_id"] == "command-missing"
 
 
-def test_testcase_contract_rejects_unknown_command_evidence_id(tmp_path):
-    from scripts.lib.agent_runtime import AgentRuntimeError
-
-    with pytest.raises(AgentRuntimeError, match="unknown evidence id"):
-        _run_testcase_creator(
-            tmp_path,
-            _testcase_creator_payload(
-                command_evidence=[
-                    {
-                        "command": "redis-cli EXISTS key",
-                        "semantics": "returns whether the key exists",
-                        "evidence_id": "command-missing",
-                    }
-                ]
-            ),
-        )
-
-
-def test_creator_contract_rejects_more_than_twelve_evidence_requests(tmp_path):
-    from scripts.lib.agent_runtime import AgentRuntimeError
-
-    requests = [
+def test_creator_contract_leaves_too_many_evidence_entries_for_qa(tmp_path):
+    evidence = [
         {
             "id": f"evidence-{index}",
             "claim": "one bounded claim",
             "source": (
                 "https://github.com/acme/example/blob/v1.2.3/README.md"
             ),
-            "locator": f"claim {index}",
+            "excerpts": [f"claim {index}"],
         }
         for index in range(13)
     ]
 
-    with pytest.raises(AgentRuntimeError, match="at most 12"):
-        _run_image_creator(
-            tmp_path,
+    result = _run_image_creator(
+        tmp_path,
+        {
+            "mode": "dynamic",
+            "user": "example",
+            "group": "example",
+            "uid": None,
+            "gid": None,
+            "requirement_evidence_ids": [],
+        },
+        evidence,
+    )
+
+    assert len(result.payload["evidence"]) == 13
+
+
+def test_creator_contract_leaves_oversized_evidence_for_qa(tmp_path):
+    result = _run_image_creator(
+        tmp_path,
+        {
+            "mode": "dynamic",
+            "user": "example",
+            "group": "example",
+            "uid": None,
+            "gid": None,
+            "requirement_evidence_ids": [],
+        },
+        [
             {
-                "mode": "dynamic",
-                "user": "example",
-                "group": "example",
-                "uid": None,
-                "gid": None,
-                "requirement_evidence_ids": [],
-            },
-            requests,
-        )
+                "id": "too-large",
+                "claim": "x" * 4001,
+                "source": (
+                    "https://github.com/acme/example/blob/"
+                    "v1.2.3/README.md"
+                ),
+                "excerpts": ["claim"],
+            }
+        ],
+    )
 
-
-def test_creator_contract_rejects_oversized_evidence_fields(tmp_path):
-    from scripts.lib.agent_runtime import AgentRuntimeError
-
-    with pytest.raises(AgentRuntimeError, match="claim.*4000"):
-        _run_image_creator(
-            tmp_path,
-            {
-                "mode": "dynamic",
-                "user": "example",
-                "group": "example",
-                "uid": None,
-                "gid": None,
-                "requirement_evidence_ids": [],
-            },
-            [
-                {
-                    "id": "too-large",
-                    "claim": "x" * 4001,
-                    "source": (
-                        "https://github.com/acme/example/blob/"
-                        "v1.2.3/README.md"
-                    ),
-                    "locator": "claim",
-                }
-            ],
-        )
+    assert len(result.payload["evidence"][0]["claim"]) == 4001

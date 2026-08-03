@@ -20,7 +20,7 @@ from scripts.lib.candidate_bundle import (
     CandidateBundle,
     CandidateBundleError,
 )
-from scripts.lib.evidence_resolver import resolve_evidence_requests
+from scripts.lib.evidence_resolver import freeze_creator_evidence
 from scripts.lib.generation_pipeline import (
     GenerationPipelineError,
     lint_dockerfile,
@@ -373,7 +373,7 @@ def cmd_phase1_generate(args: argparse.Namespace) -> None:
             executable=args.hadolint,
             dockerfile=dockerfile,
         ),
-        evidence_resolver=resolve_evidence_requests,
+        evidence_resolver=freeze_creator_evidence,
     )
     _print_json(
         {

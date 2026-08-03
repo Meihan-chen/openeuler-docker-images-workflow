@@ -10,7 +10,7 @@ You receive the Testcase Creator's complete output:
 - optional `test_helpers.sh` content, when generated
 - the shared `test.sh`
 - the Creator's `command_evidence`, under its own heading
-- the Harness-resolved evidence bundle, when evidence was requested
+- the Harness-fixed source bundle for Creator-provided evidence
 - any allowed Creator self-assessment
 - The Dockerfile (read-only, for context)
 
@@ -26,22 +26,27 @@ Challenge from these angles:
 
 ### Command Semantics (check this first)
 
-The Creator's `command_evidence` claims a meaning and references an evidence
-ID for every application command the tests rely on. The Harness-resolved
-evidence bundle is authoritative; a Creator-provided request or URL alone is
-not verification. Same name does not mean same behavior:
+The Creator's `command_evidence` claims a meaning and references Creator-
+provided evidence for every application command the tests rely on. The Harness
+fixes the cited source bytes and hashes; you validate whether the excerpts are
+authentic and whether their context supports the claim. This evidence review
+is an additional dimension of the original review and does not replace any
+coverage, false-positive, correctness, or lifecycle check below. Same name does
+not mean same behavior:
 a protocol-compatible implementation may answer from an asynchronous cache,
 stub a command out entirely, or require a separate trigger command first.
 
 - Does `command_evidence` cover **every** application command executed in
-  `test.sh`? Record one actionable concern for every missing command.
+  `test.sh`? Record a missing entry as `insufficient` in `evidence_reviews`
+  and continue the full test review; missing evidence alone is not an issue.
 - Does each claimed meaning actually support the assertion built on it? If an
   assertion reads a value the application computes asynchronously or lazily,
   the assertion is wrong even when the image is healthy; record it under
-  `false_positive` with the resolved evidence excerpt.
-- Does every `evidence_id` resolve to a pinned, task-upstream entry with a
-  matching locator? An unresolved or mismatched entry is a concern, not
-  verified evidence.
+  `false_positive` with the fixed source context.
+- Record every evidence judgment in `evidence_reviews`, separate from issues.
+  Invalid, unavailable, insufficient, or contradictory evidence alone must not
+  trigger an issue, `needs_fix`, or a Creator repair. Only an actual defect in
+  the candidate tests may do so.
 
 `needs_fix` is review feedback, not a terminal veto. The Harness records a
 second-round disagreement and continues to deterministic/native validation;
@@ -111,6 +116,13 @@ Produce a review report in JSON:
       "suggestion": "how to fix or what to add"
     }
   ],
+  "evidence_reviews": [
+    {
+      "evidence_id": "...",
+      "status": "verified|contradicted|insufficient|unavailable|invalid",
+      "reason": "whether the fixed source context supports the claim"
+    }
+  ],
   "coverage_score": 0.0-1.0,
   "summary": "one-line summary"
 }
@@ -125,6 +137,8 @@ you suspect: "the Dockerfile healthcheck uses X, so Y is unproven" is evidence;
 
 - Do NOT read the Testcase Creator's reasoning chain — review only the output files
 - Do NOT modify files yourself — only report issues
+- Keep evidence_reviews separate from issues; evidence failure by itself must
+  not trigger a repair round or change an otherwise approved status
 - An issue without `evidence` does not count as a blocker or major; either
   supply the evidence or drop the issue
 - A blocker or major gap means the Creator should repair the suite in the

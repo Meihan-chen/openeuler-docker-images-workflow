@@ -97,8 +97,8 @@ doc/ is optional。完全不生成 `doc/` 是合法结果；if any doc/ content 
 让系统分配空闲 ID。这避免数字冲突，但不自动解决名称冲突；如果 runtime 包已经创建了
 同名身份，应在确认其用户、组和目录权限符合应用契约后选择 `reuse_existing`，不能重复创建。
 
-只有上游或任务契约要求稳定的数字身份时，才固定 UID/GID，并通过 `evidence_requests`
-请求 Harness 固定该要求。Creator 不得自行声明某个数字在最终 runtime 镜像中空闲；安装包
+只有上游或任务契约要求稳定的数字身份时，才固定 UID/GID，并在 `evidence` 中提供支持该
+要求的上游原文。Creator 不得自行声明某个数字在最终 runtime 镜像中空闲；安装包
 可能引入额外系统账户，只有使用最终包集合的原生构建能验证是否冲突。不要用探测后跳过
 建组的写法规避冲突，因为后续按组名创建用户仍可能失败。
 
@@ -106,14 +106,15 @@ doc/ is optional。完全不生成 `doc/` 是合法结果；if any doc/ content 
 
 最终 JSON 必须包含结构化 `identity_decision`。`mode` 只能是 `dynamic`、`fixed` 或
 `reuse_existing`；动态分配和复用已有身份时 `uid`/`gid` 为 `null`。固定数字时必须填写
-正整数 UID/GID，并在 `requirement_evidence_ids` 中引用本次 `evidence_requests` 的 ID；
+正整数 UID/GID，并在 `requirement_evidence_ids` 中引用本次 `evidence` 的 ID；
 数字是否可用由后续原生构建判定。
 
-Creator 只能提交待取证的 `evidence_requests`，不能自行声明链接内容已经得到验证。每项请求
-必须包含稳定 ID、待证明的 claim、与 TaskSpec 同源且 ref 精确等于 TaskSpec 中的固定 revision
-的 source，以及需要 Harness 精确定位的 locator；每次最多 12 条。Harness 会独立获取、截取
-并哈希内容；只有它返回的
-resolved evidence 才能作为 QA 判断依据。
+Creator 负责在 `evidence` 中直接提供证据，而不是提交取证请求。每项包含 1 个 claim、
+1 个与 TaskSpec 同源且 ref 精确等于固定 revision 的 source，以及 1—2 段从原文件逐字
+复制的 `excerpts`；每次最多 6 项。claim、source、每段 excerpt 分别不超过 512、1024、
+512 个字符。一项 claim 可以用两段原文共同证明，不得拼接不连续文本。Harness 只负责
+下载、哈希和逐字匹配，QA 判断原文是否支持 claim。证据缺失、格式错误、网络失败或原文
+不匹配不会阻断 QA，也不会单独触发修复轮次。
 
 **openEuler 包名映射（Debian→RPM）：** libssl-dev→openssl-devel, build-essential→gcc gcc-c++ make, shadow→shadow-utils, python3-dev→python3-devel, libcurl4-openssl-dev→libcurl-devel, libffi-dev→libffi-devel
 
@@ -160,12 +161,15 @@ Pillow 占位图伪装官方 logo，也禁止使用 AI 生成 logo。
     "gid": null,
     "requirement_evidence_ids": []
   },
-  "evidence_requests": [
+  "evidence": [
     {
       "id": "identity-requirement-001",
       "claim": "上游要求固定数字 UID/GID",
       "source": "固定到任务版本或提交 SHA 的上游文件 URL",
-      "locator": "能够精确定位该要求的符号或短文本"
+      "excerpts": [
+        "创建固定 UID/GID 的上游原文",
+        "切换到该运行身份的上游原文"
+      ]
     }
   ],
   "summary": "...",

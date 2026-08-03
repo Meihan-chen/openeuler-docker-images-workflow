@@ -15,7 +15,13 @@ from scripts.lib.agent_runtime import (
     SCRATCH_DIR,
     AgentResult,
     AgentRuntimeError,
+    qa_requests_repair,
     run_agent,
+)
+from scripts.lib.evidence_resolver import (
+    creator_result_for_qa,
+    render_qa_evidence,
+    resolve_advisory_evidence,
 )
 from scripts.lib.failure_classification import classify_failure
 from scripts.lib.failure_knowledge import FailureKnowledgeError, render_knowledge
@@ -44,20 +50,18 @@ _REQUIRED_KEYS = {
         "success",
         "files_created",
         "identity_decision",
-        "evidence_requests",
     ),
     "image_qa": ("status", "issues", "summary"),
     "testcase_creator": (
         "success",
         "files_created",
         "command_evidence",
-        "evidence_requests",
     ),
     "testcase_qa": ("status", "issues", "coverage_score", "summary"),
     "fixer": ("success", "changes"),
 }
-# QA receives a bounded candidate snapshot and verified evidence. Evidence
-# resolution has its own wall-clock budget and completes before this timeout.
+# QA receives a bounded candidate snapshot and Harness-fixed source material.
+# Evidence fetching has its own wall-clock budget and completes before this timeout.
 _QA_TIMEOUT_SECONDS = 900
 _DEFAULT_AGENT_TIMEOUT_SECONDS = 1800
 _QA_SNAPSHOT_MAX_CHARS = 64_000
@@ -347,7 +351,7 @@ def _qa_prompt(
     base_sha: str,
     previous_review: Mapping[str, object] | None = None,
     creator_payload: Mapping[str, object] | None = None,
-    resolved_evidence: Mapping[str, object] | None = None,
+    evidence_bundle: Mapping[str, object] | None = None,
 ) -> str:
     app_root = workspace / task.domain / task.app
     image_root = app_root / task.version / task.os_version
@@ -427,12 +431,13 @@ def _qa_prompt(
                 "\n## Image Creator identity decision\n\n"
                 "The JSON below is the latest complete Creator result. "
                 "Review its structured identity decision against the Dockerfile and "
-                "the trusted evidence supplied by the harness. Native build "
+                "the source material fixed by the Harness. Creator evidence "
+                "is a claim to review, not a trusted result. Native build "
                 "remains authoritative for whether identity creation "
                 "actually succeeds.\n\n"
                 "```json\n"
                 + json.dumps(
-                    creator_payload,
+                    creator_result_for_qa(creator_payload),
                     ensure_ascii=False,
                     indent=2,
                     sort_keys=True,
@@ -447,12 +452,13 @@ def _qa_prompt(
                 "The JSON below is the latest complete Creator result. The "
                 "Creator claims these semantics for the application "
                 "commands the tests rely on. Compare each claim with the "
-                "Harness-resolved evidence below; do not treat the Creator's "
-                "citation alone as verification. Record a concern for any "
-                "application command used in the tests that is missing.\n\n"
+                "Harness-fixed source bundle below; do not treat the Creator's "
+                "citation alone as verification. Record an actual candidate "
+                "issue only when the test files themselves are defective. "
+                "Missing command evidence belongs only in `evidence_reviews`.\n\n"
                 "```json\n"
                 + json.dumps(
-                    creator_payload,
+                    creator_result_for_qa(creator_payload),
                     ensure_ascii=False,
                     indent=2,
                     sort_keys=True,
@@ -460,22 +466,8 @@ def _qa_prompt(
                 + "\n```\n"
             )
     harness_evidence = ""
-    if isinstance(resolved_evidence, Mapping):
-        harness_evidence = (
-            "\n## Harness-resolved evidence bundle\n\n"
-            "This content was fetched and hashed by the Harness from the "
-            "TaskSpec upstream. Use `resolved`, `excerpt`, and `sha256` to "
-            "adjudicate Creator claims. The deterministic evidence gate "
-            "prevents unresolved or rejected bundles from reaching QA.\n\n"
-            "```json\n"
-            + json.dumps(
-                resolved_evidence,
-                ensure_ascii=False,
-                indent=2,
-                sort_keys=True,
-            )
-            + "\n```\n"
-        )
+    if isinstance(evidence_bundle, Mapping):
+        harness_evidence = render_qa_evidence(evidence_bundle)
     prompt = (
         build_role_prompt(role=role, task=task, base_sha=base_sha)
         + creator_evidence
@@ -490,7 +482,7 @@ def _qa_prompt(
     )
     if len(prompt) > _QA_PROMPT_MAX_CHARS:
         raise GenerationPipelineError(
-            "QA prompt is too large after adding resolved evidence"
+            "QA prompt is too large for the bounded review"
         )
     return prompt
 
@@ -660,7 +652,7 @@ def _review_pair(
                 base_sha=base_sha,
                 previous_review=previous_review,
                 creator_payload=creator,
-                resolved_evidence=evidence,
+                evidence_bundle=evidence,
             )
         except GenerationPipelineError as error:
             _write_report(
@@ -701,6 +693,15 @@ def _review_pair(
         )
     if review.payload.get("status") != "needs_fix":
         raise GenerationPipelineError(f"{qa_role} returned an invalid status")
+    if not qa_requests_repair(review.payload):
+        log(
+            "review",
+            f"ADVISORY {qa_role} round=1 evidence-only needs_fix ignored",
+        )
+        return ReviewPairResult(
+            fix_rounds=0,
+            creator_payload=creator_payload,
+        )
 
     log("review", f"NEEDS_FIX {qa_role} round=1")
     log("repair", f"START {creator_role} round=2")
@@ -757,7 +758,7 @@ def _review_pair(
     if second_status == "approved":
         log("review", f"PASS {qa_role} round=2")
         disagreement = None
-    elif second_status == "needs_fix":
+    elif second_status == "needs_fix" and qa_requests_repair(second.payload):
         log(
             "review",
             f"DISAGREEMENT {qa_role} round=2; continue=local_validation",
@@ -769,6 +770,12 @@ def _review_pair(
             "issues": raw_issues if isinstance(raw_issues, list) else [],
             "summary": str(second.payload.get("summary", "")),
         }
+    elif second_status == "needs_fix":
+        log(
+            "review",
+            f"ADVISORY {qa_role} round=2 evidence-only needs_fix ignored",
+        )
+        disagreement = None
     else:
         raise GenerationPipelineError(f"{qa_role} returned an invalid status")
     return ReviewPairResult(
@@ -818,27 +825,22 @@ def run_generation_pipeline(
         payload: Mapping[str, object],
         round_number: int,
     ) -> Mapping[str, object] | None:
-        if evidence_resolver is None:
-            return None
-        requests = payload.get("evidence_requests", [])
-        if not isinstance(requests, list) or not requests:
-            return None
-        bundle = evidence_resolver(task=task, requests=requests)
+        evidence = payload.get("evidence", [])
+        bundle = resolve_advisory_evidence(
+            task=task,
+            scenario=task.scenario,
+            evidence=evidence,
+            resolver=evidence_resolver,
+        )
         _write_report(
             report_dir,
             (
                 f"{role.replace('_', '-')}-round{round_number}-"
-                "resolved-evidence.json"
+                "evidence-bundle.json"
             ),
             bundle,
             api_key,
         )
-        status = bundle.get("status")
-        if status != "resolved":
-            raise GenerationPipelineError(
-                f"Harness evidence is {status or 'invalid'} for "
-                f"{role} round {round_number}"
-            )
         return bundle
 
     def enforce_gate(

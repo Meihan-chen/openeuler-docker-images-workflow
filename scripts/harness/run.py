@@ -30,8 +30,17 @@ AGENTS_DIR = PROJECT_ROOT / ".github" / "agents"
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.lib.agent_runtime import MODEL, validate_agent_payload  # noqa: E402
-from scripts.lib.evidence_resolver import resolve_evidence_requests  # noqa: E402
+from scripts.lib.agent_runtime import (  # noqa: E402
+    MODEL,
+    qa_requests_repair,
+    validate_agent_payload,
+)
+from scripts.lib.evidence_resolver import (  # noqa: E402
+    creator_result_for_qa,
+    freeze_creator_evidence,
+    render_qa_evidence,
+    resolve_advisory_evidence,
+)
 from scripts.lib.failure_knowledge import (  # noqa: E402
     FailureKnowledgeError,
     render_knowledge,
@@ -47,13 +56,11 @@ _CREATOR_REQUIRED_KEYS = {
         "success",
         "files_created",
         "identity_decision",
-        "evidence_requests",
     ),
     "testcase": (
         "success",
         "files_created",
         "command_evidence",
-        "evidence_requests",
     ),
 }
 
@@ -252,7 +259,7 @@ def _build_qa_prompt(
     role: str,
     *,
     creator_payload: dict,
-    resolved_evidence: dict | None = None,
+    evidence_bundle: dict | None = None,
 ) -> str:
     """Build the QA reviewer prompt."""
     qa_name = f"{role}-qa"
@@ -274,16 +281,14 @@ def _build_qa_prompt(
         f"Output your review as JSON per the schema in your instructions.\n"
         f"If no issues found, output {{\"status\": \"approved\", \"issues\": [], \"summary\": \"...\"}}.\n\n"
         "## Creator structured result\n"
-        + json.dumps(creator_payload, ensure_ascii=False, indent=2)
-    )
-    if resolved_evidence is not None:
-        instruction += (
-            "\n\n## Harness-resolved evidence bundle\n"
-            "The Harness, not the Creator, fixed this evidence. Treat "
-            "the fetched excerpt and hash as the evidence boundary; unresolved "
-            "or rejected bundles are stopped before this QA call.\n"
-            + json.dumps(resolved_evidence, ensure_ascii=False, indent=2)
+        + json.dumps(
+            creator_result_for_qa(creator_payload),
+            ensure_ascii=False,
+            indent=2,
         )
+    )
+    if evidence_bundle is not None:
+        instruction += render_qa_evidence(evidence_bundle)
     return f"{qa_md}\n\n## TASK:\n{instruction}"
 
 
@@ -314,46 +319,22 @@ def _resolve_creator_evidence(
     creator_payload: dict,
     *,
     round_num: int,
-    evidence_resolver=resolve_evidence_requests,
+    evidence_resolver=freeze_creator_evidence,
 ) -> dict:
-    requests = creator_payload.get("evidence_requests", [])
+    evidence = creator_payload.get("evidence", [])
     task = _task_spec_from_environment()
-    if not requests and isinstance(requests, list):
-        bundle = {
-            "schema_version": 1,
-            "scenario": os.environ.get("SCENARIO", "new-image"),
-            "status": "not_requested",
-            "entries": [],
-        }
-    elif task is None:
-        entries = requests if isinstance(requests, list) else []
-        bundle = {
-            "schema_version": 1,
-            "scenario": os.environ.get("SCENARIO", "new-image"),
-            "status": "unresolved",
-            "reason": "TaskSpec is unavailable; evidence was not fetched",
-            "entries": [
-                {
-                    "id": str(entry.get("id", "")),
-                    "resolved": False,
-                    "reason": "TaskSpec is unavailable",
-                }
-                for entry in entries
-                if isinstance(entry, dict)
-            ],
-        }
-    else:
-        bundle = evidence_resolver(task=task, requests=requests)
+    scenario = os.environ.get("SCENARIO", "new-image")
+    bundle = resolve_advisory_evidence(
+        task=task,
+        scenario=scenario,
+        evidence=evidence,
+        resolver=evidence_resolver,
+    )
 
     record_dir = _agent_record_dir()
-    (record_dir / f"{role}-round{round_num}-resolved-evidence.json").write_text(
+    (record_dir / f"{role}-round{round_num}-evidence-bundle.json").write_text(
         json.dumps(bundle, ensure_ascii=False, indent=2) + "\n"
     )
-    if bundle.get("status") not in {"resolved", "not_requested"}:
-        raise RuntimeError(
-            "Harness evidence is "
-            f"{bundle.get('status', 'invalid')} for {role} round {round_num}"
-        )
     return bundle
 
 
@@ -367,6 +348,7 @@ def _write_qa_record(role: str, round_num: int, qa_result: dict, *, approved: bo
         "status": qa_result.get("status", "unknown"),
         "summary": qa_result.get("summary", ""),
         "issues": qa_result.get("issues", []),
+        "evidence_reviews": qa_result.get("evidence_reviews", []),
         "coverage_score": qa_result.get("coverage_score"),
     }
     out = record_dir / f"qa-review-{role}-r{round_num}.json"
@@ -377,7 +359,7 @@ def _write_qa_record(role: str, round_num: int, qa_result: dict, *, approved: bo
 def _run_adversarial_pair(
     role: str,
     *,
-    evidence_resolver=resolve_evidence_requests,
+    evidence_resolver=freeze_creator_evidence,
 ) -> None:
     """Run Creator <-> QA adversarial pair with up to MAX_QA_ROUNDS rounds."""
     target = _target_dir()
@@ -399,7 +381,7 @@ def _run_adversarial_pair(
             _build_qa_prompt(
                 role,
                 creator_payload=latest_creator_payload,
-                resolved_evidence=_resolve_creator_evidence(
+                evidence_bundle=_resolve_creator_evidence(
                     role,
                     latest_creator_payload,
                     round_num=round_num,
@@ -410,10 +392,21 @@ def _run_adversarial_pair(
         )
         qa_result = _parse_json_output(qa_out)
         approved = qa_result.get("status") == "approved"
+        evidence_only = (
+            qa_result.get("status") == "needs_fix"
+            and not qa_requests_repair(qa_result)
+        )
+        approved = approved or evidence_only
         _write_qa_record(role, round_num, qa_result, approved=approved)
 
         if approved:
-            print(f"[{role}] QA approved at round {round_num}")
+            if evidence_only:
+                print(
+                    f"[{role}] QA evidence-only needs_fix is advisory; "
+                    "no Creator repair"
+                )
+            else:
+                print(f"[{role}] QA approved at round {round_num}")
             return
 
         if round_num == MAX_QA_ROUNDS:
