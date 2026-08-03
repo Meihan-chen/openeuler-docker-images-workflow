@@ -879,3 +879,40 @@ def test_final_contract_requires_junit_to_prove_executed_passes(tmp_path, junit)
             base_sha=base_sha,
             expected_run_id="123456",
         )
+
+
+def test_generation_contract_has_no_goss_sandbox_interface():
+    import inspect
+
+    from scripts.lib.target_contract import validate_generated_target
+
+    assert "goss_executable" not in inspect.signature(
+        validate_generated_target
+    ).parameters
+
+
+def test_contract_rejects_shared_test_bash_syntax_errors(tmp_path):
+    from scripts.lib.target_contract import validate_generated_target
+
+    repo, base_sha = _repo(tmp_path)
+    _write_valid_generated_candidate(repo)
+    entrypoint = repo / "Database" / "kvrocks" / "tests" / "test.sh"
+    entrypoint.write_text(
+        "#!/bin/bash\n"
+        "if [ -n \"${EXPECTED_VERSION}\" ]; then\n"
+        "    kvrocks --version\n"
+    )
+
+    report = validate_generated_target(
+        repo=repo,
+        task=_task(),
+        base_sha=base_sha,
+    )
+
+    assert report["build_allowed"] is True
+    assert report["test_allowed"] is False
+    assert any(
+        item["code"] == "tests.shell_syntax"
+        and item["owner"] == "testcase_creator"
+        for item in report["findings"]
+    )

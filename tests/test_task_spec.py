@@ -43,6 +43,26 @@ def test_task_spec_json_round_trip_is_stable():
     assert encoded == json.dumps(task.to_dict(), ensure_ascii=False, sort_keys=True)
 
 
+@pytest.mark.parametrize("scenario", ["new-image", "version-update", "oe-upgrade"])
+def test_task_spec_preserves_each_supported_scenario(scenario):
+    from scripts.lib.task_spec import TaskSpec
+
+    raw = {**_kvrocks_input(), "scenario": scenario}
+    task = TaskSpec.from_workflow_dispatch(raw)
+
+    assert task.scenario == scenario
+    assert TaskSpec.from_json(task.to_json()).scenario == scenario
+
+
+def test_task_spec_rejects_unknown_scenario():
+    from scripts.lib.task_spec import TaskSpec, TaskSpecError
+
+    with pytest.raises(TaskSpecError, match="scenario"):
+        TaskSpec.from_workflow_dispatch(
+            {**_kvrocks_input(), "scenario": "surprise-mode"}
+        )
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

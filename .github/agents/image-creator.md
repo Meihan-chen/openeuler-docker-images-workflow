@@ -84,21 +84,36 @@ doc/ is optional。完全不生成 `doc/` 是合法结果；if any doc/ content 
 和相对上游的必要差异。配置文件应与 persistent data directory 分离，避免挂载数据卷时
 遮蔽启动所需配置。
 
-When the pinned builder source already contains an unchanged upstream asset,
-such as a configuration, entrypoint or template, reuse it with `COPY --from`
-instead of adding a byte-identical copy to the target repository. A local
-auxiliary file is appropriate only for a necessary local customization or when
-the builder source cannot supply the asset; document its provenance and the
-required difference. This is a reuse policy, not a required stage-alias spelling.
+当固定版本的 builder 源码已经包含未修改的上游附属文件（如配置、entrypoint 或模板）时，
+应通过 `COPY --from` 直接复用，不要向目标仓再次添加逐字节相同的副本。只有确有必要的本地定制，
+或 builder 源码无法提供该文件时，才应新增本地附属文件；同时记录其来源及相对于上游
+的必要差异。该要求是资产复用策略，不要求使用固定的 stage alias 写法。
 
 ### 步骤 4：编写 Dockerfile
 
 使用 `dnf` (openEuler 24.03)，Go 下载用 `https://golang.google.cn/dl/`，最后 `dnf clean all`。支持 amd64 和 arm64，不得下载或硬编码单一架构产物。编译型应用优先使用多阶段构建，构建阶段和运行阶段都使用任务指定的 openEuler 基础镜像，并将构建工具和源码留在运行镜像之外。
 
-Avoid a fixed numeric UID/GID unless the upstream or task contract requires
-that stable identity. When it is required, account for identities that the
-base image or installed packages may already create; do not assume an
-arbitrary number is unused.
+**运行身份**：默认不指定数字，用 `groupadd -r <name>` / `useradd -r -g <name> <name>`
+让系统分配空闲 ID。这避免数字冲突，但不自动解决名称冲突；如果 runtime 包已经创建了
+同名身份，应在确认其用户、组和目录权限符合应用契约后选择 `reuse_existing`，不能重复创建。
+
+只有上游或任务契约要求稳定的数字身份时，才固定 UID/GID，并通过 `evidence_requests`
+请求 Harness 固定该要求。Creator 不得自行声明某个数字在最终 runtime 镜像中空闲；安装包
+可能引入额外系统账户，只有使用最终包集合的原生构建能验证是否冲突。不要用探测后跳过
+建组的写法规避冲突，因为后续按组名创建用户仍可能失败。
+
+数字身份一旦确定或变更，`{app}/tests/` 下的运行身份断言必须与之一致。
+
+最终 JSON 必须包含结构化 `identity_decision`。`mode` 只能是 `dynamic`、`fixed` 或
+`reuse_existing`；动态分配和复用已有身份时 `uid`/`gid` 为 `null`。固定数字时必须填写
+正整数 UID/GID，并在 `requirement_evidence_ids` 中引用本次 `evidence_requests` 的 ID；
+数字是否可用由后续原生构建判定。
+
+Creator 只能提交待取证的 `evidence_requests`，不能自行声明链接内容已经得到验证。每项请求
+必须包含稳定 ID、待证明的 claim、与 TaskSpec 同源且 ref 精确等于 TaskSpec 中的固定 revision
+的 source，以及需要 Harness 精确定位的 locator；每次最多 12 条。Harness 会独立获取、截取
+并哈希内容；只有它返回的
+resolved evidence 才能作为 QA 判断依据。
 
 **openEuler 包名映射（Debian→RPM）：** libssl-dev→openssl-devel, build-essential→gcc gcc-c++ make, shadow→shadow-utils, python3-dev→python3-devel, libcurl4-openssl-dev→libcurl-devel, libffi-dev→libffi-devel
 
@@ -132,7 +147,30 @@ Pillow 占位图伪装官方 logo，也禁止使用 AI 生成 logo。
 默认只向 stdout 返回一个 JSON 对象；只有追加的任务契约明确允许时，才在指定位置写入 `ai-result.json`：
 
 ```json
-{"success": true, "package_name": "...", "version": "...", "files_created": [...], "summary": "...", "error": null}
+{
+  "success": true,
+  "package_name": "...",
+  "version": "...",
+  "files_created": [],
+  "identity_decision": {
+    "mode": "dynamic|fixed|reuse_existing",
+    "user": "...",
+    "group": "...",
+    "uid": null,
+    "gid": null,
+    "requirement_evidence_ids": []
+  },
+  "evidence_requests": [
+    {
+      "id": "identity-requirement-001",
+      "claim": "上游要求固定数字 UID/GID",
+      "source": "固定到任务版本或提交 SHA 的上游文件 URL",
+      "locator": "能够精确定位该要求的符号或短文本"
+    }
+  ],
+  "summary": "...",
+  "error": null
+}
 ```
 
 ## 质量检查清单

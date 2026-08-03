@@ -1,14 +1,8 @@
-"""Route a failure to the action that can resolve it.
+"""Route Harness-produced failure evidence to the action that can resolve it.
 
-The Fixer received free-text evidence and had to infer both what broke and what
-to do about it. That inference went wrong in ways the harness already knew how
-to answer: a Goss config parse error was read as a UID permission problem
-(Run 30480464176), and one unpacked upstream tarball was expressed as 496
-out-of-scope file errors whose obvious repair — reverting candidate files — was
-the opposite of the correct one (Run 30567356119).
-
-Classification here is deterministic and derived only from evidence the harness
-produces itself, so it stays trustworthy when the model is not.
+Classification is deterministic so the Fixer does not have to infer ownership
+or failure stage from free text, especially for configuration-parse and
+workspace-boundary failures where an incorrect repair can expand the damage.
 """
 
 from __future__ import annotations

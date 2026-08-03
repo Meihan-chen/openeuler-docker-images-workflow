@@ -18,6 +18,7 @@ from scripts.lib.agent_runtime import (
     run_agent,
 )
 from scripts.lib.failure_classification import classify_failure
+from scripts.lib.failure_knowledge import FailureKnowledgeError, render_knowledge
 from scripts.lib.progress import log
 from scripts.lib.task_spec import TaskSpec
 from scripts.lib.target_contract import TargetContractError, validate_generated_target
@@ -28,6 +29,9 @@ class GenerationPipelineError(RuntimeError):
 
 
 _PROMPT_DIR = Path(__file__).resolve().parents[2] / ".github" / "agents"
+_KNOWLEDGE_PATH = (
+    Path(__file__).resolve().parents[2] / "docs" / "failure-patterns.yml"
+)
 _PROMPT_FILES = {
     "image_creator": "image-creator.md",
     "image_qa": "image-qa.md",
@@ -36,15 +40,28 @@ _PROMPT_FILES = {
     "fixer": "code-fixer.md",
 }
 _REQUIRED_KEYS = {
-    "image_creator": ("success", "files_created"),
+    "image_creator": (
+        "success",
+        "files_created",
+        "identity_decision",
+        "evidence_requests",
+    ),
     "image_qa": ("status", "issues", "summary"),
-    "testcase_creator": ("success", "files_created"),
+    "testcase_creator": (
+        "success",
+        "files_created",
+        "command_evidence",
+        "evidence_requests",
+    ),
     "testcase_qa": ("status", "issues", "coverage_score", "summary"),
     "fixer": ("success", "changes"),
 }
+# QA receives a bounded candidate snapshot and verified evidence. Evidence
+# resolution has its own wall-clock budget and completes before this timeout.
 _QA_TIMEOUT_SECONDS = 900
 _DEFAULT_AGENT_TIMEOUT_SECONDS = 1800
 _QA_SNAPSHOT_MAX_CHARS = 64_000
+_QA_PROMPT_MAX_CHARS = 100_000
 _PHASE1_TASK = (
     "kvrocks",
     "2.16.0",
@@ -52,6 +69,7 @@ _PHASE1_TASK = (
     "Database",
     "https://github.com/apache/kvrocks/tree/v2.16.0",
 )
+EvidenceResolver = Callable[..., Mapping[str, object]]
 
 
 @dataclass(frozen=True)
@@ -59,6 +77,14 @@ class GenerationResult:
     status: str
     qa_fix_rounds: int
     gate_report: Mapping[str, object]
+    qa_disagreements: tuple[Mapping[str, object], ...] = ()
+
+
+@dataclass(frozen=True)
+class ReviewPairResult:
+    fix_rounds: int
+    creator_payload: Mapping[str, object] | None
+    disagreement: Mapping[str, object] | None = None
 
 
 def _tag(task: TaskSpec) -> str:
@@ -154,6 +180,22 @@ def _candidate_paths(
             and path.relative_to(app_root).parts[0] != "results"
         )
     return tuple(sorted(paths))
+
+
+def _failure_knowledge_section(review: Mapping[str, object]) -> str:
+    """Inline the failure patterns whose symptoms match this evidence.
+
+    The knowledge base is advisory, so an unreadable or missing file degrades
+    to no section rather than failing the repair round.
+    """
+    try:
+        document = _KNOWLEDGE_PATH.read_text()
+    except (OSError, UnicodeError):
+        return ""
+    try:
+        return render_knowledge(document, review)
+    except FailureKnowledgeError:
+        return ""
 
 
 def build_role_prompt(
@@ -274,6 +316,10 @@ def build_role_prompt(
                 "```",
             )
         )
+        if role == "fixer":
+            knowledge = _failure_knowledge_section(review)
+            if knowledge:
+                parts.append(knowledge.rstrip("\n"))
     quoted_keys = [f"`{key}`" for key in _REQUIRED_KEYS[role]]
     if len(quoted_keys) == 2:
         output_keys = " and ".join(quoted_keys)
@@ -300,6 +346,8 @@ def _qa_prompt(
     task: TaskSpec,
     base_sha: str,
     previous_review: Mapping[str, object] | None = None,
+    creator_payload: Mapping[str, object] | None = None,
+    resolved_evidence: Mapping[str, object] | None = None,
 ) -> str:
     app_root = workspace / task.domain / task.app
     image_root = app_root / task.version / task.os_version
@@ -371,8 +419,67 @@ def _qa_prompt(
             )
             + "\n```\n"
         )
-    return (
+    creator_evidence = ""
+    if role == "image_qa" and isinstance(creator_payload, Mapping):
+        decision = creator_payload.get("identity_decision")
+        if isinstance(decision, Mapping):
+            creator_evidence = (
+                "\n## Image Creator identity decision\n\n"
+                "The JSON below is the latest complete Creator result. "
+                "Review its structured identity decision against the Dockerfile and "
+                "the trusted evidence supplied by the harness. Native build "
+                "remains authoritative for whether identity creation "
+                "actually succeeds.\n\n"
+                "```json\n"
+                + json.dumps(
+                    creator_payload,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n```\n"
+            )
+    if role == "testcase_qa" and isinstance(creator_payload, Mapping):
+        entries = creator_payload.get("command_evidence")
+        if isinstance(entries, list):
+            creator_evidence = (
+                "\n## Testcase Creator command evidence\n\n"
+                "The JSON below is the latest complete Creator result. The "
+                "Creator claims these semantics for the application "
+                "commands the tests rely on. Compare each claim with the "
+                "Harness-resolved evidence below; do not treat the Creator's "
+                "citation alone as verification. Record a concern for any "
+                "application command used in the tests that is missing.\n\n"
+                "```json\n"
+                + json.dumps(
+                    creator_payload,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n```\n"
+            )
+    harness_evidence = ""
+    if isinstance(resolved_evidence, Mapping):
+        harness_evidence = (
+            "\n## Harness-resolved evidence bundle\n\n"
+            "This content was fetched and hashed by the Harness from the "
+            "TaskSpec upstream. Use `resolved`, `excerpt`, and `sha256` to "
+            "adjudicate Creator claims. The deterministic evidence gate "
+            "prevents unresolved or rejected bundles from reaching QA.\n\n"
+            "```json\n"
+            + json.dumps(
+                resolved_evidence,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n```\n"
+        )
+    prompt = (
         build_role_prompt(role=role, task=task, base_sha=base_sha)
+        + creator_evidence
+        + harness_evidence
         + previous_findings
         + "\n## Embedded candidate snapshot\n\n"
         + "Review only the file snapshot below. Do not call tools or read the "
@@ -381,6 +488,11 @@ def _qa_prompt(
         + encoded_snapshot
         + "\n```\n"
     )
+    if len(prompt) > _QA_PROMPT_MAX_CHARS:
+        raise GenerationPipelineError(
+            "QA prompt is too large after adding resolved evidence"
+        )
+    return prompt
 
 
 def _redact(value: object, secret: str) -> object:
@@ -521,17 +633,34 @@ def _review_pair(
     base_sha: str,
     api_key: str,
     post_repair_check: Callable[[], None] | None = None,
-) -> int:
+    creator_payload: Mapping[str, object] | None = None,
+    resolve_evidence: (
+        Callable[
+            [Mapping[str, object], int],
+            Mapping[str, object] | None,
+        ]
+        | None
+    ) = None,
+) -> ReviewPairResult:
     def qa_prompt(
+        round_number: int,
         previous_review: Mapping[str, object] | None = None,
+        creator: Mapping[str, object] | None = creator_payload,
     ) -> str:
         try:
+            evidence = (
+                resolve_evidence(creator, round_number)
+                if resolve_evidence is not None and isinstance(creator, Mapping)
+                else None
+            )
             return _qa_prompt(
                 role=qa_role,
                 workspace=workspace,
                 task=task,
                 base_sha=base_sha,
                 previous_review=previous_review,
+                creator_payload=creator,
+                resolved_evidence=evidence,
             )
         except GenerationPipelineError as error:
             _write_report(
@@ -555,7 +684,7 @@ def _review_pair(
         api_key=api_key,
         role=qa_role,
         report_dir=report_dir,
-        prompt=qa_prompt(),
+        prompt=qa_prompt(1),
     )
     _write_report(report_dir, f"{qa_role.replace('_', '-')}-round1.json", review.payload, api_key)
     _log_review_result(
@@ -566,7 +695,10 @@ def _review_pair(
     )
     if review.payload.get("status") == "approved":
         log("review", f"PASS {qa_role} round=1")
-        return 0
+        return ReviewPairResult(
+            fix_rounds=0,
+            creator_payload=creator_payload,
+        )
     if review.payload.get("status") != "needs_fix":
         raise GenerationPipelineError(f"{qa_role} returned an invalid status")
 
@@ -607,7 +739,7 @@ def _review_pair(
         api_key=api_key,
         role=qa_role,
         report_dir=report_dir,
-        prompt=qa_prompt(review.payload),
+        prompt=qa_prompt(2, review.payload, fixed.payload),
     )
     _write_report(
         report_dir,
@@ -624,14 +756,26 @@ def _review_pair(
     second_status = second.payload.get("status")
     if second_status == "approved":
         log("review", f"PASS {qa_role} round=2")
+        disagreement = None
     elif second_status == "needs_fix":
         log(
             "review",
             f"DISAGREEMENT {qa_role} round=2; continue=local_validation",
         )
+        raw_issues = second.payload.get("issues", [])
+        disagreement = {
+            "role": qa_role,
+            "round": 2,
+            "issues": raw_issues if isinstance(raw_issues, list) else [],
+            "summary": str(second.payload.get("summary", "")),
+        }
     else:
         raise GenerationPipelineError(f"{qa_role} returned an invalid status")
-    return 1
+    return ReviewPairResult(
+        fix_rounds=1,
+        creator_payload=fixed.payload,
+        disagreement=disagreement,
+    )
 
 
 def run_generation_pipeline(
@@ -647,6 +791,7 @@ def run_generation_pipeline(
     image_linter: (
         Callable[[Path], Mapping[str, object]] | None
     ) = None,
+    evidence_resolver: EvidenceResolver | None = None,
 ) -> GenerationResult:
     workspace = Path(workspace).resolve()
     report_dir = Path(report_dir).resolve()
@@ -667,6 +812,34 @@ def run_generation_pipeline(
     )
     app_root = workspace / task.domain / task.app
     tests_root = app_root / "tests"
+
+    def resolve_creator_evidence(
+        role: str,
+        payload: Mapping[str, object],
+        round_number: int,
+    ) -> Mapping[str, object] | None:
+        if evidence_resolver is None:
+            return None
+        requests = payload.get("evidence_requests", [])
+        if not isinstance(requests, list) or not requests:
+            return None
+        bundle = evidence_resolver(task=task, requests=requests)
+        _write_report(
+            report_dir,
+            (
+                f"{role.replace('_', '-')}-round{round_number}-"
+                "resolved-evidence.json"
+            ),
+            bundle,
+            api_key,
+        )
+        status = bundle.get("status")
+        if status != "resolved":
+            raise GenerationPipelineError(
+                f"Harness evidence is {status or 'invalid'} for "
+                f"{role} round {round_number}"
+            )
+        return bundle
 
     def enforce_gate(
         *,
@@ -765,7 +938,7 @@ def run_generation_pipeline(
         creator_role: str,
         report_name: str,
         findings: Mapping[str, object],
-    ) -> None:
+    ) -> Mapping[str, object]:
         gate = findings.get("gate")
         lint = findings.get("lint")
         classification = classify_failure(
@@ -815,6 +988,7 @@ def run_generation_pipeline(
                 f"{creator_role} deterministic repair failed"
             )
         log("repair", f"PASS {creator_role} deterministic_validation")
+        return repaired.payload
 
     log("generate", "START image_creator")
     creator = _run(
@@ -834,6 +1008,7 @@ def run_generation_pipeline(
     if creator.payload.get("success") is not True:
         raise GenerationPipelineError("image_creator did not complete successfully")
     log("generate", "PASS image_creator")
+    latest_image_payload: Mapping[str, object] = creator.payload
 
     image_gate = enforce_gate(
         phase="image",
@@ -850,7 +1025,7 @@ def run_generation_pipeline(
         owner="image_creator",
     )
     if image_findings is not None:
-        repair_deterministic_failure(
+        latest_image_payload = repair_deterministic_failure(
             creator_role="image_creator",
             report_name="image-creator-precheck-repair.json",
             findings={"gate": image_findings},
@@ -882,7 +1057,7 @@ def run_generation_pipeline(
             stage="image_repair_lint",
         )
 
-    fix_rounds = _review_pair(
+    image_review = _review_pair(
         creator_role="image_creator",
         qa_role="image_qa",
         agent_runner=agent_runner,
@@ -893,7 +1068,19 @@ def run_generation_pipeline(
         base_sha=base_sha,
         api_key=api_key,
         post_repair_check=recheck_image_repair,
+        creator_payload=latest_image_payload,
+        resolve_evidence=lambda payload, round_number: resolve_creator_evidence(
+            "image",
+            payload,
+            round_number,
+        ),
     )
+    fix_rounds = image_review.fix_rounds
+    disagreements = [
+        item
+        for item in (image_review.disagreement,)
+        if item is not None
+    ]
     frozen_image = image_owned_snapshot()
 
     def enforce_testcase_ownership(
@@ -935,6 +1122,7 @@ def run_generation_pipeline(
     if testcase.payload.get("success") is not True:
         raise GenerationPipelineError("testcase_creator did not complete successfully")
     log("generate", "PASS testcase_creator")
+    latest_testcase_payload: Mapping[str, object] = testcase.payload
     enforce_testcase_ownership(
         report_name="testcase-ownership.json",
         role="testcase_creator",
@@ -951,7 +1139,7 @@ def run_generation_pipeline(
         owner="testcase_creator",
     )
     if testcase_findings is not None:
-        repair_deterministic_failure(
+        latest_testcase_payload = repair_deterministic_failure(
             creator_role="testcase_creator",
             report_name="testcase-creator-precheck-repair.json",
             findings={"gate": testcase_findings},
@@ -983,7 +1171,7 @@ def run_generation_pipeline(
             ),
         )
 
-    fix_rounds += _review_pair(
+    testcase_review = _review_pair(
         creator_role="testcase_creator",
         qa_role="testcase_qa",
         agent_runner=agent_runner,
@@ -994,7 +1182,16 @@ def run_generation_pipeline(
         base_sha=base_sha,
         api_key=api_key,
         post_repair_check=recheck_testcase_repair,
+        creator_payload=latest_testcase_payload,
+        resolve_evidence=lambda payload, round_number: resolve_creator_evidence(
+            "testcase",
+            payload,
+            round_number,
+        ),
     )
+    fix_rounds += testcase_review.fix_rounds
+    if testcase_review.disagreement is not None:
+        disagreements.append(testcase_review.disagreement)
 
     gate_report = enforce_gate(
         phase="full",
@@ -1002,10 +1199,21 @@ def run_generation_pipeline(
         stage="target_contract",
         failure_message="deterministic target contract did not pass",
     )
+    if disagreements:
+        _write_report(
+            report_dir,
+            "qa-disagreements.json",
+            {
+                "status": "passed_with_qa_disagreement",
+                "disagreements": disagreements,
+            },
+            api_key,
+        )
     return GenerationResult(
         status="passed",
         qa_fix_rounds=fix_rounds,
         gate_report=gate_report,
+        qa_disagreements=tuple(disagreements),
     )
 
 

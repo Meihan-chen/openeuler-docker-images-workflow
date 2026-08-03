@@ -9,6 +9,8 @@ You receive the Testcase Creator's complete output:
 - optional `goss_wait.yaml` content, when generated
 - optional `test_helpers.sh` content, when generated
 - the shared `test.sh`
+- the Creator's `command_evidence`, under its own heading
+- the Harness-resolved evidence bundle, when evidence was requested
 - any allowed Creator self-assessment
 - The Dockerfile (read-only, for context)
 
@@ -21,6 +23,29 @@ CLI/one-shot mode. In service mode, verify that `test.sh` performs bounded
 readiness before functional assertions.
 
 Challenge from these angles:
+
+### Command Semantics (check this first)
+
+The Creator's `command_evidence` claims a meaning and references an evidence
+ID for every application command the tests rely on. The Harness-resolved
+evidence bundle is authoritative; a Creator-provided request or URL alone is
+not verification. Same name does not mean same behavior:
+a protocol-compatible implementation may answer from an asynchronous cache,
+stub a command out entirely, or require a separate trigger command first.
+
+- Does `command_evidence` cover **every** application command executed in
+  `test.sh`? Record one actionable concern for every missing command.
+- Does each claimed meaning actually support the assertion built on it? If an
+  assertion reads a value the application computes asynchronously or lazily,
+  the assertion is wrong even when the image is healthy; record it under
+  `false_positive` with the resolved evidence excerpt.
+- Does every `evidence_id` resolve to a pinned, task-upstream entry with a
+  matching locator? An unresolved or mismatched entry is a concern, not
+  verified evidence.
+
+`needs_fix` is review feedback, not a terminal veto. The Harness records a
+second-round disagreement and continues to deterministic/native validation;
+those local checks remain the authority on whether the candidate can proceed.
 
 ### Coverage Gaps
 - Are all attack angles covered? (dependency, port, permission, startup, version, boundary)
@@ -52,7 +77,12 @@ Challenge from these angles:
   exists.
 
 ### Test Correctness
-- Are goss assertions syntactically valid?
+
+Basic Goss YAML structure and Bash syntax are checked deterministically by the
+generation gate. The pinned Goss schema and runtime assertions are exercised
+later by Native Validation. Review assertion meaning and evidence here rather
+than claiming that the generation gate already proved the full Goss contract.
+
 - Do port assertions remain valid for applications that open multiple
   listening sockets through worker sharding, `SO_REUSEPORT`, dual-stack
   networking, or multiple interfaces, without assuming a scalar IP value?
@@ -77,6 +107,7 @@ Produce a review report in JSON:
       "category": "coverage_gap|false_positive|missing_attack|correctness",
       "file": "path/to/file",
       "description": "what is wrong",
+      "evidence": "the Dockerfile line, test line, or upstream reference this rests on",
       "suggestion": "how to fix or what to add"
     }
   ],
@@ -85,11 +116,19 @@ Produce a review report in JSON:
 }
 ```
 
+`evidence` is required and must point at something in the snapshot you were
+given or at a specific upstream reference. State what you observed, not what
+you suspect: "the Dockerfile healthcheck uses X, so Y is unproven" is evidence;
+"if upstream behaves differently this could fail" is not.
+
 ## Rules
 
 - Do NOT read the Testcase Creator's reasoning chain — review only the output files
 - Do NOT modify files yourself — only report issues
-- A blocker or major gap means the test suite is insufficient and must be fixed
+- An issue without `evidence` does not count as a blocker or major; either
+  supply the evidence or drop the issue
+- A blocker or major gap means the Creator should repair the suite in the
+  bounded review loop
 - If no blocker or major gap is found, approve with `"status": "approved"`
-- If issues remain after any repair round, continue to return `"status": "needs_fix"`; the harness records the disagreement and local validation makes the final decision
+- If issues remain after any repair round, continue to return `"status": "needs_fix"`; this is not a terminal veto—the Harness records the disagreement and local validation makes the final decision
 - Never inspect, print, copy, or mention environment credentials or secrets

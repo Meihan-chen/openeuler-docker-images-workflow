@@ -30,12 +30,32 @@ AGENTS_DIR = PROJECT_ROOT / ".github" / "agents"
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.lib.agent_runtime import MODEL  # noqa: E402
+from scripts.lib.agent_runtime import MODEL, validate_agent_payload  # noqa: E402
+from scripts.lib.evidence_resolver import resolve_evidence_requests  # noqa: E402
+from scripts.lib.failure_knowledge import (  # noqa: E402
+    FailureKnowledgeError,
+    render_knowledge,
+)
+from scripts.lib.task_spec import TaskSpec, TaskSpecError  # noqa: E402
 
 OPENCODE_MODEL = os.environ.get("OPENCODE_MODEL", MODEL)
 OPENCODE_TIMEOUT = int(os.environ.get("OPENCODE_TIMEOUT", "2400"))
 OPENCODE_STALE_SECONDS = 300
 MAX_QA_ROUNDS = 2
+_CREATOR_REQUIRED_KEYS = {
+    "image": (
+        "success",
+        "files_created",
+        "identity_decision",
+        "evidence_requests",
+    ),
+    "testcase": (
+        "success",
+        "files_created",
+        "command_evidence",
+        "evidence_requests",
+    ),
+}
 
 
 def _check_opencode() -> None:
@@ -62,6 +82,24 @@ def _target_dir() -> Path:
     if not p.is_dir():
         sys.exit(f"TARGET_REPO_DIR does not exist: {p}")
     return p
+
+
+def _agent_record_dir() -> Path:
+    """Keep Agent evidence outside the candidate repository."""
+    target = _target_dir().resolve()
+    configured = os.environ.get("AGENT_REPORT_DIR", "").strip()
+    root = (
+        Path(configured).resolve()
+        if configured
+        else target.parent / "agent-reports"
+    )
+    if root == target or target in root.parents:
+        raise RuntimeError("AGENT_REPORT_DIR must remain outside TARGET_REPO_DIR")
+    pkg = os.environ.get("PACKAGE", os.environ.get("APP", ""))
+    domain = os.environ.get("DOMAIN", "")
+    record_dir = root / domain / pkg
+    record_dir.mkdir(parents=True, exist_ok=True)
+    return record_dir
 
 
 def _run_opencode(prompt: str, *, cwd: Path) -> str:
@@ -210,34 +248,118 @@ def _build_creator_prompt(role: str, *, round_num: int, qa_feedback: dict | None
     return f"{creator_md}\n\n## TASK (round {round_num}):\n{instruction}"
 
 
-def _build_qa_prompt(role: str) -> str:
+def _build_qa_prompt(
+    role: str,
+    *,
+    creator_payload: dict,
+    resolved_evidence: dict | None = None,
+) -> str:
     """Build the QA reviewer prompt."""
     qa_name = f"{role}-qa"
     qa_md = _load_agent_prompt(qa_name)
     target = _target_dir()
     pkg = os.environ.get("PACKAGE", os.environ.get("APP", ""))
     domain = os.environ.get("DOMAIN", "")
+    scenario = os.environ.get("SCENARIO", "new-image")
 
     instruction = (
         f"Review the files created by the {role} creator under "
         f"{target}/{domain}/{pkg}/.\n"
+        f"Scenario: {scenario}. Apply the same evidence contract regardless "
+        f"of whether this is new-image, version-update, or oe-upgrade.\n"
         f"Read the actual files on disk (Dockerfile, meta.yml, README.md, "
         f"doc/image-info.yml, image-list.yml, ai-result.json"
         + (", tests/goss.yaml, tests/goss_wait.yaml, test-ai-result.json" if role == "testcase" else "")
         + ").\n"
         f"Output your review as JSON per the schema in your instructions.\n"
-        f"If no issues found, output {{\"status\": \"approved\", \"issues\": [], \"summary\": \"...\"}}."
+        f"If no issues found, output {{\"status\": \"approved\", \"issues\": [], \"summary\": \"...\"}}.\n\n"
+        "## Creator structured result\n"
+        + json.dumps(creator_payload, ensure_ascii=False, indent=2)
     )
+    if resolved_evidence is not None:
+        instruction += (
+            "\n\n## Harness-resolved evidence bundle\n"
+            "The Harness, not the Creator, fixed this evidence. Treat "
+            "the fetched excerpt and hash as the evidence boundary; unresolved "
+            "or rejected bundles are stopped before this QA call.\n"
+            + json.dumps(resolved_evidence, ensure_ascii=False, indent=2)
+        )
     return f"{qa_md}\n\n## TASK:\n{instruction}"
+
+
+def _task_spec_from_environment() -> TaskSpec | None:
+    """Build the shared task contract for legacy scenario entrypoints."""
+    serialized = os.environ.get("TASK_SPEC_JSON", "").strip()
+    try:
+        if serialized:
+            return TaskSpec.from_json(serialized)
+        return TaskSpec.from_workflow_dispatch(
+            {
+                "app": os.environ.get("PACKAGE", os.environ.get("APP", "")),
+                "version": os.environ.get("APP_VERSION", ""),
+                "os_version": os.environ.get(
+                    "OS_VERSION", os.environ.get("OE_VERSION", "")
+                ),
+                "domain": os.environ.get("DOMAIN", ""),
+                "source_url": os.environ.get("SOURCE", ""),
+                "scenario": os.environ.get("SCENARIO", "new-image"),
+            }
+        )
+    except (TaskSpecError, json.JSONDecodeError):
+        return None
+
+
+def _resolve_creator_evidence(
+    role: str,
+    creator_payload: dict,
+    *,
+    round_num: int,
+    evidence_resolver=resolve_evidence_requests,
+) -> dict:
+    requests = creator_payload.get("evidence_requests", [])
+    task = _task_spec_from_environment()
+    if not requests and isinstance(requests, list):
+        bundle = {
+            "schema_version": 1,
+            "scenario": os.environ.get("SCENARIO", "new-image"),
+            "status": "not_requested",
+            "entries": [],
+        }
+    elif task is None:
+        entries = requests if isinstance(requests, list) else []
+        bundle = {
+            "schema_version": 1,
+            "scenario": os.environ.get("SCENARIO", "new-image"),
+            "status": "unresolved",
+            "reason": "TaskSpec is unavailable; evidence was not fetched",
+            "entries": [
+                {
+                    "id": str(entry.get("id", "")),
+                    "resolved": False,
+                    "reason": "TaskSpec is unavailable",
+                }
+                for entry in entries
+                if isinstance(entry, dict)
+            ],
+        }
+    else:
+        bundle = evidence_resolver(task=task, requests=requests)
+
+    record_dir = _agent_record_dir()
+    (record_dir / f"{role}-round{round_num}-resolved-evidence.json").write_text(
+        json.dumps(bundle, ensure_ascii=False, indent=2) + "\n"
+    )
+    if bundle.get("status") not in {"resolved", "not_requested"}:
+        raise RuntimeError(
+            "Harness evidence is "
+            f"{bundle.get('status', 'invalid')} for {role} round {round_num}"
+        )
+    return bundle
 
 
 def _write_qa_record(role: str, round_num: int, qa_result: dict, *, approved: bool) -> None:
     """Persist QA review to a JSON file for PR body composition."""
-    target = _target_dir()
-    pkg = os.environ.get("PACKAGE", os.environ.get("APP", ""))
-    domain = os.environ.get("DOMAIN", "")
-    record_dir = target / domain / pkg
-    record_dir.mkdir(parents=True, exist_ok=True)
+    record_dir = _agent_record_dir()
     record = {
         "role": role,
         "round": round_num,
@@ -252,7 +374,11 @@ def _write_qa_record(role: str, round_num: int, qa_result: dict, *, approved: bo
     print(f"[{role}] QA round {round_num} {'approved' if approved else 'needs_fix'} -> {out}")
 
 
-def _run_adversarial_pair(role: str) -> None:
+def _run_adversarial_pair(
+    role: str,
+    *,
+    evidence_resolver=resolve_evidence_requests,
+) -> None:
     """Run Creator <-> QA adversarial pair with up to MAX_QA_ROUNDS rounds."""
     target = _target_dir()
     print(f"\n=== Adversarial pair: {role} (cwd={target}) ===")
@@ -261,10 +387,27 @@ def _run_adversarial_pair(role: str) -> None:
         _build_creator_prompt(role, round_num=1),
         cwd=target,
     )
+    latest_creator_payload = _parse_json_output(creator_out)
+    validate_agent_payload(
+        latest_creator_payload,
+        required_keys=_CREATOR_REQUIRED_KEYS[role],
+    )
 
     for round_num in range(1, MAX_QA_ROUNDS + 1):
         print(f"\n--- {role} QA round {round_num} ---")
-        qa_out = _run_opencode(_build_qa_prompt(role), cwd=target)
+        qa_out = _run_opencode(
+            _build_qa_prompt(
+                role,
+                creator_payload=latest_creator_payload,
+                resolved_evidence=_resolve_creator_evidence(
+                    role,
+                    latest_creator_payload,
+                    round_num=round_num,
+                    evidence_resolver=evidence_resolver,
+                ),
+            ),
+            cwd=target,
+        )
         qa_result = _parse_json_output(qa_out)
         approved = qa_result.get("status") == "approved"
         _write_qa_record(role, round_num, qa_result, approved=approved)
@@ -274,6 +417,25 @@ def _run_adversarial_pair(role: str) -> None:
             return
 
         if round_num == MAX_QA_ROUNDS:
+            record_dir = _agent_record_dir()
+            (record_dir / "qa-disagreements.json").write_text(
+                json.dumps(
+                    {
+                        "status": "pending_local_validation",
+                        "disagreements": [
+                            {
+                                "role": f"{role}_qa",
+                                "round": round_num,
+                                "issues": qa_result.get("issues", []),
+                                "summary": qa_result.get("summary", ""),
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n"
+            )
             print(
                 f"[{role}] QA did not approve after "
                 f"{MAX_QA_ROUNDS} rounds; proceeding to local validation"
@@ -284,6 +446,11 @@ def _run_adversarial_pair(role: str) -> None:
         creator_out = _run_opencode(
             _build_creator_prompt(role, round_num=round_num + 1, qa_feedback=qa_result),
             cwd=target,
+        )
+        latest_creator_payload = _parse_json_output(creator_out)
+        validate_agent_payload(
+            latest_creator_payload,
+            required_keys=_CREATOR_REQUIRED_KEYS[role],
         )
 
 
@@ -440,10 +607,33 @@ def _run_test_sh_fallback(target: Path, app: str, arch: str, results_dir: Path |
         sys.exit(1)
 
 
+def _build_fixer_prompt(
+    *,
+    target: Path,
+    logs: dict[str, str],
+    whitelist: list[str],
+) -> str:
+    fixer_md = _load_agent_prompt("code-fixer")
+    knowledge = ""
+    try:
+        document = (PROJECT_ROOT / "docs" / "failure-patterns.yml").read_text()
+        knowledge = render_knowledge(document, {"logs": logs})
+    except (OSError, UnicodeError, FailureKnowledgeError):
+        pass
+    instruction = (
+        f"Diagnose and fix the CI failures in the target repo at {target}.\n\n"
+        "Build logs are in /tmp/build-*.log. Read them.\n\n"
+        "You may only modify files in this whitelist "
+        f"(relative to {target}):\n"
+        + "\n".join(f"  - {path}" for path in whitelist)
+        + "\n\nAfter fixing, write ai-result.json with status, diagnosis, and changes."
+    )
+    return f"{fixer_md}\n\n{knowledge}\n## TASK:\n{instruction}"
+
+
 def cmd_fix(args: argparse.Namespace) -> None:
     """Run the Fixer agent against build/test failures in the target repo."""
     target = _target_dir()
-    fixer_md = _load_agent_prompt("code-fixer")
 
     logs = {}
     for log_file in Path("/tmp").glob("build-*.log"):
@@ -466,16 +656,11 @@ def cmd_fix(args: argparse.Namespace) -> None:
             if f.is_file() and ".git" not in str(f):
                 whitelist.append(str(f.relative_to(target)))
 
-    kb_path = PROJECT_ROOT / "docs" / "failure-patterns.md"
-    instruction = (
-        f"Diagnose and fix the CI failures in the target repo at {target}.\n\n"
-        f"Build logs are in /tmp/build-*.log. Read them.\n"
-        f"Knowledge base: {kb_path}\n\n"
-        f"You may only modify files in this whitelist (relative to {target}):\n"
-        + "\n".join(f"  - {f}" for f in whitelist)
-        + "\n\nAfter fixing, write ai-result.json with status, diagnosis, and changes."
+    full_prompt = _build_fixer_prompt(
+        target=target,
+        logs=logs,
+        whitelist=whitelist,
     )
-    full_prompt = f"{fixer_md}\n\n## TASK:\n{instruction}"
     output = _run_opencode(full_prompt, cwd=target)
     result = _parse_json_output(output)
     print(json.dumps(result, ensure_ascii=False, indent=2))

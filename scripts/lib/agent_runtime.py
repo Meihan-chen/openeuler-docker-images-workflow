@@ -295,15 +295,172 @@ def _parse_contract(
     return matches[-1]
 
 
+_COMMAND_EVIDENCE_FIELDS = ("command", "semantics", "evidence_id")
+_EVIDENCE_REQUEST_FIELDS = ("id", "claim", "source", "locator")
+_MAX_EVIDENCE_REQUESTS = 12
+_EVIDENCE_FIELD_LIMITS = {
+    "id": 128,
+    "claim": 4_000,
+    "source": 2_048,
+    "locator": 1_000,
+}
+_IDENTITY_MODES = {"dynamic", "fixed", "reuse_existing"}
+
+
+def _validate_command_evidence(evidence: object) -> None:
+    """Require a semantics claim and Harness evidence reference per command."""
+    if not isinstance(evidence, list) or not evidence:
+        raise AgentRuntimeError(
+            "Agent contract command_evidence must be a non-empty list"
+        )
+    for entry in evidence:
+        if not isinstance(entry, Mapping):
+            raise AgentRuntimeError(
+                "Agent contract command_evidence entries must be objects"
+            )
+        for field in _COMMAND_EVIDENCE_FIELDS:
+            value = entry.get(field)
+            if not isinstance(value, str) or not value.strip():
+                raise AgentRuntimeError(
+                    "Agent contract command_evidence entries must set a "
+                    f"non-empty {field}"
+                )
+
+
+def _validate_evidence_requests(requests: object) -> set[str]:
+    """Validate requests that the Harness, rather than the Agent, will resolve."""
+    if not isinstance(requests, list):
+        raise AgentRuntimeError("Agent contract evidence_requests must be a list")
+    if len(requests) > _MAX_EVIDENCE_REQUESTS:
+        raise AgentRuntimeError(
+            "Agent contract evidence_requests must contain at most "
+            f"{_MAX_EVIDENCE_REQUESTS} entries"
+        )
+    evidence_ids: set[str] = set()
+    for entry in requests:
+        if not isinstance(entry, Mapping):
+            raise AgentRuntimeError(
+                "Agent contract evidence_requests entries must be objects"
+            )
+        for field in _EVIDENCE_REQUEST_FIELDS:
+            value = entry.get(field)
+            if not isinstance(value, str) or not value.strip():
+                raise AgentRuntimeError(
+                    "Agent contract evidence_requests entries must set a "
+                    f"non-empty {field}"
+                )
+            limit = _EVIDENCE_FIELD_LIMITS[field]
+            if len(value) > limit:
+                raise AgentRuntimeError(
+                    "Agent contract evidence_requests "
+                    f"{field} must not exceed {limit} characters"
+                )
+        evidence_id = str(entry["id"]).strip()
+        if evidence_id in evidence_ids:
+            raise AgentRuntimeError(
+                f"Agent contract evidence_requests has duplicate id {evidence_id}"
+            )
+        evidence_ids.add(evidence_id)
+    return evidence_ids
+
+
+def _reject_unknown_evidence_ids(
+    *,
+    referenced_ids: object,
+    known_ids: set[str],
+    field: str,
+) -> None:
+    if not isinstance(referenced_ids, list):
+        return
+    unknown = sorted(
+        evidence_id
+        for evidence_id in referenced_ids
+        if isinstance(evidence_id, str) and evidence_id not in known_ids
+    )
+    if unknown:
+        raise AgentRuntimeError(
+            f"Agent contract {field} references unknown evidence id: "
+            + ", ".join(unknown)
+        )
+
+
+def _validate_identity_decision(decision: object) -> None:
+    """Validate the application-neutral runtime identity contract."""
+    if not isinstance(decision, Mapping):
+        raise AgentRuntimeError("Agent contract identity_decision must be an object")
+    mode = decision.get("mode")
+    if mode not in _IDENTITY_MODES:
+        raise AgentRuntimeError(
+            "Agent contract identity_decision mode must be dynamic, fixed, "
+            "or reuse_existing"
+        )
+    for field in ("user", "group"):
+        value = decision.get(field)
+        if not isinstance(value, str) or not value.strip():
+            raise AgentRuntimeError(
+                f"Agent contract identity_decision {field} must be non-empty"
+            )
+    uid = decision.get("uid")
+    gid = decision.get("gid")
+    evidence_ids = decision.get("requirement_evidence_ids")
+    if not isinstance(evidence_ids, list) or not all(
+        isinstance(item, str) and item.strip() for item in evidence_ids
+    ):
+        raise AgentRuntimeError(
+            "Agent contract identity_decision requirement_evidence_ids "
+            "must be a list of non-empty strings"
+        )
+    if mode == "fixed":
+        if (
+            isinstance(uid, bool)
+            or isinstance(gid, bool)
+            or not isinstance(uid, int)
+            or not isinstance(gid, int)
+            or uid <= 0
+            or gid <= 0
+        ):
+            raise AgentRuntimeError(
+                "Agent contract fixed identity must set positive numeric uid and gid"
+            )
+        if not evidence_ids:
+            raise AgentRuntimeError(
+                "Agent contract fixed identity requires upstream requirement evidence"
+            )
+    elif uid is not None or gid is not None:
+        raise AgentRuntimeError(
+            f"Agent contract {mode} identity must leave uid and gid null"
+        )
+
+
 def _validate_contract(
     payload: Mapping[str, object],
     required_keys: tuple[str, ...],
 ) -> None:
     if "success" in payload and not isinstance(payload["success"], bool):
         raise AgentRuntimeError("Agent contract success must be a boolean")
-    for key in ("files_created", "changes", "issues"):
+    for key in ("files_created", "changes", "issues", "command_evidence"):
         if key in payload and not isinstance(payload[key], list):
             raise AgentRuntimeError(f"Agent contract {key} must be a list")
+    evidence_ids: set[str] = set()
+    if "evidence_requests" in required_keys:
+        evidence_ids = _validate_evidence_requests(payload["evidence_requests"])
+    if "command_evidence" in required_keys:
+        _validate_command_evidence(payload["command_evidence"])
+        for index, entry in enumerate(payload["command_evidence"]):
+            _reject_unknown_evidence_ids(
+                referenced_ids=[entry["evidence_id"]],
+                known_ids=evidence_ids,
+                field=f"command_evidence[{index}].evidence_id",
+            )
+    if "identity_decision" in required_keys:
+        _validate_identity_decision(payload["identity_decision"])
+        _reject_unknown_evidence_ids(
+            referenced_ids=payload["identity_decision"].get(
+                "requirement_evidence_ids"
+            ),
+            known_ids=evidence_ids,
+            field="identity_decision.requirement_evidence_ids",
+        )
     if "status" in required_keys and payload["status"] not in {
         "approved",
         "needs_fix",
@@ -323,6 +480,20 @@ def _validate_contract(
             raise AgentRuntimeError(
                 "Agent contract coverage_score must be between 0 and 1"
             )
+
+
+def validate_agent_payload(
+    payload: Mapping[str, object],
+    *,
+    required_keys: tuple[str, ...],
+) -> None:
+    """Apply the shared structured contract outside the OpenCode runner."""
+    missing = [key for key in required_keys if key not in payload]
+    if missing:
+        raise AgentRuntimeError(
+            "Agent payload is missing required keys: " + ", ".join(missing)
+        )
+    _validate_contract(payload, required_keys)
 
 
 def _permission_config(role: str) -> str:
@@ -427,7 +598,7 @@ def run_agent(
         raise AgentRuntimeError(f"OpenCode {role} failed: {detail}")
     try:
         payload = _parse_contract(str(result.stdout or ""), required_keys)
-        _validate_contract(payload, required_keys)
+        validate_agent_payload(payload, required_keys=required_keys)
     except AgentRuntimeError as error:
         message = str(error).replace(api_key, "REDACTED")
         raise AgentRuntimeError(message) from error

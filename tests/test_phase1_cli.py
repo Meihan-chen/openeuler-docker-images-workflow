@@ -512,6 +512,10 @@ def test_phase1_generate_wires_hadolint_into_pipeline(
     )
 
     assert calls["pipeline"]["task"] is task
+    assert "goss_executable" not in calls["pipeline"]
+    assert calls["pipeline"]["evidence_resolver"].__name__ == (
+        "resolve_evidence_requests"
+    )
     assert calls["lint"] == {
         "executable": hadolint,
         "dockerfile": dockerfile,

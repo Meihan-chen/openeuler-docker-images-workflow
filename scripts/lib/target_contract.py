@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -27,6 +28,7 @@ class TargetContractError(ValueError):
         self.findings = list(findings or ())
 
 
+_LINT_TIMEOUT_SECONDS = 30
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _RUN_ID_RE = re.compile(r"^[1-9][0-9]*$")
 _RESULT_FILES = {
@@ -387,6 +389,55 @@ def _validate_meta(
         )
 
 
+def _lint_output(
+    command: list[str],
+) -> str | None:
+    """Run a bounded syntax check and return its failure detail.
+
+    `None` means the asset is fine or the checker could not run. These linters
+    are accelerators that move a known failure from a native round into
+    generation; when one is unavailable, native validation still catches the
+    same failure a round later, so an unusable checker must never block.
+    """
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=_LINT_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode == 0:
+        return None
+    detail = " ".join((completed.stderr or completed.stdout or "").split())
+    return detail[:300] or f"exit code {completed.returncode}"
+
+
+def _lint_shell_file(
+    path: Path,
+    *,
+    findings: list[dict[str, str]],
+) -> None:
+    """Reject a shell test asset that Bash cannot parse."""
+    if not path.is_file() or not path.stat().st_size:
+        return
+    bash = shutil.which("bash")
+    if bash is None:
+        return
+    detail = _lint_output([bash, "-n", str(path)])
+    if detail is None:
+        return
+    findings.append(
+        _delivery_finding(
+            "tests.shell_syntax",
+            f"{path.name} is not valid Bash: {detail}",
+            owner="testcase_creator",
+        )
+    )
+
+
 def _validate_tests(
     repo: Path,
     app_root: str,
@@ -505,6 +556,9 @@ def _validate_tests(
                 owner="testcase_creator",
             )
         )
+
+    for shell_path in (shared_entry, shared / "test_helpers.sh"):
+        _lint_shell_file(shell_path, findings=findings)
 
 
 def validate_test_contract(

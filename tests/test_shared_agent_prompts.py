@@ -91,11 +91,18 @@ def test_image_prompts_reuse_unchanged_upstream_assets_from_builder():
         (AGENTS_DIR / "image-qa.md").read_text().lower().split()
     )
 
-    for prompt in (image_creator, image_qa):
-        assert "unchanged upstream asset" in prompt
-        assert "copy --from" in prompt
-        assert "byte-identical" in prompt
-        assert "necessary local customization" in prompt
+    assert "固定版本的 builder 源码" in image_creator
+    assert "未修改的上游附属文件" in image_creator
+    assert "逐字节相同" in image_creator
+    assert "必要的本地定制" in image_creator
+    assert "复用策略" in image_creator
+    assert "stage alias" in image_creator
+    assert "copy --from" in image_creator
+
+    assert "unchanged upstream asset" in image_qa
+    assert "copy --from" in image_qa
+    assert "byte-identical" in image_qa
+    assert "necessary local customization" in image_qa
 
 
 def test_image_prompts_restrict_only_open_euler_owned_gitee_links():
@@ -152,13 +159,25 @@ def test_shared_prompts_derive_application_behavior_instead_of_assuming_it():
 
 
 def test_image_prompts_treat_fixed_numeric_identity_as_a_collision_risk():
-    image_creator = (AGENTS_DIR / "image-creator.md").read_text().lower()
-    image_qa = (AGENTS_DIR / "image-qa.md").read_text().lower()
+    """Fixed identities need upstream evidence and native collision checks."""
+    image_creator = " ".join(
+        (AGENTS_DIR / "image-creator.md").read_text().lower().split()
+    )
+    image_qa = " ".join(
+        (AGENTS_DIR / "image-qa.md").read_text().lower().split()
+    )
 
-    for prompt in (image_creator, image_qa):
-        assert "fixed numeric uid/gid" in prompt
-        assert "base image or installed packages" in prompt
-        assert "upstream or task contract" in prompt
+    # The default is an identity that cannot collide.
+    assert "groupadd -r" in image_creator
+    assert "useradd -r" in image_creator
+    assert "evidence_requests" in image_creator
+    assert "creator 不得自行声明" in image_creator
+    assert "原生构建" in image_creator
+
+    assert "fixed number" in image_qa
+    assert "harness-resolved" in image_qa
+    assert "creator cannot prove" in image_qa
+    assert "native build is authoritative" in image_qa
 
 
 def test_image_qa_leaves_unproven_package_resolution_to_native_build():
@@ -200,11 +219,19 @@ def test_testcase_guidance_avoids_scalar_goss_port_ip_assertions():
 
     for content in (testcase_creator, goss_template.lower()):
         assert 'ip: "0.0.0.0"' not in content
-    for prompt in (testcase_creator, testcase_qa):
-        normalized = " ".join(prompt.split())
-        assert "multiple listening sockets" in normalized
-        assert "scalar" in normalized
-        assert "functional" in normalized
+
+    # The Creator states the general criterion — confirm the value type before
+    # asserting on it — with `port.*.ip` as the worked example.
+    creator = " ".join(testcase_creator.split())
+    assert "port.*.ip" in creator
+    assert "标量" in creator
+    assert "集合" in creator
+    assert "listening: true" in creator
+
+    reviewer = " ".join(testcase_qa.split())
+    assert "multiple listening sockets" in reviewer
+    assert "scalar" in reviewer
+    assert "functional" in reviewer
 
 
 def test_fixer_prompt_synchronizes_observable_runtime_contract_consumers():
@@ -241,3 +268,50 @@ def test_fixer_prompt_documents_the_payload_the_harness_actually_sends():
         assert field in fixer
     for category in _GUIDANCE:
         assert category in fixer
+
+
+def test_testcase_prompts_require_command_semantics_evidence():
+    """Same command name does not mean same behavior.
+
+    Run 30781977554 asserted Kvrocks `DBSIZE` with Redis semantics. Both
+    prompts described deriving behavior from upstream, but neither asked for
+    the derivation, so nothing could be reviewed.
+    """
+    creator = " ".join((AGENTS_DIR / "testcase-creator.md").read_text().split())
+    reviewer = " ".join((AGENTS_DIR / "testcase-qa.md").read_text().split())
+
+    assert "command_evidence" in creator
+    assert '"semantics"' in creator
+    assert '"evidence_id"' in creator
+    assert "evidence_requests" in creator
+    assert '"locator"' in creator
+
+    assert "command_evidence" in reviewer
+    assert "Harness-resolved evidence" in reviewer
+    assert "not a terminal veto" in reviewer
+    assert "asynchronous cache" in reviewer
+
+
+def test_testcase_qa_issues_must_cite_evidence():
+    reviewer = " ".join((AGENTS_DIR / "testcase-qa.md").read_text().split())
+
+    assert '"evidence"' in reviewer
+    assert "does not count as a blocker or major" in reviewer
+
+
+def test_creator_prompts_keep_evidence_requests_within_harness_bounds():
+    for name in ("image-creator.md", "testcase-creator.md"):
+        prompt = " ".join((AGENTS_DIR / name).read_text().split())
+        assert "最多 12 条" in prompt
+        assert "TaskSpec 中的固定 revision" in prompt
+
+
+def test_testcase_prompts_only_defer_shell_syntax_to_the_generation_gate():
+    """Goss schema is exercised by native dgoss, not a generation sandbox."""
+    creator = " ".join((AGENTS_DIR / "testcase-creator.md").read_text().split())
+    reviewer = " ".join((AGENTS_DIR / "testcase-qa.md").read_text().split())
+
+    assert "tests.goss_render" not in creator
+    assert "tests.shell_syntax" in creator
+    assert "tests.goss_render" not in reviewer
+    assert "pinned Goss" in reviewer

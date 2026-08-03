@@ -45,6 +45,33 @@ def _approved_tests():
     }
 
 
+def _testcase_creator_output(**overrides):
+    payload = {
+        "success": True,
+        "files_created": ["Database/kvrocks/tests/goss.yaml"],
+        "command_evidence": [
+            {
+                "command": "redis-cli PING",
+                "semantics": "returns PONG once the server accepts connections",
+                "evidence_id": "command-ping-001",
+            }
+        ],
+        "evidence_requests": [
+            {
+                "id": "command-ping-001",
+                "claim": "PING returns PONG once the server accepts connections",
+                "source": (
+                    "https://github.com/apache/kvrocks/blob/"
+                    "v2.16.0/src/commands/cmd_server.cc"
+                ),
+                "locator": "Ping::Execute",
+            }
+        ],
+    }
+    payload.update(overrides)
+    return payload
+
+
 def _fully_approved_agent(*, image_summary="approved"):
     return StubAgent(
         {
@@ -52,6 +79,15 @@ def _fully_approved_agent(*, image_summary="approved"):
                 {
                     "success": True,
                     "files_created": ["Database/kvrocks/meta.yml"],
+                    "identity_decision": {
+                        "mode": "dynamic",
+                        "user": "kvrocks",
+                        "group": "kvrocks",
+                        "uid": None,
+                        "gid": None,
+                        "requirement_evidence_ids": [],
+                    },
+                    "evidence_requests": [],
                 }
             ],
             "image_qa": [
@@ -61,12 +97,7 @@ def _fully_approved_agent(*, image_summary="approved"):
                     "summary": image_summary,
                 }
             ],
-            "testcase_creator": [
-                {
-                    "success": True,
-                    "files_created": ["Database/kvrocks/tests/goss.yaml"],
-                }
-            ],
+            "testcase_creator": [_testcase_creator_output()],
             "testcase_qa": [_approved_tests()],
         }
     )
@@ -274,12 +305,7 @@ def test_generation_records_hadolint_findings_without_creator_repair(
         {
             "image_creator": [image_creator],
             "image_qa": [_approved_image()],
-            "testcase_creator": [
-                {
-                    "success": True,
-                    "files_created": ["Database/kvrocks/tests/goss.yaml"],
-                }
-            ],
+            "testcase_creator": [_testcase_creator_output()],
             "testcase_qa": [_approved_tests()],
         }
     )
@@ -690,12 +716,7 @@ def test_generation_runs_adversarial_pairs_and_records_evidence(
                 },
                 _approved_image(),
             ],
-            "testcase_creator": [
-                {
-                    "success": True,
-                    "files_created": ["Database/kvrocks/tests/goss.yaml"],
-                }
-            ],
+            "testcase_creator": [_testcase_creator_output()],
             "testcase_qa": [_approved_tests()],
         }
     )
@@ -728,11 +749,11 @@ def test_generation_runs_adversarial_pairs_and_records_evidence(
     ]
     assert [call["timeout"] for call in agent.calls] == [
         1800,
-        180,
+        900,
         1800,
-        180,
+        900,
         1800,
-        180,
+        900,
     ]
     assert "Review report to resolve" in agent.calls[2]["prompt"]
     assert "fix health" in agent.calls[2]["prompt"]
@@ -816,12 +837,7 @@ def test_generation_continues_when_second_qa_records_disagreement(
                 {"success": True, "files_created": ["Database/kvrocks/meta.yml"]},
             ],
             "image_qa": [needs_fix, needs_fix],
-            "testcase_creator": [
-                {
-                    "success": True,
-                    "files_created": ["Database/kvrocks/tests/goss.yaml"],
-                }
-            ],
+            "testcase_creator": [_testcase_creator_output()],
             "testcase_qa": [_approved_tests()],
         }
     )
@@ -843,6 +859,18 @@ def test_generation_continues_when_second_qa_records_disagreement(
     )
 
     assert result.status == "passed"
+    assert result.qa_disagreements == (
+        {
+            "role": "image_qa",
+            "round": 2,
+            "issues": needs_fix["issues"],
+            "summary": "not approved",
+        },
+    )
+    assert json.loads((reports / "qa-disagreements.json").read_text()) == {
+        "status": "passed_with_qa_disagreement",
+        "disagreements": list(result.qa_disagreements),
+    }
     assert [call["phase"] for call in gate_calls] == [
         "image",
         "image",
@@ -856,6 +884,179 @@ def test_generation_continues_when_second_qa_records_disagreement(
         "[flow][review] DISAGREEMENT image_qa round=2; "
         "continue=local_validation"
     ) in capsys.readouterr().out
+
+
+def test_image_qa_receives_latest_identity_decision_after_precheck_repair(
+    tmp_path,
+):
+    from scripts.lib.generation_pipeline import run_generation_pipeline
+
+    workspace = tmp_path / "target"
+    reports = tmp_path / "evidence"
+    workspace.mkdir()
+    initial = {
+        "success": True,
+        "files_created": ["Database/kvrocks/meta.yml"],
+        "identity_decision": {
+            "mode": "dynamic",
+            "user": "kvrocks",
+            "group": "kvrocks",
+            "uid": None,
+            "gid": None,
+            "requirement_evidence_ids": [],
+        },
+    }
+    repaired = {
+        "success": True,
+        "files_created": ["Database/kvrocks/meta.yml"],
+        "summary": "deterministic repair applied",
+        "identity_decision": {
+            "mode": "fixed",
+            "user": "kvrocks",
+            "group": "kvrocks",
+            "uid": 991,
+            "gid": 991,
+            "requirement_evidence_ids": ["upstream-identity-001"],
+        },
+    }
+    agent = StubAgent(
+        {
+            "image_creator": [initial, repaired],
+            "image_qa": [_approved_image()],
+            "testcase_creator": [_testcase_creator_output()],
+            "testcase_qa": [_approved_tests()],
+        }
+    )
+    image_results = iter(
+        (
+            _repairable_gate(
+                owner="image_creator",
+                code="dockerfile.identity",
+                message="identity decision needs repair",
+            ),
+            {"status": "passed"},
+        )
+    )
+
+    def validator(*, phase, **_):
+        if phase == "image":
+            return next(image_results)
+        return {"status": "passed"}
+
+    run_generation_pipeline(
+        workspace=workspace,
+        report_dir=reports,
+        task=_task(),
+        base_sha="1" * 40,
+        executable=tmp_path / "opencode",
+        api_key="deepseek-secret",
+        agent_runner=agent,
+        target_validator=validator,
+    )
+
+    image_qa_prompt = next(
+        call["prompt"] for call in agent.calls if call["role"] == "image_qa"
+    )
+    assert "Image Creator identity decision" in image_qa_prompt
+    assert '"uid": 991' in image_qa_prompt
+    assert "upstream-identity-001" in image_qa_prompt
+    assert '"files_created"' in image_qa_prompt
+    assert "deterministic repair applied" in image_qa_prompt
+
+
+def test_testcase_qa_receives_latest_evidence_after_precheck_repair(tmp_path):
+    from scripts.lib.generation_pipeline import run_generation_pipeline
+
+    workspace = tmp_path / "target"
+    reports = tmp_path / "evidence"
+    workspace.mkdir()
+    initial = _testcase_creator_output(
+        command_evidence=[
+            {
+                "command": "redis-cli PING",
+                "semantics": "returns PONG",
+                "evidence_id": "command-ping-initial",
+            }
+        ],
+        evidence_requests=[
+            {
+                "id": "command-ping-initial",
+                "claim": "PING returns PONG",
+                "source": (
+                    "https://github.com/apache/kvrocks/blob/"
+                    "v2.16.0/src/commands/cmd_server.cc"
+                ),
+                "locator": "Ping::Execute",
+            }
+        ],
+    )
+    repaired = _testcase_creator_output(
+        command_evidence=[
+            {
+                "command": "redis-cli EXISTS evidence-key",
+                "semantics": "returns whether the exact key exists",
+                "evidence_id": "command-exists-repaired",
+            }
+        ],
+        evidence_requests=[
+            {
+                "id": "command-exists-repaired",
+                "claim": "EXISTS reports whether the exact key exists",
+                "source": (
+                    "https://github.com/apache/kvrocks/blob/"
+                    "v2.16.0/src/commands/cmd_key.cc"
+                ),
+                "locator": "Exists::Execute",
+            }
+        ],
+    )
+    agent = StubAgent(
+        {
+            "image_creator": [
+                {
+                    "success": True,
+                    "files_created": ["Database/kvrocks/meta.yml"],
+                }
+            ],
+            "image_qa": [_approved_image()],
+            "testcase_creator": [initial, repaired],
+            "testcase_qa": [_approved_tests()],
+        }
+    )
+    full_results = iter(
+        (
+            _repairable_gate(
+                owner="testcase_creator",
+                code="tests.shell_syntax",
+                message="test.sh needs repair",
+            ),
+            {"status": "passed"},
+            {"status": "passed"},
+        )
+    )
+
+    def validator(*, phase, **_):
+        if phase == "image":
+            return {"status": "passed"}
+        return next(full_results)
+
+    run_generation_pipeline(
+        workspace=workspace,
+        report_dir=reports,
+        task=_task(),
+        base_sha="1" * 40,
+        executable=tmp_path / "opencode",
+        api_key="deepseek-secret",
+        agent_runner=agent,
+        target_validator=validator,
+    )
+
+    testcase_qa_prompt = next(
+        call["prompt"] for call in agent.calls if call["role"] == "testcase_qa"
+    )
+    assert "redis-cli EXISTS evidence-key" in testcase_qa_prompt
+    assert "command-exists-repaired" in testcase_qa_prompt
+    assert "command-ping-initial" not in testcase_qa_prompt
 
 
 def test_generation_redacts_secret_from_one_line_qa_summary(tmp_path, capsys):
@@ -1251,6 +1452,46 @@ def test_generation_accepts_a_task_it_has_never_seen(tmp_path):
     workspace = tmp_path / "target"
     workspace.mkdir()
     agent = _fully_approved_agent()
+    agent.responses["image_creator"] = [
+        {
+            "success": True,
+            "files_created": ["Cloud/caddy/meta.yml"],
+            "identity_decision": {
+                "mode": "dynamic",
+                "user": "caddy",
+                "group": "caddy",
+                "uid": None,
+                "gid": None,
+                "requirement_evidence_ids": [],
+            },
+            "evidence_requests": [],
+        }
+    ]
+    # The QA prompt echoes the Creator's command evidence, so the fixture has
+    # to speak about the task under test rather than the default one.
+    agent.responses["testcase_creator"] = [
+        _testcase_creator_output(
+            files_created=["Cloud/caddy/tests/goss.yaml"],
+            command_evidence=[
+                {
+                    "command": "caddy version",
+                    "semantics": "prints the compiled release string",
+                    "evidence_id": "command-version-001",
+                }
+            ],
+            evidence_requests=[
+                {
+                    "id": "command-version-001",
+                    "claim": "caddy version prints the compiled release string",
+                    "source": (
+                        "https://github.com/caddyserver/caddy/blob/"
+                        "v2.11.4/cmd/commandfuncs.go"
+                    ),
+                    "locator": "cmdVersion",
+                }
+            ],
+        )
+    ]
     unseen = TaskSpec.from_workflow_dispatch(
         {
             "app": "caddy",
@@ -1336,7 +1577,10 @@ def test_phase1_prompts_pin_task_paths_without_injecting_app_implementation():
     assert ".oe-scratch" in prompt
     assert "downloads, archives and temporary files" in prompt
     assert "Your final response MUST be exactly one JSON object" in prompt
-    assert "documented `success` and `files_created` keys" in prompt
+    assert (
+        "documented `success`, `files_created`, `identity_decision`, and "
+        "`evidence_requests` keys"
+    ) in prompt
     assert "tool output is not the final response" in prompt
     assert "deepseek-secret" not in prompt
 
@@ -1476,12 +1720,7 @@ def test_generation_hard_stops_on_stray_tarball_outside_task_scope(
         {
             "image_creator": [created],
             "image_qa": [_approved_image()],
-            "testcase_creator": [
-                {
-                    "success": True,
-                    "files_created": ["Database/kvrocks/tests/goss.yaml"],
-                }
-            ],
+            "testcase_creator": [_testcase_creator_output()],
             "testcase_qa": [_approved_tests()],
         }
     )
@@ -1525,3 +1764,277 @@ def test_generation_hard_stops_on_stray_tarball_outside_task_scope(
 
     assert [call["role"] for call in agent.calls] == ["image_creator"]
     assert not (reports / "image-creator-precheck-repair.json").exists()
+
+
+def test_testcase_qa_prompt_carries_the_creator_command_evidence(tmp_path):
+    """QA has to be able to check the claim, not re-derive it.
+
+    In run 30781977554 the reviewer approved a `DBSIZE` assertion written with
+    Redis semantics at coverage 0.9. It had no statement of where any
+    expectation came from, so there was nothing to check.
+    """
+    from scripts.lib.generation_pipeline import run_generation_pipeline
+
+    workspace = tmp_path / "target"
+    tests = workspace / "Database" / "kvrocks" / "tests"
+    tests.mkdir(parents=True)
+    (tests / "test.sh").write_text("redis-cli -p 6666 DBSIZE\n")
+    agent = _fully_approved_agent()
+    agent.responses["testcase_creator"] = [
+        _testcase_creator_output(
+            command_evidence=[
+                {
+                    "command": "redis-cli DBSIZE",
+                    "semantics": (
+                        "returns a cached count refreshed by DBSIZE SCAN"
+                    ),
+                    "evidence_id": "command-dbsize-001",
+                }
+            ],
+            evidence_requests=[
+                {
+                    "id": "command-dbsize-001",
+                    "claim": "DBSIZE returns a cached count",
+                    "source": (
+                        "https://github.com/apache/kvrocks/blob/"
+                        "v2.16.0/src/commands/cmd_server.cc"
+                    ),
+                    "locator": "DBSize::Execute",
+                }
+            ],
+        )
+    ]
+
+    resolved = {
+        "status": "resolved",
+        "entries": [
+            {
+                "id": "command-dbsize-001",
+                "resolved": True,
+                "excerpt": "DBSize::Execute reads the cached key count",
+                "sha256": "b" * 64,
+            }
+        ],
+    }
+
+    run_generation_pipeline(
+        workspace=workspace,
+        report_dir=tmp_path / "evidence",
+        task=_task(),
+        base_sha="1" * 40,
+        executable=tmp_path / "opencode",
+        api_key="deepseek-secret",
+        agent_runner=agent,
+        target_validator=lambda **_: {"status": "passed"},
+        evidence_resolver=lambda **_: resolved,
+    )
+
+    image_qa_prompt = agent.calls[1]["prompt"]
+    testcase_qa_prompt = agent.calls[3]["prompt"]
+    assert "Testcase Creator command evidence" in testcase_qa_prompt
+    assert "refreshed by DBSIZE SCAN" in testcase_qa_prompt
+    assert "Harness-resolved evidence bundle" in testcase_qa_prompt
+    assert "DBSize::Execute reads the cached key count" in testcase_qa_prompt
+    # Image QA reviews image-owned content and never sees the test evidence.
+    assert "Testcase Creator command evidence" not in image_qa_prompt
+
+
+def test_testcase_qa_receives_harness_resolved_evidence_bundle(tmp_path):
+    from scripts.lib.generation_pipeline import run_generation_pipeline
+
+    workspace = tmp_path / "target"
+    tests = workspace / "Database" / "kvrocks" / "tests"
+    tests.mkdir(parents=True)
+    (tests / "test.sh").write_text("redis-cli -p 6666 EXISTS evidence-key\n")
+    agent = _fully_approved_agent()
+    agent.responses["testcase_creator"] = [
+        _testcase_creator_output(
+            command_evidence=[
+                {
+                    "command": "redis-cli EXISTS evidence-key",
+                    "semantics": "returns whether the exact key exists",
+                    "evidence_id": "command-exists-001",
+                }
+            ],
+            evidence_requests=[
+                {
+                    "id": "command-exists-001",
+                    "claim": "EXISTS reports whether the exact key exists",
+                    "source": (
+                        "https://github.com/apache/kvrocks/blob/"
+                        "v2.16.0/src/commands/cmd_key.cc"
+                    ),
+                    "locator": "Exists::Execute",
+                }
+            ]
+        )
+    ]
+    resolved = {
+        "status": "resolved",
+        "scenario": "new-image",
+        "entries": [
+            {
+                "id": "command-exists-001",
+                "resolved": True,
+                "excerpt": "Exists::Execute returns the number of keys found",
+                "sha256": "a" * 64,
+            }
+        ],
+    }
+    resolver_calls = []
+
+    def resolver(*, task, requests):
+        resolver_calls.append((task, requests))
+        return resolved
+
+    run_generation_pipeline(
+        workspace=workspace,
+        report_dir=tmp_path / "evidence",
+        task=_task(),
+        base_sha="1" * 40,
+        executable=tmp_path / "opencode",
+        api_key="deepseek-secret",
+        agent_runner=agent,
+        target_validator=lambda **_: {"status": "passed"},
+        evidence_resolver=resolver,
+    )
+
+    testcase_qa_prompt = next(
+        call["prompt"] for call in agent.calls if call["role"] == "testcase_qa"
+    )
+    assert "Harness-resolved evidence bundle" in testcase_qa_prompt
+    assert "Exists::Execute returns the number of keys found" in testcase_qa_prompt
+    assert resolver_calls[0][1][0]["id"] == "command-exists-001"
+    assert json.loads(
+        (
+            tmp_path
+            / "evidence"
+            / "testcase-round1-resolved-evidence.json"
+        ).read_text()
+    ) == resolved
+
+
+def test_unresolved_creator_evidence_stops_before_qa_judgment(tmp_path):
+    from scripts.lib.generation_pipeline import (
+        GenerationPipelineError,
+        run_generation_pipeline,
+    )
+
+    workspace = tmp_path / "target"
+    workspace.mkdir()
+    agent = _fully_approved_agent()
+    unresolved = {
+        "status": "unresolved",
+        "entries": [
+            {
+                "id": "command-ping-001",
+                "resolved": False,
+                "reason": "locator was not found",
+            }
+        ],
+    }
+
+    with pytest.raises(GenerationPipelineError, match="evidence.*unresolved"):
+        run_generation_pipeline(
+            workspace=workspace,
+            report_dir=tmp_path / "evidence",
+            task=_task(),
+            base_sha="1" * 40,
+            executable=tmp_path / "opencode",
+            api_key="deepseek-secret",
+            agent_runner=agent,
+            target_validator=lambda **_: {"status": "passed"},
+            evidence_resolver=lambda **_: unresolved,
+        )
+
+    assert "testcase_qa" not in [call["role"] for call in agent.calls]
+    assert json.loads(
+        (
+            tmp_path
+            / "evidence"
+            / "testcase-round1-resolved-evidence.json"
+        ).read_text()
+    ) == unresolved
+
+
+def test_qa_prompt_has_a_final_size_limit_after_evidence_is_added(tmp_path):
+    from scripts.lib.generation_pipeline import GenerationPipelineError, _qa_prompt
+
+    workspace = tmp_path / "target"
+    tests = workspace / "Database" / "kvrocks" / "tests"
+    tests.mkdir(parents=True)
+    (tests / "goss.yaml").write_text("#" + "x" * 59_000)
+
+    with pytest.raises(GenerationPipelineError, match="QA prompt is too large"):
+        _qa_prompt(
+            role="testcase_qa",
+            workspace=workspace,
+            task=_task(),
+            base_sha="1" * 40,
+            resolved_evidence={
+                "status": "resolved",
+                "entries": [{"excerpt": "y" * 45_000}],
+            },
+        )
+
+
+def test_fixer_prompt_inlines_only_the_matching_failure_patterns(tmp_path):
+    """The Fixer receives only verified patterns matched by Harness evidence."""
+    from scripts.lib.generation_pipeline import build_role_prompt
+
+    prompt = build_role_prompt(
+        role="fixer",
+        task=_task(),
+        base_sha="1" * 40,
+        review={
+            "kind": "native_validation_failure",
+            "architectures": {
+                "x86_64": {
+                    "failed_stage": "dgoss",
+                    "failure": (
+                        "Error: invalid Attribute for "
+                        "File:/var/lib/kvrocks: dir"
+                    ),
+                }
+            },
+        },
+    )
+
+    assert "## Verified failure knowledge" in prompt
+    assert "goss_schema_mismatch" in prompt
+    assert "pinned Goss resource schema" in prompt
+    # An unrelated pattern stays collapsed to its index line.
+    assert "runtime_identity_collision" in prompt
+    assert "A requested numeric user" not in prompt
+
+
+def test_creator_prompts_carry_no_failure_pattern_section(tmp_path):
+    from scripts.lib.generation_pipeline import build_role_prompt
+
+    prompt = build_role_prompt(
+        role="testcase_creator",
+        task=_task(),
+        base_sha="1" * 40,
+    )
+
+    assert "Verified failure knowledge" not in prompt
+
+
+def test_malformed_advisory_knowledge_does_not_crash_fixer_prompt(
+    tmp_path,
+    monkeypatch,
+):
+    from scripts.lib import generation_pipeline
+
+    malformed = tmp_path / "failure-patterns.yml"
+    malformed.write_text("patterns:\n  - id: truncated\n")
+    monkeypatch.setattr(generation_pipeline, "_KNOWLEDGE_PATH", malformed)
+
+    prompt = generation_pipeline.build_role_prompt(
+        role="fixer",
+        task=_task(),
+        base_sha="1" * 40,
+        review={"kind": "native_validation_failure", "failure": "unknown"},
+    )
+
+    assert "## Verified failure knowledge" not in prompt

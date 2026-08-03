@@ -1,0 +1,98 @@
+schema_version: 1
+patterns:
+  - id: runtime_identity_collision
+    title: Runtime identity collides with an account supplied by the base image
+    stages: [native_build]
+    symptom_keywords:
+      - groupadd
+      - GID
+      - not unique
+      - "exit code: 4"
+    diagnosis: >-
+      A requested numeric user or group identifier is already occupied after
+      runtime packages are installed. A name lookup cannot prove that a numeric
+      identifier is free.
+    remediation:
+      - Prefer dynamic allocation or reuse a compatible account created by an installed package.
+      - Use a fixed numeric identity only when the upstream contract requires it and Harness-resolved evidence proves the requirement.
+      - Synchronize runtime ownership and identity assertions when the identity changes.
+    prevention: >-
+      Require a structured identity decision whose fixed identifiers reference
+      Harness-resolved upstream evidence, then let the native build validate the
+      final package set.
+    verification:
+      status: verified
+      sources:
+        - https://github.com/Meihan-chen/openeuler-docker-images-workflow/actions/runs/30781977554/job/91597036026
+        - regression:tests/test_agent_runtime.py
+
+  - id: build_feature_dependency_mismatch
+    title: An optional build feature requires a dependency unavailable in the target environment
+    stages: [native_build]
+    symptom_keywords:
+      - cannot find static library
+      - disable
+      - CMake Error
+    diagnosis: >-
+      The upstream build enables an optional feature by default, but the target
+      distribution does not provide the dependency or artifact that feature
+      requires.
+    remediation:
+      - Read the upstream configure error and pinned build definitions to identify the controlling feature switch.
+      - Disable the optional feature only after confirming it is not part of the required runtime contract.
+      - Preserve any runtime dependency needed by the resulting linkage mode.
+    prevention: >-
+      Derive build switches from pinned upstream definitions and prove the final
+      configuration with native builds on every supported architecture.
+    verification:
+      status: verified
+      sources:
+        - https://github.com/Meihan-chen/openeuler-docker-images-workflow/actions/runs/30781977554/job/91597036026
+
+  - id: goss_schema_mismatch
+    title: Goss rejects an attribute before executing assertions
+    stages: [dgoss]
+    symptom_keywords:
+      - invalid Attribute for
+      - config-parse
+      - dgoss
+    diagnosis: >-
+      An Agent-authored gossfile uses an attribute that is not accepted by the
+      pinned Goss resource schema, so no runtime assertion executes.
+    remediation:
+      - Replace the attribute with one documented by the pinned Goss resource schema.
+      - Keep the repair scoped to the test asset when native build evidence is healthy.
+    prevention: >-
+      Keep generated assertions within the pinned Goss schema and let native
+      dgoss validate the complete configuration inside the candidate container.
+    verification:
+      status: verified
+      sources:
+        - https://github.com/Meihan-chen/openeuler-docker-images-workflow/actions/runs/30781977554/job/91597036026
+        - regression:tests/test_native_validation.py
+        - regression:tests/test_target_contract.py
+
+  - id: protocol_command_semantics_mismatch
+    title: A protocol-compatible command has application-specific semantics
+    stages: [shared_tests]
+    symptom_keywords:
+      - shared_tests
+      - functional roundtrip passed
+      - metadata assertion failed
+      - TESTS_FAILED
+    diagnosis: >-
+      A test assumes the conventional meaning of a familiar command, while the
+      target application implements asynchronous, cached, placeholder, or
+      otherwise application-specific behavior.
+    remediation:
+      - Compare the assertion with Harness-resolved evidence from the pinned upstream source.
+      - Replace an unsupported assumption with a semantically verified assertion that covers the same behavior.
+      - Do not change a healthy image merely to satisfy an incorrect test expectation.
+    prevention: >-
+      Require every application command in the shared test entrypoint to
+      reference a Harness-resolved evidence request before QA review.
+    verification:
+      status: verified
+      sources:
+        - https://github.com/Meihan-chen/openeuler-docker-images-workflow/actions/runs/30781977554/job/91597036026
+        - regression:tests/test_agent_runtime.py

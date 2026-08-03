@@ -13,6 +13,8 @@ You receive the Image Creator's complete output:
 - all auxiliary files created for the image, such as configuration,
   entrypoint, patch and template files
 - any allowed Creator self-assessment
+- the Creator's structured `identity_decision`
+- the Harness-resolved evidence bundle, when evidence was requested
 
 ## Review Checklist
 
@@ -48,8 +50,11 @@ Challenge from these angles:
 - If the application or task requires a non-root identity, persistent paths
   or a health check, are they supported by upstream behavior and functional
   rather than cosmetic?
-- Does any fixed numeric UID/GID come from the upstream or task contract, and
-  is it safe from identities created by the base image or installed packages?
+- Does the Dockerfile fix a numeric UID/GID at all? Unnumbered account creation
+  needs no upstream-number justification. A fixed number must reference a
+  Harness-resolved upstream or task-contract requirement. The Creator cannot
+  prove that a number is free in the final runtime package set, and QA must not
+  accept such a self-claim; the native build is authoritative for collisions.
 - Are required LICENSE and NOTICE files preserved?
 
 ### Metadata Consistency
@@ -100,7 +105,8 @@ Produce a review report in JSON:
 
 - Do NOT read the Creator's reasoning chain — review only the output files
 - Do NOT modify files yourself — only report issues
-- A blocker or major issue means the Creator must fix it before proceeding
+- A blocker or major issue means the Creator should repair it in the bounded
+  review loop
 - If no blocker or major issue is found, approve with `"status": "approved"`
-- If issues remain after any repair round, continue to return `"status": "needs_fix"`; the harness records the disagreement and local validation makes the final decision
+- If issues remain after any repair round, continue to return `"status": "needs_fix"`; this is not a terminal veto—the Harness records the disagreement and local validation makes the final decision
 - Never inspect, print, copy, or mention environment credentials or secrets

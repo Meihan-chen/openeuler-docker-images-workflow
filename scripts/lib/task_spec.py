@@ -28,6 +28,7 @@ _DOMAINS = {
 _APP_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
 _OS_VERSION_RE = re.compile(r"^\d{2}\.\d{2}(?:-lts)?(?:-sp\d+)?$")
+_SCENARIOS = {"new-image", "version-update", "oe-upgrade"}
 _MIGRATED_OPENEULER_GITEE_RE = re.compile(
     r"^(?:www\.)?gitee\.com/(?:openeuler|src-openeuler)(?:/|$)",
     re.IGNORECASE,
@@ -62,6 +63,7 @@ class TaskSpec:
         os_version = _required(raw, "os_version").lower()
         domain_input = _required(raw, "domain")
         source_url = _required(raw, "source_url")
+        scenario = str(raw.get("scenario", "new-image")).strip().lower()
 
         if not _APP_RE.fullmatch(app):
             raise TaskSpecError("app: use lowercase letters, numbers, dot, dash or underscore")
@@ -69,6 +71,8 @@ class TaskSpec:
             raise TaskSpecError("version: contains unsafe characters")
         if not _OS_VERSION_RE.fullmatch(os_version):
             raise TaskSpecError("os_version: unsupported openEuler version format")
+        if scenario not in _SCENARIOS:
+            raise TaskSpecError(f"scenario: unsupported workflow {scenario!r}")
 
         domain = _DOMAINS.get(domain_input.lower())
         if domain is None:
@@ -89,6 +93,7 @@ class TaskSpec:
             os_version=os_version,
             domain=domain,
             source_url=source_url,
+            scenario=scenario,
         )
 
     @property
@@ -128,5 +133,6 @@ class TaskSpec:
                 "os_version": raw.get("os_version"),
                 "domain": raw.get("domain"),
                 "source_url": raw.get("source_url"),
+                "scenario": raw.get("scenario", "new-image"),
             }
         )
