@@ -110,7 +110,7 @@ jobs:
         run: |
           target_app="${APP}"
           if [ "${OPERATION}" = "existing_as_new_probe" ]; then
-            target_app="${APP}-e2e-probe"
+            target_app="${APP}-e2e-test"
           fi
           mkdir -p "${RUNNER_TEMP}/phase1-prepare"
           "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
@@ -172,6 +172,13 @@ jobs:
             echo "probe reference is still visible to the working tree" >&2
             exit 2
           fi
+
+      - name: Apply existing-as-new semantic context
+        if: ${{ inputs.operation == 'existing_as_new_probe' }}
+        uses: ./.github/actions/phase1-existing-as-new-context
+        with:
+          canonical-app: ${{ inputs.app }}
+          target-alias: ${{ inputs.app }}-e2e-test
 
       - name: Generate and review candidate content
         if: >-
@@ -379,6 +386,11 @@ jobs:
       round: "1"
       max_rounds: ${{ inputs.operation == 'pipeline_smoke' && '0' || '3' }}
       next_round: "2"
+      canonical_app: >-
+        ${{ inputs.operation == 'existing_as_new_probe' && inputs.app || '' }}
+      target_alias: >-
+        ${{ inputs.operation == 'existing_as_new_probe' &&
+            format('{0}-e2e-test', inputs.app) || '' }}
     secrets:
       DEEPSEEK_API_KEY: >-
         ${{ inputs.operation == 'pipeline_smoke' && ''
@@ -408,6 +420,11 @@ jobs:
       round: "2"
       max_rounds: ${{ inputs.operation == 'pipeline_smoke' && '0' || '3' }}
       next_round: "3"
+      canonical_app: >-
+        ${{ inputs.operation == 'existing_as_new_probe' && inputs.app || '' }}
+      target_alias: >-
+        ${{ inputs.operation == 'existing_as_new_probe' &&
+            format('{0}-e2e-test', inputs.app) || '' }}
     secrets:
       DEEPSEEK_API_KEY: >-
         ${{ inputs.operation == 'pipeline_smoke' && ''
@@ -437,6 +454,11 @@ jobs:
       round: "3"
       max_rounds: ${{ inputs.operation == 'pipeline_smoke' && '0' || '3' }}
       next_round: "4"
+      canonical_app: >-
+        ${{ inputs.operation == 'existing_as_new_probe' && inputs.app || '' }}
+      target_alias: >-
+        ${{ inputs.operation == 'existing_as_new_probe' &&
+            format('{0}-e2e-test', inputs.app) || '' }}
     secrets:
       DEEPSEEK_API_KEY: >-
         ${{ inputs.operation == 'pipeline_smoke' && ''
@@ -466,6 +488,11 @@ jobs:
       round: "4"
       max_rounds: ${{ inputs.operation == 'pipeline_smoke' && '0' || '3' }}
       next_round: "5"
+      canonical_app: >-
+        ${{ inputs.operation == 'existing_as_new_probe' && inputs.app || '' }}
+      target_alias: >-
+        ${{ inputs.operation == 'existing_as_new_probe' &&
+            format('{0}-e2e-test', inputs.app) || '' }}
     secrets:
       DEEPSEEK_API_KEY: >-
         ${{ inputs.operation == 'pipeline_smoke' && ''
@@ -901,15 +928,15 @@ jobs:
             printf -- '- No GitCode branch, PR, or Issue was written.\n'
           } >> "${GITHUB_STEP_SUMMARY}"
 
-      - name: Publish existing-as-new probe handoff
+      - name: Publish existing-as-new test handoff
         if: ${{ inputs.operation == 'existing_as_new_probe' }}
         env:
           SOURCE_APP: ${{ inputs.app }}
           RUN_ID: ${{ github.run_id }}
         run: |
           {
-            printf '## Existing-as-new probe passed\n\n'
-            printf -- "- Generated alias: \`%s-e2e-probe\`\n" \
+            printf '## Existing-as-new test passed\n\n'
+            printf -- "- Generated alias: \`%s-e2e-test\`\n" \
               "${SOURCE_APP}"
             printf -- "- Candidate artifact: \`phase1-candidate-%s\`\n" \
               "${RUN_ID}"

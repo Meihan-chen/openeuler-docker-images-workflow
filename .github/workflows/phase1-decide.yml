@@ -21,6 +21,16 @@ on:
           because GitHub expressions have no arithmetic operators.
         required: true
         type: string
+      canonical_app:
+        description: Canonical app for the temporary existing-as-new test
+        required: false
+        default: ""
+        type: string
+      target_alias:
+        description: Temporary output alias for the existing-as-new test
+        required: false
+        default: ""
+        type: string
     secrets:
       DEEPSEEK_API_KEY:
         # pipeline_smoke converges deterministically and must never repair,
@@ -59,6 +69,13 @@ jobs:
         uses: ./.github/actions/phase1-setup
         with:
           arch: x86_64
+
+      - name: Apply existing-as-new semantic context
+        if: ${{ inputs.canonical_app != '' }}
+        uses: ./.github/actions/phase1-existing-as-new-context
+        with:
+          canonical-app: ${{ inputs.canonical_app }}
+          target-alias: ${{ inputs.target_alias }}
 
       - name: Download round candidate
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093

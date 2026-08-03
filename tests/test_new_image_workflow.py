@@ -15,7 +15,12 @@ ROUNDS = ("round1", "round2", "round3", "round4")
 DECISIONS = ("decide1", "decide2", "decide3", "decide4")
 ACTIONLINT_CONFIG = ROOT / ".github" / "actionlint.yaml"
 ACTIONS_DIR = ROOT / ".github" / "actions"
-PHASE1_ACTIONS = ("phase1-setup", "phase1-replay", "phase1-emit-patch")
+PHASE1_ACTIONS = (
+    "phase1-setup",
+    "phase1-replay",
+    "phase1-emit-patch",
+    "phase1-existing-as-new-context",
+)
 
 
 def _workflow(path=None):
@@ -80,7 +85,7 @@ def test_existing_as_new_probe_hides_reference_and_delivers_alias_pr():
     assert "existing_as_new_probe" in prepare["if"]
     normalize = by_name["Normalize TaskSpec"]
     assert "existing_as_new_probe" in normalize["run"]
-    assert '${APP}-e2e-probe' in normalize["run"]
+    assert '${APP}-e2e-test' in normalize["run"]
 
     hide = by_name["Hide existing application from the probe"]
     restore = by_name["Restore existing application after the probe"]
@@ -111,8 +116,89 @@ def test_existing_as_new_probe_hides_reference_and_delivers_alias_pr():
     assert "phase1-candidate-" in delivery_text
 
     package_text = _job_text(jobs["package_candidate"])
-    assert "Existing-as-new probe passed" in package_text
+    assert "Existing-as-new test passed" in package_text
     assert "must not be merged" in package_text
+
+
+def test_existing_as_new_context_reaches_generation_and_every_fixer():
+    jobs = _workflow()["jobs"]
+    prepare_steps = jobs["prepare"]["steps"]
+    prepare_by_name = {step["name"]: step for step in prepare_steps}
+    context = prepare_by_name["Apply existing-as-new semantic context"]
+
+    assert context["uses"] == (
+        "./.github/actions/phase1-existing-as-new-context"
+    )
+    assert "existing_as_new_probe" in context["if"]
+    assert context["with"]["canonical-app"] == "${{ inputs.app }}"
+    assert context["with"]["target-alias"] == "${{ inputs.app }}-e2e-test"
+    assert prepare_steps.index(context) < prepare_steps.index(
+        prepare_by_name["Generate and review candidate content"]
+    )
+
+    for name in DECISIONS:
+        call = jobs[name]["with"]
+        assert "existing_as_new_probe" in call["canonical_app"]
+        assert "inputs.app" in call["canonical_app"]
+        assert "existing_as_new_probe" in call["target_alias"]
+        assert "inputs.app" in call["target_alias"]
+        assert "e2e-test" in call["target_alias"]
+
+    decide = _workflow(DECIDE_PATH)
+    call_inputs = _trigger(decide)["workflow_call"]["inputs"]
+    assert call_inputs["canonical_app"]["required"] is False
+    assert call_inputs["target_alias"]["required"] is False
+    decide_steps = decide["jobs"]["decide"]["steps"]
+    decide_by_name = {step["name"]: step for step in decide_steps}
+    fixer_context = decide_by_name["Apply existing-as-new semantic context"]
+    assert fixer_context["uses"] == context["uses"]
+    assert "inputs.canonical_app != ''" in fixer_context["if"]
+    assert fixer_context["with"]["canonical-app"] == (
+        "${{ inputs.canonical_app }}"
+    )
+    assert fixer_context["with"]["target-alias"] == (
+        "${{ inputs.target_alias }}"
+    )
+    assert decide_steps.index(fixer_context) < decide_steps.index(
+        decide_by_name["Converge or repair"]
+    )
+
+
+def test_existing_as_new_context_action_updates_every_agent_prompt(tmp_path):
+    action = _action("phase1-existing-as-new-context")
+    step = action["runs"]["steps"][0]
+    prompt_dir = tmp_path / ".github" / "agents"
+    prompt_dir.mkdir(parents=True)
+    prompts = (
+        "image-creator.md",
+        "image-qa.md",
+        "testcase-creator.md",
+        "testcase-qa.md",
+        "code-fixer.md",
+    )
+    for prompt in prompts:
+        (prompt_dir / prompt).write_text(f"original {prompt}\n")
+
+    completed = subprocess.run(
+        ["bash", "-c", step["run"]],
+        env={
+            **os.environ,
+            "GITHUB_WORKSPACE": str(tmp_path),
+            "CANONICAL_APP": "kylin",
+            "TARGET_ALIAS": "kylin-e2e-test",
+        },
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    for prompt in prompts:
+        text = (prompt_dir / prompt).read_text()
+        assert f"original {prompt}" in text
+        assert "The canonical application is `kylin`." in text
+        assert "`kylin-e2e-test` is only a temporary" in text
+        assert "Do not create a probe-only, client-only" in text
+        assert "Tests must start and validate the candidate image itself" in text
 
 
 def test_existing_as_new_probe_shell_restores_reference_without_diff(tmp_path):
@@ -192,7 +278,7 @@ def test_existing_as_new_probe_shell_restores_reference_without_diff(tmp_path):
         text=True,
     ).stdout == ""
 
-    alias = workspace / "Bigdata" / "kylin-e2e-probe"
+    alias = workspace / "Bigdata" / "kylin-e2e-test"
     alias.mkdir()
     (alias / "Dockerfile").write_text("generated\n")
     restored = subprocess.run(
@@ -214,7 +300,7 @@ def test_existing_as_new_probe_shell_restores_reference_without_diff(tmp_path):
         capture_output=True,
         text=True,
     ).stdout
-    assert "Bigdata/kylin-e2e-probe/" in status
+    assert "Bigdata/kylin-e2e-test/" in status
     assert "Bigdata/kylin/" not in status
 
 
