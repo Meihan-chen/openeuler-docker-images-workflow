@@ -49,6 +49,10 @@ that choice in the final summary. Dockerfile network fetches must use a small
 bounded retry and connection timeout. Verify a published checksum when upstream
 provides one; never add an unverified mirror fallback.
 
+研究阶段优先读取固定版本源码、Release 元数据和 checksum。只有必须确认发布包内部结构时
+才下载完整产物；单次研究网络操作最多 180 秒。网络操作失败后，不得继续使用未验证文件或反复重试；
+应切换到源码或元数据继续生成，并把完整下载和校验交给后续原生构建。
+
 ### 步骤 2：研究同类参考包
 
 查看 `{category}/` 目录下已有包，选取 1-2 个同类型项目作为参考。

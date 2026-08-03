@@ -83,6 +83,17 @@ def test_image_prompts_keep_source_fetches_reproducible_and_bounded():
         assert "unverified mirror fallback" in prompt
 
 
+def test_image_creator_bounds_optional_release_artifact_research():
+    image_creator = " ".join(
+        (AGENTS_DIR / "image-creator.md").read_text().lower().split()
+    )
+
+    assert "只有必须确认发布包内部结构时" in image_creator
+    assert "单次研究网络操作最多 180 秒" in image_creator
+    assert "不得继续使用未验证文件或反复重试" in image_creator
+    assert "完整下载和校验交给后续原生构建" in image_creator
+
+
 def test_image_prompts_reuse_unchanged_upstream_assets_from_builder():
     image_creator = " ".join(
         (AGENTS_DIR / "image-creator.md").read_text().lower().split()
