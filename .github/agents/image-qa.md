@@ -21,6 +21,11 @@ Challenge from these angles:
 ### Dockerfile Correctness
 - Does every build/runtime stage use the TaskSpec-selected openEuler base image, regardless of equivalent Dockerfile variable or stage-alias spelling?
 - Is the exact requested source tag or immutable reference used?
+- Does source acquisition prefer the TaskSpec source origin and an immutable
+  artifact, with a bounded retry and connection timeout? If another official
+  origin is used, is the necessity supported by upstream evidence? Is a
+  published checksum verified when upstream provides one, with no unverified
+  mirror fallback?
 - Are all required packages installed?
 - Treat package availability or ABI/version compatibility as a blocker only
   when there is concrete evidence in the provided snapshot. When that evidence
@@ -31,6 +36,11 @@ Challenge from these angles:
 - Is the ENTRYPOINT/CMD correct for this application?
 - Is configuration provenance clear, with upstream-provided configuration
   preferred unless a local configuration is necessary?
+- Is every unchanged upstream asset already present in the builder source
+  reused with `COPY --from` instead of committed as a byte-identical auxiliary
+  file? If a local copy exists, is there a necessary local customization or
+  evidence that the builder source cannot supply it, with provenance and the
+  required difference documented?
 - Are configuration files kept outside the persistent data directory so a
   data-volume mount cannot hide required startup configuration?
 - For compiled apps: is multi-stage build used correctly?

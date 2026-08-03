@@ -40,6 +40,15 @@ gh api repos/{owner}/{repo}/readme --jq '.content' | base64 -d | head -60
 
 确定：任务指定的精确稳定版本、构建语言、Go 版本（如果是 Go 项目）、主要二进制名称、License 类型、项目描述。不得将任务指定版本替换为“最新版本”或可变分支。
 
+Treat the TaskSpec source origin (`source_repo_url`) as the preferred download
+origin, and derive an immutable tag or release artifact from it when available.
+Do not switch to an equivalent archive or mirror merely for convenience. Use a
+different official origin only when upstream evidence shows that it is required
+or the TaskSpec source origin cannot provide the pinned artifact, and explain
+that choice in the final summary. Dockerfile network fetches must use a small
+bounded retry and connection timeout. Verify a published checksum when upstream
+provides one; never add an unverified mirror fallback.
+
 ### 步骤 2：研究同类参考包
 
 查看 `{category}/` 目录下已有包，选取 1-2 个同类型项目作为参考。
@@ -74,6 +83,13 @@ doc/ is optional。完全不生成 `doc/` 是合法结果；if any doc/ content 
 满足容器运行要求且不能通过启动参数覆盖时，才创建本地配置；在最终 summary 中说明其来源
 和相对上游的必要差异。配置文件应与 persistent data directory 分离，避免挂载数据卷时
 遮蔽启动所需配置。
+
+When the pinned builder source already contains an unchanged upstream asset,
+such as a configuration, entrypoint or template, reuse it with `COPY --from`
+instead of adding a byte-identical copy to the target repository. A local
+auxiliary file is appropriate only for a necessary local customization or when
+the builder source cannot supply the asset; document its provenance and the
+required difference. This is a reuse policy, not a required stage-alias spelling.
 
 ### 步骤 4：编写 Dockerfile
 

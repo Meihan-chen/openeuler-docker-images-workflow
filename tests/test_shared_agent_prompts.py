@@ -67,6 +67,37 @@ def test_image_prompts_define_generic_auxiliary_file_policy():
     assert "configuration provenance" in image_qa
 
 
+def test_image_prompts_keep_source_fetches_reproducible_and_bounded():
+    image_creator = " ".join(
+        (AGENTS_DIR / "image-creator.md").read_text().lower().split()
+    )
+    image_qa = " ".join(
+        (AGENTS_DIR / "image-qa.md").read_text().lower().split()
+    )
+
+    for prompt in (image_creator, image_qa):
+        assert "taskspec source origin" in prompt
+        assert "immutable" in prompt
+        assert "bounded retry" in prompt
+        assert "published checksum" in prompt
+        assert "unverified mirror fallback" in prompt
+
+
+def test_image_prompts_reuse_unchanged_upstream_assets_from_builder():
+    image_creator = " ".join(
+        (AGENTS_DIR / "image-creator.md").read_text().lower().split()
+    )
+    image_qa = " ".join(
+        (AGENTS_DIR / "image-qa.md").read_text().lower().split()
+    )
+
+    for prompt in (image_creator, image_qa):
+        assert "unchanged upstream asset" in prompt
+        assert "copy --from" in prompt
+        assert "byte-identical" in prompt
+        assert "necessary local customization" in prompt
+
+
 def test_image_prompts_restrict_only_open_euler_owned_gitee_links():
     image_creator = (AGENTS_DIR / "image-creator.md").read_text().lower()
     image_qa = (AGENTS_DIR / "image-qa.md").read_text().lower()
