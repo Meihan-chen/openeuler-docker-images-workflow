@@ -849,6 +849,8 @@ jobs:
             "${RUNNER_TEMP}/candidate/reports/agents/"
           cp -a "${RUNNER_TEMP}/arm/arm-repair-agents/." \
             "${RUNNER_TEMP}/candidate/reports/agents/"
+          cp "${RUNNER_TEMP}/generation/generation-reports/gates.json" \
+            "${RUNNER_TEMP}/candidate/reports/generation-gates.json"
           if [ "${{ inputs.operation }}" = "resume_package" ] ||
              [ "${{ inputs.operation }}" = "resume_round" ]; then
             printf \

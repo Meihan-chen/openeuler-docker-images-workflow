@@ -371,23 +371,25 @@ def _validate_contract(
 ) -> None:
     if "success" in payload and not isinstance(payload["success"], bool):
         raise AgentRuntimeError("Agent contract success must be a boolean")
-    for key in ("files_created", "changes", "issues", "command_evidence"):
+    for key in ("files_created", "changes", "issues"):
         if key in payload and not isinstance(payload[key], list):
             raise AgentRuntimeError(f"Agent contract {key} must be a list")
     if "command_evidence" in required_keys:
         _validate_command_evidence(payload["command_evidence"])
     if "identity_decision" in required_keys:
         _validate_identity_decision(payload["identity_decision"])
-    if "status" in required_keys and payload["status"] not in {
-        "approved",
-        "needs_fix",
-    }:
-        raise AgentRuntimeError(
-            "Agent contract status must be approved or needs_fix"
-        )
+    if "status" in required_keys:
+        status = payload["status"]
+        if not isinstance(status, str) or status not in {
+            "approved",
+            "needs_fix",
+        }:
+            raise AgentRuntimeError(
+                "Agent contract status must be approved or needs_fix"
+            )
     if "summary" in payload and not isinstance(payload["summary"], str):
         raise AgentRuntimeError("Agent contract summary must be a string")
-    if "coverage_score" in payload:
+    if "coverage_score" in required_keys:
         score = payload["coverage_score"]
         if (
             isinstance(score, bool)

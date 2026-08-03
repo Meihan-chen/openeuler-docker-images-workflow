@@ -394,6 +394,40 @@ def _qa_review_lines(root: Path, prefix: str, label: str) -> tuple[str, ...]:
         lines.append(
             f"- Round {number}: `{status}` — {_brief(report.get('summary'))}"
         )
+        harness = report.get("harness")
+        if not isinstance(harness, dict):
+            harness = {}
+        snapshot = harness.get("snapshot")
+        if isinstance(snapshot, dict):
+            snapshot_status = _brief(snapshot.get("status"), limit=30)
+            if snapshot_status == "full":
+                binaries = snapshot.get("hashed_binary_files")
+                if isinstance(binaries, list) and binaries:
+                    lines.append(
+                        "  - Review input: `full text`; "
+                        f"`{len(binaries)}` binary file(s) were hash-only."
+                    )
+                else:
+                    lines.append("  - Review input: `full`.")
+            elif snapshot_status:
+                lines.append(
+                    f"  - Review input: `{snapshot_status}` (partial)."
+                )
+                compacted = snapshot.get("compacted_files")
+                if isinstance(compacted, list) and compacted:
+                    visible = ", ".join(
+                        f"`{_brief(path, limit=120)}`"
+                        for path in compacted[:3]
+                    )
+                    lines.append(f"  - Compacted files: {visible}.")
+        warnings = harness.get("protocol_warnings")
+        if isinstance(warnings, list):
+            for warning in warnings:
+                if not isinstance(warning, dict):
+                    continue
+                message = _brief(warning.get("message"), limit=300)
+                if message:
+                    lines.append(f"  - Protocol warning — {message}")
         issues = report.get("issues")
         if not isinstance(issues, list):
             continue

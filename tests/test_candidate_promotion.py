@@ -61,7 +61,7 @@ def _candidate(tmp_path, upstream):
     image_dir.mkdir(parents=True)
     (image_dir / "Dockerfile").write_text("FROM scratch\n")
     candidate = tmp_path / "candidate"
-    (candidate / "reports").mkdir(parents=True)
+    (candidate / "reports" / "agents").mkdir(parents=True)
     generated.create_patch(candidate / "changes.patch")
     native = {
         "status": "passed",
@@ -79,7 +79,10 @@ def _candidate(tmp_path, upstream):
             '<testsuite tests="1" failures="0" errors="0"/>'
         )
     (candidate / "reports" / "gates.json").write_text(
-        json.dumps({"status": "passed"}) + "\n"
+        json.dumps({"status": "passed", "delivery_allowed": True}) + "\n"
+    )
+    (candidate / "reports" / "generation-gates.json").write_text(
+        json.dumps({"status": "passed", "delivery_allowed": True}) + "\n"
     )
     (candidate / "reports" / "hadolint.txt").write_text("")
     CandidateBundle.create(

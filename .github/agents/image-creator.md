@@ -101,6 +101,10 @@ doc/ is optional。完全不生成 `doc/` 是合法结果；if any doc/ content 
 让系统分配空闲 ID。这避免数字冲突，但不自动解决名称冲突；如果 runtime 包已经创建了
 同名身份，应在确认其用户、组和目录权限符合应用契约后选择 `reuse_existing`，不能重复创建。
 
+如果应用按照官方运行模型直接使用基础镜像已有的 root、不创建也不切换到其他用户，使用
+`reuse_existing` 表达该决定：`"user": "root"`、`"group": "root"`，并保持
+`"uid": null`、`"gid": null`。不得把这种情况写成用户名为空的 `dynamic`。
+
 只有上游或任务契约要求稳定的数字身份时，才固定 UID/GID，并在 `evidence` 中提供支持该
 要求的上游原文。Creator 不得自行声明某个数字在最终 runtime 镜像中空闲；安装包
 可能引入额外系统账户，只有使用最终包集合的原生构建能验证是否冲突。不要用探测后跳过

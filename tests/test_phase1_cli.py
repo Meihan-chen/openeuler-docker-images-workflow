@@ -38,7 +38,7 @@ def _run_script(script, *args):
 
 
 def _write_candidate_payload(root):
-    (root / "reports").mkdir(parents=True)
+    (root / "reports" / "agents").mkdir(parents=True)
     (root / "changes.patch").write_text("diff --git a/a b/a\n")
     report = {
         "status": "passed",
@@ -54,7 +54,9 @@ def _write_candidate_payload(root):
         (root / "reports" / f"{architecture}.junit.xml").write_text(
             '<testsuite tests="1" failures="0" errors="0"/>'
         )
-    (root / "reports" / "gates.json").write_text('{"status":"passed"}\n')
+    gate = '{"status":"passed","delivery_allowed":true}\n'
+    (root / "reports" / "gates.json").write_text(gate)
+    (root / "reports" / "generation-gates.json").write_text(gate)
     (root / "reports" / "hadolint.txt").write_text("")
 
 

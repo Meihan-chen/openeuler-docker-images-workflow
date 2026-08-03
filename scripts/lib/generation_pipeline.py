@@ -7,7 +7,7 @@ import json
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Mapping
+from typing import Callable, Mapping, Sequence
 
 import yaml
 
@@ -17,6 +17,7 @@ from scripts.lib.agent_runtime import (
     AgentRuntimeError,
     qa_requests_repair,
     run_agent,
+    validate_agent_payload,
 )
 from scripts.lib.evidence_resolver import (
     creator_result_for_qa,
@@ -60,12 +61,20 @@ _REQUIRED_KEYS = {
     "testcase_qa": ("status", "issues", "coverage_score", "summary"),
     "fixer": ("success", "changes"),
 }
+_RUNTIME_REQUIRED_KEYS = {
+    "image_creator": ("success", "files_created"),
+    "image_qa": ("issues", "summary"),
+    "testcase_creator": ("success", "files_created"),
+    "testcase_qa": ("issues", "summary"),
+    "fixer": ("success", "changes"),
+}
 # QA receives a bounded candidate snapshot and Harness-fixed source material.
 # Evidence fetching has its own wall-clock budget and completes before this timeout.
 _QA_TIMEOUT_SECONDS = 900
 _DEFAULT_AGENT_TIMEOUT_SECONDS = 1800
 _QA_SNAPSHOT_MAX_CHARS = 64_000
 _QA_PROMPT_MAX_CHARS = 100_000
+_QA_COMPACT_PREVIEW_CHARS = 4_096
 _PHASE1_TASK = (
     "kvrocks",
     "2.16.0",
@@ -184,6 +193,167 @@ def _candidate_paths(
             and path.relative_to(app_root).parts[0] != "results"
         )
     return tuple(sorted(paths))
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _text_preview(path: Path) -> str:
+    half = _QA_COMPACT_PREVIEW_CHARS // 2
+    size = path.stat().st_size
+    with path.open("rb") as stream:
+        head = stream.read(half)
+        stream.seek(max(0, size - half))
+        tail = stream.read(half)
+    return (
+        "--- head ---\n"
+        + head.decode(errors="replace")
+        + "\n--- tail ---\n"
+        + tail.decode(errors="replace")
+    )
+
+
+def _bounded_candidate_snapshot(
+    *,
+    paths: Sequence[Path],
+    workspace: Path,
+    max_chars: int,
+) -> tuple[str, dict[str, object]]:
+    """Keep QA input bounded without treating candidate size as a defect."""
+    snapshot: dict[str, object] = {}
+    manifest: list[dict[str, object]] = []
+    compacted: list[str] = []
+    hashed_binaries: list[str] = []
+    # Reserve room for JSON paths and metadata; spend the rest on complete
+    # critical files first, then bounded previews.
+    remaining = max(0, max_chars - min(max_chars // 3, len(paths) * 256 + 1024))
+
+    def priority(path: Path) -> tuple[int, str]:
+        critical = path.name in {
+            "Dockerfile",
+            "meta.yml",
+            "README.md",
+            "test.sh",
+            "goss.yaml",
+            "goss_wait.yaml",
+        }
+        return (0 if critical else 1, str(path))
+
+    for path in sorted(paths, key=priority):
+        relative = str(path.relative_to(workspace))
+        if not path.is_file():
+            snapshot[relative] = "<missing>"
+            manifest.append({"path": relative, "status": "missing"})
+            continue
+        size = path.stat().st_size
+        digest = _file_sha256(path)
+        with path.open("rb") as stream:
+            sample = stream.read(4096)
+        is_binary = b"\0" in sample or path.suffix.lower() in {
+            ".png",
+            ".jpg",
+            ".jpeg",
+            ".gif",
+            ".zip",
+            ".gz",
+            ".xz",
+            ".bz2",
+            ".7z",
+            ".tar",
+            ".pdf",
+            ".webp",
+            ".so",
+        }
+        if is_binary:
+            snapshot[relative] = (
+                f"<binary file: {size} bytes, sha256:{digest}>"
+            )
+            kind = "binary"
+            hashed_binaries.append(relative)
+        else:
+            kind = "text"
+            if size <= remaining:
+                content = path.read_text(errors="replace")
+                if len(content) <= remaining:
+                    snapshot[relative] = content
+                    remaining -= len(content)
+                else:
+                    snapshot[relative] = (
+                        f"<compacted text file: {size} bytes, "
+                        f"sha256:{digest}>\n{_text_preview(path)}"
+                    )
+                    compacted.append(relative)
+            elif remaining >= _QA_COMPACT_PREVIEW_CHARS:
+                preview = _text_preview(path)
+                snapshot[relative] = (
+                    f"<compacted text file: {size} bytes, "
+                    f"sha256:{digest}>\n{preview}"
+                )
+                compacted.append(relative)
+                remaining -= len(preview)
+            else:
+                snapshot[relative] = (
+                    f"<compacted text file: {size} bytes, sha256:{digest}; "
+                    "preview omitted>"
+                )
+                compacted.append(relative)
+        manifest.append(
+            {
+                "path": relative,
+                "kind": kind,
+                "bytes": size,
+                "sha256": digest,
+            }
+        )
+
+    def encode(document: Mapping[str, object]) -> str:
+        return json.dumps(
+            document,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+
+    manifest_digest = hashlib.sha256(
+        json.dumps(manifest, ensure_ascii=False, sort_keys=True).encode()
+    ).hexdigest()
+    metadata: dict[str, object] = {
+        "status": "compacted" if compacted else "full",
+        "complete_text": not compacted,
+        "compacted_files": sorted(compacted),
+        "hashed_binary_files": sorted(hashed_binaries),
+        "manifest_sha256": manifest_digest,
+    }
+    document = dict(snapshot)
+    if compacted:
+        document["__snapshot_metadata__"] = metadata
+    encoded = encode(document)
+    if len(encoded) <= max_chars:
+        return encoded, metadata
+
+    # If even previews do not fit, fall back to a hashed file manifest.
+    visible = list(manifest)
+    while True:
+        fallback = {
+            "__snapshot_metadata__": {
+                "status": "manifest_only",
+                "complete_text": False,
+                "file_count": len(manifest),
+                "visible_file_count": len(visible),
+                "omitted_file_count": len(manifest) - len(visible),
+                "manifest_sha256": manifest_digest,
+            },
+            "files": visible,
+        }
+        encoded = encode(fallback)
+        if len(encoded) <= max_chars or not visible:
+            return encoded, dict(fallback["__snapshot_metadata__"])
+        visible.pop()
 
 
 def _failure_knowledge_section(review: Mapping[str, object]) -> str:
@@ -352,7 +522,8 @@ def _qa_prompt(
     previous_review: Mapping[str, object] | None = None,
     creator_payload: Mapping[str, object] | None = None,
     evidence_bundle: Mapping[str, object] | None = None,
-) -> str:
+    return_snapshot: bool = False,
+) -> str | tuple[str, Mapping[str, object]]:
     app_root = workspace / task.domain / task.app
     image_root = app_root / task.version / task.os_version
     if role == "image_qa":
@@ -383,30 +554,6 @@ def _qa_prompt(
                 )
             )
 
-    snapshot: dict[str, str] = {}
-    for path in paths:
-        relative = str(path.relative_to(workspace))
-        if not path.is_file():
-            snapshot[relative] = "<missing>"
-            continue
-        if path.suffix.lower() == ".png":
-            digest = hashlib.sha256(path.read_bytes()).hexdigest()
-            snapshot[relative] = (
-                f"<binary file: {path.stat().st_size} bytes, sha256:{digest}>"
-            )
-        else:
-            snapshot[relative] = path.read_text(errors="replace")
-
-    encoded_snapshot = json.dumps(
-        snapshot,
-        ensure_ascii=False,
-        indent=2,
-        sort_keys=True,
-    )
-    if len(encoded_snapshot) > _QA_SNAPSHOT_MAX_CHARS:
-        raise GenerationPipelineError(
-            "candidate snapshot is too large for bounded QA"
-        )
     previous_findings = ""
     if previous_review is not None:
         previous_findings = (
@@ -468,7 +615,7 @@ def _qa_prompt(
     harness_evidence = ""
     if isinstance(evidence_bundle, Mapping):
         harness_evidence = render_qa_evidence(evidence_bundle)
-    prompt = (
+    prompt_prefix = (
         build_role_prompt(role=role, task=task, base_sha=base_sha)
         + creator_evidence
         + harness_evidence
@@ -476,14 +623,30 @@ def _qa_prompt(
         + "\n## Embedded candidate snapshot\n\n"
         + "Review only the file snapshot below. Do not call tools or read the "
         "workspace; return the documented JSON review contract directly.\n\n"
+        + "Snapshot metadata is Harness-owned. If complete_text is false, "
+        "review only visible content and state the limitation in the summary.\n\n"
         + "```json\n"
-        + encoded_snapshot
-        + "\n```\n"
     )
+    prompt_suffix = "\n```\n"
+    available = _QA_PROMPT_MAX_CHARS - len(prompt_prefix) - len(prompt_suffix)
+    if available <= 0:
+        raise GenerationPipelineError(
+            "QA non-snapshot context is too large for the bounded review"
+        )
+    encoded_snapshot, snapshot_metadata = _bounded_candidate_snapshot(
+        paths=paths,
+        workspace=workspace,
+        max_chars=min(_QA_SNAPSHOT_MAX_CHARS, available),
+    )
+    if snapshot_metadata.get("status") != "full":
+        log("review", f"SNAPSHOT status={snapshot_metadata.get('status')}")
+    prompt = prompt_prefix + encoded_snapshot + prompt_suffix
     if len(prompt) > _QA_PROMPT_MAX_CHARS:
         raise GenerationPipelineError(
             "QA prompt is too large for the bounded review"
         )
+    if return_snapshot:
+        return prompt, snapshot_metadata
     return prompt
 
 
@@ -529,6 +692,125 @@ def _log_review_result(
         f"status={payload.get('status')} issues={issue_count} "
         f"summary={json.dumps(summary, ensure_ascii=False)}",
     )
+
+
+def _normalize_qa_payload(
+    payload: Mapping[str, object],
+    *,
+    require_coverage: bool,
+    snapshot: Mapping[str, object],
+) -> dict[str, object]:
+    """Map QA outcome mistakes onto existing orchestration without an Agent call."""
+    normalized = dict(payload)
+    for reserved in (
+        "reported_status",
+        "reported_coverage_score",
+        "protocol_warnings",
+        "harness",
+    ):
+        normalized.pop(reserved, None)
+    harness: dict[str, object] = {"snapshot": dict(snapshot)}
+    warnings: list[dict[str, object]] = []
+    raw_issues = normalized.get("issues")
+    actionable_issues = [
+        dict(issue)
+        for issue in raw_issues
+        if isinstance(issue, Mapping)
+        and isinstance(issue.get("description"), str)
+        and bool(issue["description"].strip())
+    ] if isinstance(raw_issues, list) else []
+    normalized["issues"] = actionable_issues
+    if isinstance(raw_issues, list) and len(actionable_issues) != len(raw_issues):
+        warnings.append(
+            {
+                "field": "issues",
+                "reported": len(raw_issues),
+                "effective": len(actionable_issues),
+                "message": (
+                    "Malformed QA issues were ignored; only object entries "
+                    "with a non-empty description can trigger Creator repair."
+                ),
+            }
+        )
+
+    reported_status = normalized.get("status")
+    effective_status = "needs_fix" if actionable_issues else "approved"
+    normalized["status"] = effective_status
+    if reported_status != effective_status:
+        harness["reported_status"] = reported_status
+        warnings.append(
+            {
+                "field": "status",
+                "reported": reported_status,
+                "effective": effective_status,
+                "message": (
+                    "QA status disagreed with the actionable issue list; "
+                    "the Harness derived the outcome from actual issues."
+                ),
+            }
+        )
+
+    score = normalized.get("coverage_score")
+    if require_coverage and (
+        isinstance(score, bool)
+        or not isinstance(score, (int, float))
+        or not 0 <= score <= 1
+    ):
+        normalized["coverage_score"] = None
+        harness["reported_coverage_score"] = score
+        warnings.append(
+            {
+                "field": "coverage_score",
+                "reported": score,
+                "effective": None,
+                "message": (
+                    "Invalid QA coverage score was recorded as unavailable."
+                ),
+            }
+        )
+
+    if warnings:
+        harness["protocol_warnings"] = warnings
+    normalized["harness"] = harness
+    return normalized
+
+
+def _normalize_and_log_qa_result(
+    *,
+    qa_role: str,
+    round_number: int,
+    payload: Mapping[str, object],
+    api_key: str,
+    snapshot: Mapping[str, object],
+) -> Mapping[str, object]:
+    normalized = _normalize_qa_payload(
+        payload,
+        require_coverage=qa_role == "testcase_qa",
+        snapshot=snapshot,
+    )
+    harness = normalized.get("harness", {})
+    warnings = (
+        harness.get("protocol_warnings", [])
+        if isinstance(harness, Mapping)
+        else []
+    )
+    if isinstance(warnings, list):
+        for warning in warnings:
+            if not isinstance(warning, Mapping):
+                continue
+            reported = _redact(warning.get("reported"), api_key)
+            effective = _redact(warning.get("effective"), api_key)
+            effective_text = (
+                "null" if effective is None else str(effective)
+            )
+            log(
+                "review",
+                f"WARNING {qa_role} round={round_number} "
+                f"field={warning.get('field')} "
+                f"reported={json.dumps(reported, ensure_ascii=False)} "
+                f"effective={effective_text}",
+            )
+    return normalized
 
 
 def _default_validator(
@@ -591,7 +873,7 @@ def _run(
             prompt=prompt,
             workspace=workspace,
             api_key=api_key,
-            required_keys=_REQUIRED_KEYS[role],
+            required_keys=_RUNTIME_REQUIRED_KEYS[role],
             timeout=(
                 _QA_TIMEOUT_SECONDS
                 if role in {"image_qa", "testcase_qa"}
@@ -624,7 +906,9 @@ def _review_pair(
     task: TaskSpec,
     base_sha: str,
     api_key: str,
-    post_repair_check: Callable[[], None] | None = None,
+    post_repair_check: (
+        Callable[[Mapping[str, object]], None] | None
+    ) = None,
     creator_payload: Mapping[str, object] | None = None,
     resolve_evidence: (
         Callable[
@@ -638,14 +922,14 @@ def _review_pair(
         round_number: int,
         previous_review: Mapping[str, object] | None = None,
         creator: Mapping[str, object] | None = creator_payload,
-    ) -> str:
+    ) -> tuple[str, Mapping[str, object]]:
         try:
             evidence = (
                 resolve_evidence(creator, round_number)
                 if resolve_evidence is not None and isinstance(creator, Mapping)
                 else None
             )
-            return _qa_prompt(
+            result = _qa_prompt(
                 role=qa_role,
                 workspace=workspace,
                 task=task,
@@ -653,7 +937,11 @@ def _review_pair(
                 previous_review=previous_review,
                 creator_payload=creator,
                 evidence_bundle=evidence,
+                return_snapshot=True,
             )
+            if not isinstance(result, tuple):
+                raise GenerationPipelineError("QA snapshot metadata is missing")
+            return result
         except GenerationPipelineError as error:
             _write_report(
                 report_dir,
@@ -669,6 +957,7 @@ def _review_pair(
             raise
 
     log("review", f"START {qa_role} round=1")
+    first_prompt, first_snapshot = qa_prompt(1)
     review = _run(
         agent_runner=agent_runner,
         executable=executable,
@@ -676,24 +965,29 @@ def _review_pair(
         api_key=api_key,
         role=qa_role,
         report_dir=report_dir,
-        prompt=qa_prompt(1),
+        prompt=first_prompt,
     )
-    _write_report(report_dir, f"{qa_role.replace('_', '-')}-round1.json", review.payload, api_key)
-    _log_review_result(
+    review_payload = _normalize_and_log_qa_result(
         qa_role=qa_role,
         round_number=1,
         payload=review.payload,
         api_key=api_key,
+        snapshot=first_snapshot,
     )
-    if review.payload.get("status") == "approved":
+    _write_report(report_dir, f"{qa_role.replace('_', '-')}-round1.json", review_payload, api_key)
+    _log_review_result(
+        qa_role=qa_role,
+        round_number=1,
+        payload=review_payload,
+        api_key=api_key,
+    )
+    if review_payload.get("status") == "approved":
         log("review", f"PASS {qa_role} round=1")
         return ReviewPairResult(
             fix_rounds=0,
             creator_payload=creator_payload,
         )
-    if review.payload.get("status") != "needs_fix":
-        raise GenerationPipelineError(f"{qa_role} returned an invalid status")
-    if not qa_requests_repair(review.payload):
+    if not qa_requests_repair(review_payload):
         log(
             "review",
             f"ADVISORY {qa_role} round=1 evidence-only needs_fix ignored",
@@ -716,7 +1010,7 @@ def _review_pair(
             role=creator_role,
             task=task,
             base_sha=base_sha,
-            review=review.payload,
+            review=review_payload,
         ),
     )
     _write_report(
@@ -730,9 +1024,14 @@ def _review_pair(
     log("repair", f"PASS {creator_role} round=2")
 
     if post_repair_check is not None:
-        post_repair_check()
+        post_repair_check(fixed.payload)
 
     log("review", f"START {qa_role} round=2")
+    second_prompt, second_snapshot = qa_prompt(
+        2,
+        review_payload,
+        fixed.payload,
+    )
     second = _run(
         agent_runner=agent_runner,
         executable=executable,
@@ -740,35 +1039,42 @@ def _review_pair(
         api_key=api_key,
         role=qa_role,
         report_dir=report_dir,
-        prompt=qa_prompt(2, review.payload, fixed.payload),
+        prompt=second_prompt,
+    )
+    second_payload = _normalize_and_log_qa_result(
+        qa_role=qa_role,
+        round_number=2,
+        payload=second.payload,
+        api_key=api_key,
+        snapshot=second_snapshot,
     )
     _write_report(
         report_dir,
         f"{qa_role.replace('_', '-')}-round2.json",
-        second.payload,
+        second_payload,
         api_key,
     )
     _log_review_result(
         qa_role=qa_role,
         round_number=2,
-        payload=second.payload,
+        payload=second_payload,
         api_key=api_key,
     )
-    second_status = second.payload.get("status")
+    second_status = second_payload.get("status")
     if second_status == "approved":
         log("review", f"PASS {qa_role} round=2")
         disagreement = None
-    elif second_status == "needs_fix" and qa_requests_repair(second.payload):
+    elif second_status == "needs_fix" and qa_requests_repair(second_payload):
         log(
             "review",
             f"DISAGREEMENT {qa_role} round=2; continue=local_validation",
         )
-        raw_issues = second.payload.get("issues", [])
+        raw_issues = second_payload.get("issues", [])
         disagreement = {
             "role": qa_role,
             "round": 2,
             "issues": raw_issues if isinstance(raw_issues, list) else [],
-            "summary": str(second.payload.get("summary", "")),
+            "summary": str(second_payload.get("summary", "")),
         }
     elif second_status == "needs_fix":
         log(
@@ -776,8 +1082,6 @@ def _review_pair(
             f"ADVISORY {qa_role} round=2 evidence-only needs_fix ignored",
         )
         disagreement = None
-    else:
-        raise GenerationPipelineError(f"{qa_role} returned an invalid status")
     return ReviewPairResult(
         fix_rounds=1,
         creator_payload=fixed.payload,
@@ -843,12 +1147,58 @@ def run_generation_pipeline(
         )
         return bundle
 
+    def merge_creator_contracts(
+        report: Mapping[str, object],
+        creator_payloads: Mapping[str, Mapping[str, object]],
+    ) -> Mapping[str, object]:
+        merged = dict(report)
+        findings = list(merged.get("findings", []))
+        errors = list(merged.get("errors", []))
+        initial_finding_count = len(findings)
+        testcase_contract_failed = False
+        for owner, payload in creator_payloads.items():
+            if owner == "image_creator":
+                contract_key = "identity_decision"
+                code = "agent.identity_decision"
+            else:
+                contract_key = "command_evidence"
+                code = "agent.command_evidence"
+            try:
+                validate_agent_payload(
+                    payload,
+                    required_keys=(contract_key,),
+                )
+            except AgentRuntimeError as error:
+                if owner == "testcase_creator":
+                    testcase_contract_failed = True
+                message = str(error)
+                findings.append(
+                    {
+                        "code": code,
+                        "level": "delivery_stop",
+                        "owner": owner,
+                        "source": "agent_output_contract",
+                        "message": message,
+                    }
+                )
+                errors.append(message)
+        if len(findings) != initial_finding_count:
+            merged["delivery_allowed"] = False
+            if testcase_contract_failed:
+                merged["test_allowed"] = False
+            merged["findings"] = findings
+            merged["errors"] = errors
+        return merged
+
     def enforce_gate(
         *,
         phase: str,
         report_name: str,
         stage: str,
         failure_message: str,
+        creator_payloads: (
+            Mapping[str, Mapping[str, object]] | None
+        ) = None,
     ) -> Mapping[str, object]:
         log("gate", f"START {stage}")
         report = _target_gate_report(
@@ -858,6 +1208,8 @@ def run_generation_pipeline(
             base_sha=base_sha,
             phase=phase,
         )
+        if creator_payloads:
+            report = merge_creator_contracts(report, creator_payloads)
         _write_report(report_dir, report_name, report, api_key)
         build_allowed = report.get(
             "build_allowed",
@@ -926,7 +1278,7 @@ def run_generation_pipeline(
         return {
             str(path.relative_to(workspace)): (
                 f"{path.stat().st_mode & 0o777:o}:"
-                f"{hashlib.sha256(path.read_bytes()).hexdigest()}"
+                f"{_file_sha256(path)}"
             )
             for path in _candidate_paths(
                 workspace=workspace,
@@ -1017,6 +1369,7 @@ def run_generation_pipeline(
         report_name="image-precheck-gates.json",
         stage="image_precheck",
         failure_message="deterministic image precheck did not pass",
+        creator_payloads={"image_creator": latest_image_payload},
     )
     lint_image(
         report_name="image-lint.json",
@@ -1039,13 +1392,14 @@ def run_generation_pipeline(
             failure_message=(
                 "deterministic image repair precheck did not pass"
             ),
+            creator_payloads={"image_creator": latest_image_payload},
         )
         lint_image(
             report_name="image-precheck-repair-lint.json",
             stage="image_lint_repair",
         )
 
-    def recheck_image_repair() -> None:
+    def recheck_image_repair(payload: Mapping[str, object]) -> None:
         enforce_gate(
             phase="image",
             report_name="image-repair-gates.json",
@@ -1053,6 +1407,7 @@ def run_generation_pipeline(
             failure_message=(
                 "deterministic image repair precheck did not pass"
             ),
+            creator_payloads={"image_creator": payload},
         )
         lint_image(
             report_name="image-repair-lint.json",
@@ -1077,6 +1432,8 @@ def run_generation_pipeline(
             round_number,
         ),
     )
+    if image_review.creator_payload is not None:
+        latest_image_payload = image_review.creator_payload
     fix_rounds = image_review.fix_rounds
     disagreements = [
         item
@@ -1135,6 +1492,10 @@ def run_generation_pipeline(
         report_name="precheck-gates.json",
         stage="generated_precheck",
         failure_message="deterministic target precheck did not pass",
+        creator_payloads={
+            "image_creator": latest_image_payload,
+            "testcase_creator": latest_testcase_payload,
+        },
     )
     testcase_findings = owner_gate_findings(
         testcase_gate,
@@ -1157,9 +1518,13 @@ def run_generation_pipeline(
             failure_message=(
                 "deterministic target repair precheck did not pass"
             ),
+            creator_payloads={
+                "image_creator": latest_image_payload,
+                "testcase_creator": latest_testcase_payload,
+            },
         )
 
-    def recheck_testcase_repair() -> None:
+    def recheck_testcase_repair(payload: Mapping[str, object]) -> None:
         enforce_testcase_ownership(
             report_name="testcase-repair-ownership.json",
             role="testcase_creator repair",
@@ -1171,6 +1536,10 @@ def run_generation_pipeline(
             failure_message=(
                 "deterministic testcase repair precheck did not pass"
             ),
+            creator_payloads={
+                "image_creator": latest_image_payload,
+                "testcase_creator": payload,
+            },
         )
 
     testcase_review = _review_pair(
@@ -1191,6 +1560,8 @@ def run_generation_pipeline(
             round_number,
         ),
     )
+    if testcase_review.creator_payload is not None:
+        latest_testcase_payload = testcase_review.creator_payload
     fix_rounds += testcase_review.fix_rounds
     if testcase_review.disagreement is not None:
         disagreements.append(testcase_review.disagreement)
@@ -1200,6 +1571,10 @@ def run_generation_pipeline(
         report_name="gates.json",
         stage="target_contract",
         failure_message="deterministic target contract did not pass",
+        creator_payloads={
+            "image_creator": latest_image_payload,
+            "testcase_creator": latest_testcase_payload,
+        },
     )
     if disagreements:
         _write_report(

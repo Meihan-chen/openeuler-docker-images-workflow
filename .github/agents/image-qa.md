@@ -65,6 +65,10 @@ build and runtime behavior.
   fixed number against the Harness-fixed source bundle. The Creator cannot
   prove that a number is free in the final runtime package set, and QA must not
   accept such a self-claim; the native build is authoritative for collisions.
+- When the official runtime intentionally keeps the base image's existing root
+  identity, the structured decision uses `reuse_existing` with
+  `"user": "root"`, `"group": "root"`, and null UID/GID. Do not demand a
+  synthetic application user without an upstream or task requirement.
 - Are required LICENSE and NOTICE files preserved?
 
 ### Metadata Consistency

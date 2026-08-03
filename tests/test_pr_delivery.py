@@ -76,6 +76,9 @@ def _candidate(
     if gate_delivery_allowed is not None:
         gate_report["delivery_allowed"] = gate_delivery_allowed
     (root / "reports" / "gates.json").write_text(json.dumps(gate_report))
+    (root / "reports" / "generation-gates.json").write_text(
+        json.dumps({"status": "passed", "delivery_allowed": True})
+    )
     (root / "reports" / "hadolint.txt").write_text(hadolint_output)
     (root / "reports" / "agents" / "image-qa-round1.json").write_text(
         json.dumps(
@@ -358,6 +361,66 @@ def test_pr_content_rejects_an_incomplete_qa_round_chain(tmp_path):
         compose_pull_request(bundle)
 
 
+def test_pr_content_accepts_normalized_non_actionable_qa_warning(tmp_path):
+    from scripts.harness.compose_pr import compose_pull_request
+
+    bundle = _candidate(tmp_path)
+    report_path = (
+        bundle.root / "reports" / "agents" / "image-qa-round1.json"
+    )
+    report_path.write_text(
+        json.dumps(
+            {
+                "status": "approved",
+                "issues": [],
+                "summary": "No candidate issue was described.",
+                "harness": {
+                    "reported_status": "looks_good",
+                    "protocol_warnings": [
+                        {
+                            "field": "status",
+                            "reported": "looks_good",
+                            "effective": "approved",
+                            "message": "QA status was invalid.",
+                        }
+                    ],
+                    "snapshot": {"status": "full", "complete_text": True},
+                },
+            }
+        )
+    )
+
+    content = compose_pull_request(bundle)
+
+    assert "Final result: `approved` after 1 round." in content.body
+    assert "QA status was invalid." in content.body
+
+
+def test_pr_content_discloses_partial_qa_snapshot(tmp_path):
+    from scripts.harness.compose_pr import compose_pull_request
+
+    bundle = _candidate(tmp_path)
+    report_path = (
+        bundle.root / "reports" / "agents" / "image-qa-round1.json"
+    )
+    report = json.loads(report_path.read_text())
+    report["harness"] = {
+        "snapshot": {
+            "status": "compacted",
+            "complete_text": False,
+            "compacted_files": [
+                "Database/kvrocks/2.16.0/24.03-lts-sp4/Dockerfile"
+            ],
+        }
+    }
+    report_path.write_text(json.dumps(report))
+
+    content = compose_pull_request(bundle)
+
+    assert "Review input: `compacted` (partial)." in content.body
+    assert "Dockerfile" in content.body
+
+
 def test_pr_content_rejects_noncanonical_native_check_set(tmp_path):
     from scripts.harness.compose_pr import PRDeliveryError, compose_pull_request
 
@@ -374,7 +437,11 @@ def test_pr_content_rejects_noncanonical_native_check_set(tmp_path):
 def test_pr_content_rejects_buildable_but_not_deliverable_gate(tmp_path):
     from scripts.harness.compose_pr import PRDeliveryError, compose_pull_request
 
-    bundle = _candidate(tmp_path, gate_delivery_allowed=False)
+    bundle = _candidate(tmp_path)
+    gate = bundle.root / "reports" / "gates.json"
+    report = json.loads(gate.read_text())
+    report["delivery_allowed"] = False
+    gate.write_text(json.dumps(report))
 
     with pytest.raises(PRDeliveryError, match="delivery contract"):
         compose_pull_request(bundle)
@@ -383,7 +450,11 @@ def test_pr_content_rejects_buildable_but_not_deliverable_gate(tmp_path):
 def test_pr_content_rejects_gate_without_explicit_delivery_permission(tmp_path):
     from scripts.harness.compose_pr import PRDeliveryError, compose_pull_request
 
-    bundle = _candidate(tmp_path, gate_delivery_allowed=None)
+    bundle = _candidate(tmp_path)
+    gate = bundle.root / "reports" / "gates.json"
+    report = json.loads(gate.read_text())
+    report.pop("delivery_allowed")
+    gate.write_text(json.dumps(report))
 
     with pytest.raises(PRDeliveryError, match="delivery contract"):
         compose_pull_request(bundle)

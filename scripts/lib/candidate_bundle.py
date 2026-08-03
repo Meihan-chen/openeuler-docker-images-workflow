@@ -36,6 +36,7 @@ _REQUIRED_PAYLOAD = (
 _REQUIRED_REPORTS = {
     "aarch64": "reports/aarch64.json",
     "gates": "reports/gates.json",
+    "generation gates": "reports/generation-gates.json",
     "x86_64": "reports/x86_64.json",
 }
 _RECOVERY_FIELDS = {
@@ -165,6 +166,17 @@ def _validate_reports(root: Path, *, allow_legacy: bool) -> None:
             raise CandidateBundleError(f"{name} validation report is invalid") from exc
         if not isinstance(report, dict) or report.get("status") != "passed":
             raise CandidateBundleError(f"{name} validation did not pass")
+        legacy_generation_gate = (
+            allow_legacy
+            and name == "generation gates"
+            and "delivery_allowed" not in report
+        )
+        if (
+            name in {"gates", "generation gates"}
+            and report.get("delivery_allowed") is not True
+            and not legacy_generation_gate
+        ):
+            raise CandidateBundleError(f"{name} delivery contract did not pass")
         if name in {"x86_64", "aarch64"} and not native_checks_pass(
             report.get("checks"),
             allow_legacy=allow_legacy,

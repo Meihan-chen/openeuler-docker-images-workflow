@@ -22,7 +22,7 @@ def _task():
 
 
 def _payload(root: Path):
-    (root / "reports").mkdir(parents=True)
+    (root / "reports" / "agents").mkdir(parents=True)
     (root / "changes.patch").write_text("diff --git a/a b/a\n")
     report = {
         "status": "passed",
@@ -38,7 +38,9 @@ def _payload(root: Path):
         (root / "reports" / f"{architecture}.junit.xml").write_text(
             '<testsuite tests="1" failures="0" errors="0"/>'
         )
-    (root / "reports" / "gates.json").write_text('{"status":"passed"}\n')
+    gate = '{"status":"passed","delivery_allowed":true}\n'
+    (root / "reports" / "gates.json").write_text(gate)
+    (root / "reports" / "generation-gates.json").write_text(gate)
     (root / "reports" / "hadolint.txt").write_text("")
 
 
@@ -62,6 +64,7 @@ def test_candidate_bundle_records_task_base_run_and_checksums(tmp_path):
         "reports/aarch64.json",
         "reports/aarch64.junit.xml",
         "reports/gates.json",
+        "reports/generation-gates.json",
         "reports/hadolint.txt",
         "reports/x86_64.json",
         "reports/x86_64.junit.xml",
@@ -205,6 +208,9 @@ def test_validated_recovery_provenance_allows_the_sealed_legacy_check_set(
         report = json.loads(path.read_text())
         report["checks"]["restart_persistence"] = True
         path.write_text(json.dumps(report))
+    (tmp_path / "reports" / "generation-gates.json").write_text(
+        '{"status":"passed"}\n'
+    )
     (tmp_path / "reports" / "recovery-provenance.json").write_text(
         json.dumps(
             {
@@ -240,6 +246,34 @@ def test_candidate_bundle_requires_passed_reports(tmp_path):
     (tmp_path / "reports" / "x86_64.json").write_text('{"status":"failed"}\n')
 
     with pytest.raises(CandidateBundleError, match="x86_64"):
+        CandidateBundle.create(
+            tmp_path,
+            task=_task(),
+            base_sha=BASE_SHA,
+            validated_run_id="123456",
+        )
+
+
+def test_candidate_bundle_rejects_generation_delivery_stop(tmp_path):
+    from scripts.lib.candidate_bundle import CandidateBundle, CandidateBundleError
+
+    _payload(tmp_path)
+    (tmp_path / "reports" / "generation-gates.json").write_text(
+        json.dumps(
+            {
+                "status": "passed",
+                "delivery_allowed": False,
+                "findings": [
+                    {
+                        "code": "agent.identity_decision",
+                        "level": "delivery_stop",
+                    }
+                ],
+            }
+        )
+    )
+
+    with pytest.raises(CandidateBundleError, match="generation.*delivery"):
         CandidateBundle.create(
             tmp_path,
             task=_task(),

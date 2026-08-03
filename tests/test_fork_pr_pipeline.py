@@ -50,6 +50,9 @@ def _candidate(tmp_path):
     (root / "reports" / "gates.json").write_text(
         '{"status":"passed","delivery_allowed":true,"added_files":14}\n'
     )
+    (root / "reports" / "generation-gates.json").write_text(
+        '{"status":"passed","delivery_allowed":true}\n'
+    )
     (root / "reports" / "hadolint.txt").write_text("")
     for name in ("image-qa", "testcase-qa"):
         (agents / f"{name}-round1.json").write_text(

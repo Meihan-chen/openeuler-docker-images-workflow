@@ -94,6 +94,23 @@ def test_image_creator_bounds_optional_release_artifact_research():
     assert "完整下载和校验交给后续原生构建" in image_creator
 
 
+def test_image_creator_defines_the_existing_root_identity_contract():
+    image_creator = " ".join(
+        (AGENTS_DIR / "image-creator.md").read_text().lower().split()
+    )
+    image_qa = " ".join(
+        (AGENTS_DIR / "image-qa.md").read_text().lower().split()
+    )
+
+    assert "reuse_existing" in image_creator
+    assert '"user": "root"' in image_creator
+    assert '"group": "root"' in image_creator
+    assert "直接使用基础镜像已有的 root" in image_creator
+    assert "reuse_existing" in image_qa
+    assert '"user": "root"' in image_qa
+    assert '"group": "root"' in image_qa
+
+
 def test_image_prompts_reuse_unchanged_upstream_assets_from_builder():
     image_creator = " ".join(
         (AGENTS_DIR / "image-creator.md").read_text().lower().split()

@@ -285,6 +285,32 @@ def test_qa_agent_is_read_only_and_parses_multiline_json_from_event(tmp_path):
     assert config["permission"]["task"] == "deny"
 
 
+def test_direct_qa_contract_validation_remains_strict():
+    from scripts.lib.agent_runtime import AgentRuntimeError, validate_agent_payload
+
+    with pytest.raises(AgentRuntimeError, match="status.*approved or needs_fix"):
+        validate_agent_payload(
+            {
+                "status": "looks_good",
+                "issues": [],
+                "coverage_score": 0.9,
+                "summary": "The candidate looks correct.",
+            },
+            required_keys=("status", "issues", "coverage_score", "summary"),
+        )
+
+    with pytest.raises(AgentRuntimeError, match="coverage_score.*between 0 and 1"):
+        validate_agent_payload(
+            {
+                "status": "approved",
+                "issues": [],
+                "coverage_score": "high",
+                "summary": "The candidate looks correct.",
+            },
+            required_keys=("status", "issues", "coverage_score", "summary"),
+        )
+
+
 def test_agent_failure_and_parse_errors_never_expose_api_key(tmp_path):
     from scripts.lib.agent_runtime import AgentRuntimeError, run_agent
 
@@ -816,6 +842,68 @@ def test_image_contract_accepts_dynamic_identity_decision(tmp_path):
     result = _run_image_creator(tmp_path, decision)
 
     assert result.payload["identity_decision"] == decision
+
+
+def test_generation_runtime_keys_leave_creator_contract_for_the_gate(
+    tmp_path,
+):
+    from scripts.lib.agent_runtime import run_agent
+
+    executable = _executable(tmp_path)
+    workspace = tmp_path / "target"
+    workspace.mkdir()
+    payload = {
+        "success": True,
+        "files_created": ["Bigdata/kylin-e2e-test/meta.yml"],
+        "identity_decision": {
+            "mode": "dynamic",
+            "user": None,
+            "group": None,
+            "uid": None,
+            "gid": None,
+            "requirement_evidence_ids": [],
+        },
+    }
+    event = {"type": "text", "part": {"text": json.dumps(payload)}}
+    runner = RecordingRunner(_completed(stdout=json.dumps(event) + "\n"))
+
+    result = run_agent(
+        executable=executable,
+        role="image_creator",
+        prompt="Write the image.",
+        workspace=workspace,
+        api_key="deepseek-secret",
+        required_keys=("success", "files_created"),
+        runner=runner,
+    )
+
+    assert result.payload == payload
+
+
+def test_generation_runtime_keys_leave_qa_outcome_for_normalization(tmp_path):
+    from scripts.lib.agent_runtime import run_agent
+
+    executable = _executable(tmp_path)
+    workspace = tmp_path / "target"
+    workspace.mkdir()
+    payload = {
+        "issues": [],
+        "summary": "No actionable candidate issue was described.",
+    }
+    event = {"type": "text", "part": {"text": json.dumps(payload)}}
+    runner = RecordingRunner(_completed(stdout=json.dumps(event) + "\n"))
+
+    result = run_agent(
+        executable=executable,
+        role="image_qa",
+        prompt="Review the image.",
+        workspace=workspace,
+        api_key="deepseek-secret",
+        required_keys=("issues", "summary"),
+        runner=runner,
+    )
+
+    assert result.payload == payload
 
 
 def test_image_contract_rejects_fixed_identity_without_requirement_evidence(
