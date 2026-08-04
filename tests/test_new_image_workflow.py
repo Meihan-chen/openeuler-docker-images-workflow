@@ -76,6 +76,10 @@ def test_phase1_is_manual_only_with_explicit_operations():
     assert len(trigger["workflow_dispatch"]["inputs"]) <= 10
 
 
+def test_prepare_job_leaves_time_for_the_bounded_adversarial_path():
+    assert _workflow()["jobs"]["prepare"]["timeout-minutes"] == 360
+
+
 def test_existing_as_new_probe_hides_reference_and_delivers_alias_pr():
     jobs = _workflow()["jobs"]
     prepare = jobs["prepare"]

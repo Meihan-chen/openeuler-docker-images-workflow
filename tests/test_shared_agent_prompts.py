@@ -84,14 +84,26 @@ def test_image_prompts_keep_source_fetches_reproducible_and_bounded():
 
 
 def test_image_creator_bounds_optional_release_artifact_research():
+    """Run 30872642022 spent 25 of its 30 minutes on avoidable downloads.
+
+    The rule has to be the cost principle plus the cheaper route that answers
+    the same question. A list of artifact names taken from one log would miss
+    whatever the next application downloads instead, and an archive-format
+    recipe would be wrong for the formats it does not cover.
+    """
     image_creator = " ".join(
         (AGENTS_DIR / "image-creator.md").read_text().lower().split()
     )
 
-    assert "只有必须确认发布包内部结构时" in image_creator
+    assert "最小代价手段" in image_creator
     assert "单次研究网络操作最多 180 秒" in image_creator
-    assert "不得继续使用未验证文件或反复重试" in image_creator
+    assert "不得加大超时反复重试" in image_creator
     assert "完整下载和校验交给后续原生构建" in image_creator
+    assert "docker run --rm <基础镜像>" in image_creator
+    assert "不要靠下载镜像产物或仓库元数据来推断" in image_creator
+    assert "只获取到足以回答当前问题的程度" in image_creator
+    assert "同一产物整轮只下载一次" in image_creator
+    assert "不要靠加大下载量换取确定性" in image_creator
 
 
 def test_image_creator_defines_the_existing_root_identity_contract():
@@ -373,3 +385,43 @@ def test_testcase_prompts_only_defer_shell_syntax_to_the_generation_gate():
     assert "tests.shell_syntax" in creator
     assert "tests.goss_render" not in reviewer
     assert "pinned Goss" in reviewer
+
+
+def test_image_creator_can_report_unconfirmed_facts():
+    """Retrying was the only contract-satisfying move when facts were required.
+
+    An optional assumptions channel makes "not confirmed" a legal, cheap result,
+    which is what removes the incentive to spend the budget on retries.
+    """
+    image_creator = " ".join(
+        (AGENTS_DIR / "image-creator.md").read_text().split()
+    )
+
+    assert '"assumptions"' in image_creator
+    assert "`assumptions` 是可选数组" in image_creator
+    assert "不要为确认它而反复重试网络操作" in image_creator
+
+
+def test_role_prompts_keep_single_run_specifics_out():
+    """Role definitions hold durable rules; one run's details belong in evidence.
+
+    Run 30872642022 tempted the opposite: naming the artifacts it downloaded and
+    the command that read them would have encoded one application's packaging as
+    a rule, and said nothing about the next application's.
+    """
+    prompts = "\n".join(
+        path.read_text().lower()
+        for path in sorted(AGENTS_DIR.glob("*.md"))
+    )
+
+    for fragment in (
+        "kylin",
+        "kvrocks",
+        "sqlite",
+        "repodata",
+        "rootfs",
+        "tar -tz",
+        "tar.xz",
+        "tarfile",
+    ):
+        assert fragment not in prompts

@@ -49,9 +49,19 @@ that choice in the final summary. Dockerfile network fetches must use a small
 bounded retry and connection timeout. Verify a published checksum when upstream
 provides one; never add an unverified mirror fallback.
 
-研究阶段优先读取固定版本源码、Release 元数据和 checksum。只有必须确认发布包内部结构时
-才下载完整产物；单次研究网络操作最多 180 秒。网络操作失败后，不得继续使用未验证文件或反复重试；
-应切换到源码或元数据继续生成，并把完整下载和校验交给后续原生构建。
+研究阶段的每次网络操作都要选能回答该问题的最小代价手段：
+凡是固定版本源码、Release 元数据或上游发布的 checksum 文件能回答的，就不下载产物。
+单次研究网络操作最多 180 秒；失败后不得加大超时反复重试，也不得继续使用未验证文件，
+应改用源码或元数据继续生成，并把完整下载和校验交给后续原生构建。
+
+运行环境的事实（基础镜像自带什么、仓库配置、某个命令或软件包是否可用）由基础镜像自己回答：
+Runner 上有 Docker，`docker run --rm <基础镜像>` 给出的是最终构建环境里的权威答案，
+不要靠下载镜像产物或仓库元数据来推断这些事实。
+
+必须确认发布产物内部结构时，只获取到足以回答当前问题的程度；
+同一产物整轮只下载一次，放在 `$OE_AGENT_SCRATCH` 下供后续问题复用，不要为同一个问题重复获取。
+Harness 会监控 scratch 体积，超过上限即终止本轮。
+无法在本轮确认的事实写入 `assumptions`，不要靠加大下载量换取确定性。
 
 ### 步骤 2：研究同类参考包
 
@@ -180,10 +190,21 @@ Pillow 占位图伪装官方 logo，也禁止使用 AI 生成 logo。
       ]
     }
   ],
+  "assumptions": [
+    {
+      "claim": "未能在本轮确认的事实",
+      "reason": "为什么没有确认",
+      "verified_by": "native_build|qa|human"
+    }
+  ],
   "summary": "...",
   "error": null
 }
 ```
+
+`assumptions` 是可选数组，用于声明本轮未能确认的事实。无法确认某个事实时，
+写进 `assumptions` 并按当前最佳判断继续产出候选，交由 QA 和原生构建验证；
+不要为确认它而反复重试网络操作，也不要把未确认的推断写成已验证结论。
 
 ## 质量检查清单
 

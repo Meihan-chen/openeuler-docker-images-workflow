@@ -1063,3 +1063,123 @@ def test_creator_contract_leaves_oversized_evidence_for_qa(tmp_path):
     )
 
     assert len(result.payload["evidence"][0]["claim"]) == 4001
+
+
+def _identity_decision():
+    return {
+        "mode": "dynamic",
+        "user": "kylin",
+        "group": "kylin",
+        "uid": None,
+        "gid": None,
+        "requirement_evidence_ids": [],
+    }
+
+
+def test_a_timeout_is_not_turned_into_success_by_partial_output(tmp_path):
+    """Only a normally completed Agent response can satisfy the contract."""
+    from scripts.lib.agent_runtime import AgentTimeoutError, run_agent
+
+    executable = _executable(tmp_path)
+    workspace = tmp_path / "target"
+    workspace.mkdir()
+    payload = {
+        "success": True,
+        "files_created": ["Bigdata/kylin/meta.yml"],
+        "identity_decision": _identity_decision(),
+    }
+    stream = "\n".join(
+        (
+            json.dumps(
+                {
+                    "type": "tool_use",
+                    "part": {"tool": "write", "state": {"status": "completed"}},
+                }
+            ),
+            json.dumps({"type": "text", "part": {"text": json.dumps(payload)}}),
+        )
+    )
+    runner = SequenceRunner([_completed(returncode=124, stdout=stream)])
+
+    with pytest.raises(AgentTimeoutError, match="timed out"):
+        run_agent(
+            executable=executable,
+            role="image_creator",
+            prompt="Create the image files.",
+            workspace=workspace,
+            api_key="deepseek-secret",
+            required_keys=("success", "files_created"),
+            runner=runner,
+        )
+
+    assert len(runner.calls) == 1
+
+
+def test_scratch_growth_past_the_limit_stops_the_agent(
+    tmp_path,
+    capsys,
+    monkeypatch,
+):
+    """Run 30872642022 spent most of its budget on avoidable downloads.
+
+    The prompt discourages them, while the Harness independently caps scratch
+    growth so a runaway download cannot consume the Runner indefinitely.
+    """
+    from scripts.lib import agent_runtime, progress
+
+    monkeypatch.setattr(agent_runtime, "_SCRATCH_LIMIT_MB", 1)
+    monkeypatch.setattr(progress, "_WATCHDOG_INTERVAL_SECONDS", 0.05)
+    monkeypatch.setattr(progress, "_KILL_GRACE_SECONDS", 0.5)
+    executable = tmp_path / "opencode"
+    executable.write_text(
+        "#!/bin/sh\n"
+        'dd if=/dev/zero of="${OE_AGENT_SCRATCH}/blob" '
+        "bs=1048576 count=4 2>/dev/null\n"
+        "sleep 30\n"
+    )
+    executable.chmod(0o755)
+    workspace = tmp_path / "target"
+    workspace.mkdir()
+
+    with pytest.raises(agent_runtime.AgentTimeoutError):
+        agent_runtime.run_agent(
+            executable=executable,
+            role="image_creator",
+            prompt="Create the image files.",
+            workspace=workspace,
+            api_key="deepseek-secret",
+            required_keys=("success", "files_created"),
+            timeout=30,
+        )
+
+    output = capsys.readouterr().out
+    assert "ABORT reason=scratch_over_limit" in output
+    assert "limit=1MB" in output
+
+
+def test_unconfirmed_facts_are_accepted_only_as_a_list(tmp_path):
+    """Recording what could not be confirmed has to be cheaper than retrying.
+
+    The field stays optional so a payload that omits it is still valid, but a
+    malformed one cannot pass as evidence of nothing being assumed.
+    """
+    from scripts.lib.agent_runtime import AgentRuntimeError, validate_agent_payload
+
+    payload = {
+        "success": True,
+        "files_created": ["Bigdata/kylin/meta.yml"],
+        "assumptions": [
+            {
+                "claim": "the archive top level directory is apache-kylin-5.0.3-bin",
+                "reason": "the release archive was not downloaded",
+                "verified_by": "native_build",
+            }
+        ],
+    }
+    validate_agent_payload(payload, required_keys=("success", "files_created"))
+
+    with pytest.raises(AgentRuntimeError, match="assumptions must be a list"):
+        validate_agent_payload(
+            {**payload, "assumptions": "none"},
+            required_keys=("success", "files_created"),
+        )

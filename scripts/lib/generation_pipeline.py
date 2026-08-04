@@ -15,6 +15,7 @@ from scripts.lib.agent_runtime import (
     SCRATCH_DIR,
     AgentResult,
     AgentRuntimeError,
+    AgentTimeoutError,
     qa_requests_repair,
     run_agent,
     validate_agent_payload,
@@ -70,8 +71,9 @@ _RUNTIME_REQUIRED_KEYS = {
 }
 # QA receives a bounded candidate snapshot and Harness-fixed source material.
 # Evidence fetching has its own wall-clock budget and completes before this timeout.
-_QA_TIMEOUT_SECONDS = 900
-_DEFAULT_AGENT_TIMEOUT_SECONDS = 1800
+_QA_ROLES = {"image_qa", "testcase_qa"}
+_QA_TIMEOUT_SECONDS = 1200
+_DEFAULT_AGENT_TIMEOUT_SECONDS = 3600
 _QA_SNAPSHOT_MAX_CHARS = 64_000
 _QA_PROMPT_MAX_CHARS = 100_000
 _QA_COMPACT_PREVIEW_CHARS = 4_096
@@ -734,7 +736,11 @@ def _normalize_qa_payload(
         )
 
     reported_status = normalized.get("status")
-    effective_status = "needs_fix" if actionable_issues else "approved"
+    effective_status = (
+        "unavailable"
+        if normalized.get("harness_qa_timeout") is True
+        else "needs_fix" if actionable_issues else "approved"
+    )
     normalized["status"] = effective_status
     if reported_status != effective_status:
         harness["reported_status"] = reported_status
@@ -866,6 +872,11 @@ def _run(
     prompt: str,
     report_dir: Path,
 ) -> AgentResult:
+    timeout = (
+        _QA_TIMEOUT_SECONDS
+        if role in _QA_ROLES
+        else _DEFAULT_AGENT_TIMEOUT_SECONDS
+    )
     try:
         return agent_runner(
             executable=executable,
@@ -874,25 +885,70 @@ def _run(
             workspace=workspace,
             api_key=api_key,
             required_keys=_RUNTIME_REQUIRED_KEYS[role],
-            timeout=(
-                _QA_TIMEOUT_SECONDS
-                if role in {"image_qa", "testcase_qa"}
-                else _DEFAULT_AGENT_TIMEOUT_SECONDS
-            ),
+            timeout=timeout,
         )
+    except AgentTimeoutError as error:
+        if role in _QA_ROLES:
+            # QA never held a veto, so an unfinished review is an advisory gap
+            # rather than a reason to discard a candidate the gates can judge.
+            log("review", f"QA_TIMEOUT {role} elapsed={error.elapsed:.1f}s")
+            _write_report(
+                report_dir,
+                f"{role.replace('_', '-')}-timeout.json",
+                {
+                    "status": "timeout",
+                    "stage": "agent",
+                    "role": role,
+                    "elapsed": error.elapsed,
+                },
+                api_key,
+            )
+            return AgentResult(
+                role=role,
+                payload={
+                    "status": "unavailable",
+                    "issues": [],
+                    "summary": (
+                        "QA did not finish within its budget; recorded as "
+                        "advisory and left to the deterministic gates."
+                    ),
+                    "harness_qa_timeout": True,
+                },
+            )
+        raise _agent_failure(
+            report_dir=report_dir,
+            role=role,
+            error=error,
+            api_key=api_key,
+        ) from error
     except AgentRuntimeError as error:
-        _write_report(
-            report_dir,
-            "generation-failure.json",
-            {
-                "status": "failed",
-                "stage": "agent",
-                "role": role,
-                "error": str(error),
-            },
-            api_key,
-        )
-        raise GenerationPipelineError(f"{role} Agent failed: {error}") from error
+        raise _agent_failure(
+            report_dir=report_dir,
+            role=role,
+            error=error,
+            api_key=api_key,
+        ) from error
+
+
+def _agent_failure(
+    *,
+    report_dir: Path,
+    role: str,
+    error: Exception,
+    api_key: str,
+) -> GenerationPipelineError:
+    _write_report(
+        report_dir,
+        "generation-failure.json",
+        {
+            "status": "failed",
+            "stage": "agent",
+            "role": role,
+            "error": str(error),
+        },
+        api_key,
+    )
+    return GenerationPipelineError(f"{role} Agent failed: {error}")
 
 
 def _review_pair(
@@ -981,6 +1037,19 @@ def _review_pair(
         payload=review_payload,
         api_key=api_key,
     )
+    if review_payload.get("status") == "unavailable":
+        log("review", f"ADVISORY {qa_role} round=1 unavailable")
+        return ReviewPairResult(
+            fix_rounds=0,
+            creator_payload=creator_payload,
+            disagreement={
+                "role": qa_role,
+                "round": 1,
+                "status": "unavailable",
+                "issues": [],
+                "summary": str(review_payload.get("summary", "")),
+            },
+        )
     if review_payload.get("status") == "approved":
         log("review", f"PASS {qa_role} round=1")
         return ReviewPairResult(
@@ -1061,7 +1130,16 @@ def _review_pair(
         api_key=api_key,
     )
     second_status = second_payload.get("status")
-    if second_status == "approved":
+    if second_status == "unavailable":
+        log("review", f"ADVISORY {qa_role} round=2 unavailable")
+        disagreement = {
+            "role": qa_role,
+            "round": 2,
+            "status": "unavailable",
+            "issues": [],
+            "summary": str(second_payload.get("summary", "")),
+        }
+    elif second_status == "approved":
         log("review", f"PASS {qa_role} round=2")
         disagreement = None
     elif second_status == "needs_fix" and qa_requests_repair(second_payload):

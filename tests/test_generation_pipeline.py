@@ -729,12 +729,12 @@ def test_generation_runs_adversarial_pairs_and_records_evidence(
         "testcase_qa",
     ]
     assert [call["timeout"] for call in agent.calls] == [
-        1800,
-        900,
-        1800,
-        900,
-        1800,
-        900,
+        3600,
+        1200,
+        3600,
+        1200,
+        3600,
+        1200,
     ]
     assert "Review report to resolve" in agent.calls[2]["prompt"]
     assert "fix health" in agent.calls[2]["prompt"]
@@ -2616,3 +2616,129 @@ def test_malformed_advisory_knowledge_does_not_crash_fixer_prompt(
     )
 
     assert "## Verified failure knowledge" not in prompt
+
+
+def _repo_with_base(workspace):
+    import subprocess
+
+    workspace.mkdir(parents=True, exist_ok=True)
+    for args in (
+        ("init", "-q"),
+        ("config", "user.email", "harness@example.com"),
+        ("config", "user.name", "harness"),
+    ):
+        subprocess.run(["git", "-C", str(workspace), *args], check=True)
+    (workspace / "README.md").write_text("base\n")
+    subprocess.run(["git", "-C", str(workspace), "add", "README.md"], check=True)
+    subprocess.run(
+        ["git", "-C", str(workspace), "commit", "-q", "-m", "base"],
+        check=True,
+    )
+    return subprocess.run(
+        ["git", "-C", str(workspace), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+class TimingOutAgent(StubAgent):
+    """Overrun the first call of one role, then answer normally."""
+
+    def __init__(self, responses, *, timing_out_role, on_timeout=None):
+        super().__init__(responses)
+        self.timing_out_role = timing_out_role
+        self.on_timeout = on_timeout
+        self.timed_out = False
+
+    def __call__(self, **kwargs):
+        from scripts.lib.agent_runtime import AgentTimeoutError
+
+        if kwargs["role"] == self.timing_out_role and not self.timed_out:
+            self.timed_out = True
+            self.calls.append(kwargs)
+            if self.on_timeout is not None:
+                self.on_timeout()
+            raise AgentTimeoutError(role=kwargs["role"], elapsed=1800.0)
+        return super().__call__(**kwargs)
+
+
+def _run_pipeline(tmp_path, agent, *, workspace, base_sha):
+    from scripts.lib.generation_pipeline import run_generation_pipeline
+
+    return run_generation_pipeline(
+        workspace=workspace,
+        report_dir=tmp_path / "evidence",
+        task=_task(),
+        base_sha=base_sha,
+        executable=tmp_path / "opencode",
+        api_key="deepseek-secret",
+        agent_runner=agent,
+        target_validator=lambda *, phase, **_: {
+            "status": "passed",
+            "phase": phase,
+        },
+    )
+
+
+def test_creator_timeout_fails_without_starting_a_finalize_agent(tmp_path):
+    """A larger budget must not turn a timed-out partial result into success."""
+    from scripts.lib.generation_pipeline import GenerationPipelineError
+
+    workspace = tmp_path / "target"
+    base_sha = _repo_with_base(workspace)
+    candidate = workspace / "Database" / "kvrocks" / "meta.yml"
+
+    def write_candidate():
+        candidate.parent.mkdir(parents=True, exist_ok=True)
+        candidate.write_text("2.16.0-oe2403sp4:\n  path: 2.16.0/24.03-lts-sp4\n")
+
+    agent = TimingOutAgent(
+        {
+            "image_creator": [_image_creator_output()],
+            "image_qa": [_approved_image()],
+            "testcase_creator": [_testcase_creator_output()],
+            "testcase_qa": [_approved_tests()],
+        },
+        timing_out_role="image_creator",
+        on_timeout=write_candidate,
+    )
+
+    with pytest.raises(GenerationPipelineError, match="image_creator"):
+        _run_pipeline(tmp_path, agent, workspace=workspace, base_sha=base_sha)
+
+    assert len(agent.calls) == 1
+    assert not (tmp_path / "evidence" / "image-creator-partial.json").exists()
+    failure = json.loads(
+        (tmp_path / "evidence" / "generation-failure.json").read_text()
+    )
+    assert failure["role"] == "image_creator"
+
+
+def test_qa_timeout_is_advisory_without_being_reported_as_approved(tmp_path):
+    """An unavailable non-veto QA continues, but never masquerades as PASS."""
+    workspace = tmp_path / "target"
+    base_sha = _repo_with_base(workspace)
+    agent = TimingOutAgent(
+        {
+            "image_creator": [_image_creator_output()],
+            "image_qa": [_approved_image()],
+            "testcase_creator": [_testcase_creator_output()],
+            "testcase_qa": [_approved_tests()],
+        },
+        timing_out_role="image_qa",
+    )
+
+    result = _run_pipeline(tmp_path, agent, workspace=workspace, base_sha=base_sha)
+
+    timeout_report = json.loads(
+        (tmp_path / "evidence" / "image-qa-timeout.json").read_text()
+    )
+    assert timeout_report["status"] == "timeout"
+    assert timeout_report["role"] == "image_qa"
+    review = json.loads(
+        (tmp_path / "evidence" / "image-qa-round1.json").read_text()
+    )
+    assert review["status"] == "unavailable"
+    assert review["harness_qa_timeout"] is True
+    assert result.qa_disagreements[0]["status"] == "unavailable"

@@ -85,7 +85,9 @@ jobs:
           inputs.operation == 'existing_as_new_probe' ||
           inputs.operation == 'scenario_one' }}
     runs-on: [self-hosted, Linux, X64, oe-image-x86]
-    timeout-minutes: 120
+    # Leaves headroom around the bounded Creator/QA calls for deterministic
+    # gates, report writing and candidate packaging.
+    timeout-minutes: 360
     outputs:
       base_sha: ${{ steps.base.outputs.sha }}
     steps:

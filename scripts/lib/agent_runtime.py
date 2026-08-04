@@ -18,8 +18,20 @@ class AgentRuntimeError(RuntimeError):
     """Raised when OpenCode fails or violates its output contract."""
 
 
+class AgentTimeoutError(AgentRuntimeError):
+    """Raised when an Agent overran its budget without completing normally."""
+
+    def __init__(self, *, role: str, elapsed: float) -> None:
+        super().__init__(f"OpenCode {role} timed out after {elapsed:.1f}s")
+        self.role = role
+        self.elapsed = elapsed
+
+
 MODEL = "deepseek/deepseek-v4-flash"
 _AGENT_HEARTBEAT_SECONDS = 60.0
+# Research downloads are the one Agent action that can quietly consume a whole
+# budget, so cap the scratch directory instead of trusting the prompt alone.
+_SCRATCH_LIMIT_MB = 3000
 _MESSAGE_DETAIL_LIMIT = 4000
 _ACTION_DETAIL_LIMIT = 240
 _VISIBLE_ACTION_TOOLS = {
@@ -36,7 +48,6 @@ _ROLES = _WRITE_ROLES | _READ_ONLY_ROLES
 SCRATCH_DIR = ".oe-scratch"
 # The two event types emit() counts toward the ACTIVITY summary.
 _ACTIVITY_EVENTS = {"text", "tool_use"}
-
 AgentRunner = Callable[
     [Sequence[str], Path, Mapping[str, str], int],
     subprocess.CompletedProcess,
@@ -59,11 +70,13 @@ def _default_runner(
     process_env.update(env)
     role = env.get("OE_AGENT_ROLE", "unknown")
     secret = env.get("DEEPSEEK_API_KEY", "")
+    scratch = Path(env.get("OE_AGENT_SCRATCH", cwd / SCRATCH_DIR))
     started = time.monotonic()
     last_output = [started]
     last_action = ["none"]
     message_count = [0]
     action_counts: dict[str, int] = {}
+    scratch_mb = [0]
     completed = threading.Event()
 
     def safe_detail(value: object, *, limit: int) -> str:
@@ -189,8 +202,20 @@ def _default_runner(
                 f"WAIT elapsed={now - started:.1f}s "
                 f"silence={silence:.1f}s "
                 f"last_action={last_action[0]} "
-                f"timeout={float(timeout):g}s",
+                f"timeout={float(timeout):g}s "
+                f"scratch={scratch_mb[0]}MB",
             )
+
+    def scratch_watchdog() -> str | None:
+        scratch_mb[0] = _directory_size_mb(scratch)
+        if scratch_mb[0] <= _SCRATCH_LIMIT_MB:
+            return None
+        log(
+            f"agent:{role}",
+            f"ABORT reason=scratch_over_limit "
+            f"scratch={scratch_mb[0]}MB limit={_SCRATCH_LIMIT_MB}MB",
+        )
+        return "scratch_over_limit"
 
     heartbeat_thread = threading.Thread(
         target=heartbeat,
@@ -205,6 +230,7 @@ def _default_runner(
             env=process_env,
             timeout=timeout,
             emit=emit,
+            watchdog=scratch_watchdog,
         )
     finally:
         completed.set()
@@ -212,12 +238,34 @@ def _default_runner(
     tools = ",".join(
         f"{tool}:{count}" for tool, count in sorted(action_counts.items())
     )
+    scratch_mb[0] = max(scratch_mb[0], _directory_size_mb(scratch))
     log(
         f"agent:{role}",
         f"ACTIVITY messages={message_count[0]} "
-        f"actions={sum(action_counts.values())} tools={tools or 'none'}",
+        f"actions={sum(action_counts.values())} tools={tools or 'none'} "
+        f"scratch={scratch_mb[0]}MB",
     )
     return result
+
+
+def _directory_size_mb(path: Path) -> int:
+    total = 0
+    stack = [path]
+    while stack:
+        current = stack.pop()
+        try:
+            entries = list(os.scandir(current))
+        except OSError:
+            continue
+        for entry in entries:
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    stack.append(Path(entry.path))
+                elif entry.is_file(follow_symlinks=False):
+                    total += entry.stat(follow_symlinks=False).st_size
+            except OSError:
+                continue
+    return total // (1024 * 1024)
 
 
 def prepare_scratch(workspace: Path) -> Path:
@@ -371,7 +419,7 @@ def _validate_contract(
 ) -> None:
     if "success" in payload and not isinstance(payload["success"], bool):
         raise AgentRuntimeError("Agent contract success must be a boolean")
-    for key in ("files_created", "changes", "issues"):
+    for key in ("files_created", "changes", "issues", "assumptions"):
         if key in payload and not isinstance(payload[key], list):
             raise AgentRuntimeError(f"Agent contract {key} must be a list")
     if "command_evidence" in required_keys:
@@ -505,9 +553,7 @@ def run_agent(
     if result.returncode != 0:
         if result.returncode == 124:
             log(f"agent:{role}", f"TIMEOUT elapsed={elapsed:.1f}s")
-            raise AgentRuntimeError(
-                f"OpenCode {role} timed out after {elapsed:.1f}s"
-            )
+            raise AgentTimeoutError(role=role, elapsed=elapsed)
         log(
             f"agent:{role}",
             f"FAIL exit_code={result.returncode} elapsed={elapsed:.1f}s",
