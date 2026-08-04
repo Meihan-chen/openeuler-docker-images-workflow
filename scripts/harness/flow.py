@@ -79,6 +79,10 @@ def _write_json(path: Path, value: dict) -> None:
     )
 
 
+def _redact_secret(value: str, secret: str) -> str:
+    return value.replace(secret, "REDACTED") if secret else value
+
+
 def _print_json(value: dict) -> None:
     print(json.dumps(value, ensure_ascii=False, sort_keys=True))
 
@@ -470,21 +474,43 @@ def cmd_phase1_native_smoke(args: argparse.Namespace) -> None:
 
 
 def cmd_phase1_decide(args: argparse.Namespace) -> None:
-    reports = {
-        "x86_64": json.loads(args.x86_report.read_text()),
-        "aarch64": json.loads(args.arm_report.read_text()),
-    }
-    decision = decide_round(
-        workspace=args.workspace,
-        task=_load_task(args.task_spec),
-        base_sha=args.base_sha,
-        round_number=args.round,
-        max_rounds=args.max_rounds,
-        reports=reports,
-        report_dir=args.report_dir,
-        executable=args.opencode,
-        api_key=os.environ.get("DEEPSEEK_API_KEY", ""),
-    )
+    args.report_dir.mkdir(parents=True, exist_ok=True)
+    api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+    try:
+        reports = {
+            "x86_64": json.loads(args.x86_report.read_text()),
+            "aarch64": json.loads(args.arm_report.read_text()),
+        }
+        decision = decide_round(
+            workspace=args.workspace,
+            task=_load_task(args.task_spec),
+            base_sha=args.base_sha,
+            round_number=args.round,
+            max_rounds=args.max_rounds,
+            reports=reports,
+            report_dir=args.report_dir,
+            executable=args.opencode,
+            api_key=api_key,
+        )
+    except Exception as error:
+        error_message = _redact_secret(str(error), api_key)
+        try:
+            _write_json(
+                args.report_dir / f"decision-error-{args.round}.json",
+                {
+                    "status": "error",
+                    "round": args.round,
+                    "error_type": type(error).__name__,
+                    "error": error_message,
+                },
+            )
+        except Exception as evidence_error:
+            print(
+                "flow: warning: failed to write decision evidence: "
+                f"{_redact_secret(str(evidence_error), api_key)}",
+                file=sys.stderr,
+            )
+        raise
     summary = {
         "converged": decision.converged,
         "round": decision.round_number,
@@ -492,6 +518,10 @@ def cmd_phase1_decide(args: argparse.Namespace) -> None:
         "validated_patch_sha256": decision.validated_patch_sha256,
         "terminal_status": decision.terminal_status,
     }
+    _write_json(
+        args.report_dir / f"round-decision-{args.round}.json",
+        summary,
+    )
     if args.github_output:
         with args.github_output.open("a", encoding="utf-8") as stream:
             stream.write(

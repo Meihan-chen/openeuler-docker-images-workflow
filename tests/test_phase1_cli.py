@@ -5,6 +5,8 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 CLI = ROOT / "scripts" / "harness" / "flow.py"
@@ -58,6 +60,83 @@ def _write_candidate_payload(root):
     (root / "reports" / "gates.json").write_text(gate)
     (root / "reports" / "generation-gates.json").write_text(gate)
     (root / "reports" / "hadolint.txt").write_text("")
+
+
+def _phase1_decide_args(tmp_path, reports, *, round_number=1):
+    workspace = tmp_path / "target"
+    report_dir = tmp_path / "decision" / "agents"
+    task_spec = tmp_path / "task-spec.json"
+    x86_report = tmp_path / "x86_64.json"
+    arm_report = tmp_path / "aarch64.json"
+    workspace.mkdir(exist_ok=True)
+    task_spec.write_text(
+        json.dumps(
+            {
+                "app": "kvrocks",
+                "version": "2.16.0",
+                "os_version": "24.03-lts-sp4",
+                "domain": "Database",
+                "source_url": "https://github.com/apache/kvrocks/tree/v2.16.0",
+                "scenario": "new-image",
+            }
+        )
+    )
+    x86_report.write_text(json.dumps(reports["x86_64"]))
+    arm_report.write_text(json.dumps(reports["aarch64"]))
+    return report_dir, (
+        "phase1-decide",
+        "--workspace",
+        str(workspace),
+        "--task-spec",
+        str(task_spec),
+        "--base-sha",
+        BASE_SHA,
+        "--round",
+        str(round_number),
+        "--max-rounds",
+        "3",
+        "--x86-report",
+        str(x86_report),
+        "--arm-report",
+        str(arm_report),
+        "--report-dir",
+        str(report_dir),
+        "--opencode",
+        str(tmp_path / "opencode"),
+    )
+
+
+def _passed_native_report(*, commit_sha=""):
+    report = {
+        "status": "passed",
+        "checks": {
+            "native_build": True,
+            "dgoss": True,
+            "shared_tests": True,
+        },
+        "validated_patch_sha256": "a" * 64,
+    }
+    if commit_sha:
+        report["format_check"] = {
+            "status": "passed",
+            "kind": "candidate",
+            "commit_sha": commit_sha,
+        }
+    return report
+
+
+def _infra_native_report():
+    return {
+        "status": "failed",
+        "checks": {
+            "native_build": False,
+            "dgoss": None,
+            "shared_tests": None,
+        },
+        "failed_stage": "native_build",
+        "failure": "timed out",
+        "failure_details": {"returncode": 124},
+    }
 
 
 def _git(repo, *args):
@@ -130,6 +209,170 @@ def test_task_spec_command_fails_without_writing_unsafe_input(tmp_path):
     assert result.returncode == 2
     assert "app:" in result.stderr
     assert not output.exists()
+
+
+@pytest.mark.parametrize(
+    ("outcome", "reports", "expected"),
+    (
+        (
+            "converged",
+            {
+                "x86_64": _passed_native_report(),
+                "aarch64": _passed_native_report(),
+            },
+            {"converged": True, "terminal_status": ""},
+        ),
+        (
+            "format checker mismatch",
+            {
+                "x86_64": _passed_native_report(commit_sha="a" * 40),
+                "aarch64": _passed_native_report(commit_sha="b" * 40),
+            },
+            {"converged": False, "terminal_status": ""},
+        ),
+        (
+            "infrastructure retry",
+            {
+                "x86_64": _infra_native_report(),
+                "aarch64": _infra_native_report(),
+            },
+            {"converged": False, "terminal_status": ""},
+        ),
+    ),
+)
+def test_phase1_decide_records_every_successful_outcome(
+    tmp_path,
+    monkeypatch,
+    outcome,
+    reports,
+    expected,
+):
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+    report_dir, args = _phase1_decide_args(tmp_path, reports)
+
+    result = _run(*args)
+
+    assert result.returncode == 0, f"{outcome}: {result.stderr}"
+    recorded = json.loads(
+        (report_dir / "round-decision-1.json").read_text()
+    )
+    assert recorded["round"] == 1
+    assert {
+        "converged": recorded["converged"],
+        "terminal_status": recorded["terminal_status"],
+    } == expected
+
+
+def test_phase1_decide_records_an_error_before_failing(tmp_path):
+    incomplete = _passed_native_report()
+    incomplete["checks"] = {"native_build": True}
+    report_dir, args = _phase1_decide_args(
+        tmp_path,
+        {
+            "x86_64": incomplete,
+            "aarch64": _passed_native_report(),
+        },
+    )
+
+    result = _run(*args)
+
+    assert result.returncode == 2
+    recorded = json.loads((report_dir / "decision-error-1.json").read_text())
+    assert recorded == {
+        "error": "native report checks are incomplete: x86_64",
+        "error_type": "NativeRepairError",
+        "round": 1,
+        "status": "error",
+    }
+
+
+def test_phase1_decide_keeps_each_round_evidence(tmp_path):
+    reports = {
+        "x86_64": _passed_native_report(),
+        "aarch64": _passed_native_report(),
+    }
+    report_dir, round_one = _phase1_decide_args(
+        tmp_path,
+        reports,
+        round_number=1,
+    )
+    _, round_two = _phase1_decide_args(
+        tmp_path,
+        reports,
+        round_number=2,
+    )
+
+    assert _run(*round_one).returncode == 0
+    assert _run(*round_two).returncode == 0
+    assert sorted(path.name for path in report_dir.iterdir()) == [
+        "round-decision-1.json",
+        "round-decision-2.json",
+    ]
+
+
+def test_phase1_decide_redacts_secret_from_error_evidence(
+    tmp_path,
+    monkeypatch,
+):
+    from scripts.harness import flow
+
+    secret = "deepseek-secret"
+    reports = {
+        "x86_64": _passed_native_report(),
+        "aarch64": _passed_native_report(),
+    }
+    report_dir, cli_args = _phase1_decide_args(tmp_path, reports)
+    args = flow._parser().parse_args(cli_args)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", secret)
+    monkeypatch.setattr(
+        flow,
+        "decide_round",
+        lambda **_: (_ for _ in ()).throw(
+            flow.NativeRepairError(f"request rejected: {secret}")
+        ),
+    )
+
+    with pytest.raises(flow.NativeRepairError):
+        flow.cmd_phase1_decide(args)
+
+    evidence = (report_dir / "decision-error-1.json").read_text()
+    assert secret not in evidence
+    assert "request rejected: REDACTED" in evidence
+
+
+def test_phase1_decide_preserves_error_when_evidence_write_fails(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    from scripts.harness import flow
+
+    reports = {
+        "x86_64": _passed_native_report(),
+        "aarch64": _passed_native_report(),
+    }
+    _, cli_args = _phase1_decide_args(tmp_path, reports)
+    args = flow._parser().parse_args(cli_args)
+    monkeypatch.setattr(
+        flow,
+        "decide_round",
+        lambda **_: (_ for _ in ()).throw(
+            flow.NativeRepairError("original decision failure")
+        ),
+    )
+    monkeypatch.setattr(
+        flow,
+        "_write_json",
+        lambda *_: (_ for _ in ()).throw(OSError("disk full")),
+    )
+
+    with pytest.raises(
+        flow.NativeRepairError,
+        match="original decision failure",
+    ):
+        flow.cmd_phase1_decide(args)
+
+    assert "disk full" in capsys.readouterr().err
 
 
 def test_delivery_config_command_reports_zero_write_validate_only(tmp_path):

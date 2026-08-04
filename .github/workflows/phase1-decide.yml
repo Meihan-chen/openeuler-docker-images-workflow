@@ -246,7 +246,7 @@ jobs:
         with:
           name: phase1-decide${{ inputs.round }}-${{ github.run_id }}
           path: ${{ runner.temp }}/phase1-decide/
-          if-no-files-found: ignore
+          if-no-files-found: error
           retention-days: 30
 
       - name: Fail hard-stop decision

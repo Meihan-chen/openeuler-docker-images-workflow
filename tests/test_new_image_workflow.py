@@ -464,6 +464,26 @@ def test_repair_budget_terminal_is_preserved_without_emitting_round_five():
     assert "exit 1" in hard_stop_failure["run"]
 
 
+def test_round_decision_artifact_is_strict_and_merge_safe():
+    workflow = _workflow(DECIDE_PATH)
+    steps = {
+        step["name"]: step
+        for step in workflow["jobs"]["decide"]["steps"]
+    }
+
+    upload = steps["Upload round decision evidence"]
+    assert "always()" in upload["if"]
+    assert upload["with"]["if-no-files-found"] == "error"
+
+    package_steps = {
+        step["name"]: step
+        for step in _workflow()["jobs"]["package_candidate"]["steps"]
+    }
+    download = package_steps["Download round decision evidence"]
+    assert download["with"]["pattern"].lstrip().startswith("phase1-decide*")
+    assert download["with"]["merge-multiple"] is True
+
+
 def test_issue_watcher_is_lightweight_serial_and_test_allowlisted():
     """Polling stays parked while the watcher is allowlisted to one Issue.
 
