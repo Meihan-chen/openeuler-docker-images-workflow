@@ -549,6 +549,31 @@ def _report(architecture, *, status="passed", digest=DIGEST):
     return report
 
 
+def _mixed_infra_and_format_report(architecture):
+    report = _report(architecture, status="failed")
+    report.update(
+        {
+            "failed_stage": "native_build",
+            "failure": "timed out",
+            "failure_details": {"returncode": 124},
+            "failures": [
+                {
+                    "stage": "native_build",
+                    "check": "native_build",
+                    "failure": "timed out",
+                    "failure_details": {"returncode": 124},
+                }
+            ],
+            "format_check": {
+                "status": "failed",
+                "kind": "candidate",
+                "failure": "image-info.yml is missing environment",
+            },
+        }
+    )
+    return report
+
+
 def _decide(tmp_path, reports, **kwargs):
     from scripts.lib.native_repair import decide_round
 
@@ -701,6 +726,51 @@ def test_one_failing_architecture_repairs_once_with_both_reports(tmp_path):
     assert "deepseek-secret" not in review
 
 
+def test_fixer_receives_a_classification_for_every_native_check_failure(
+    tmp_path,
+):
+    fixer = Fixer()
+    x86 = _report("x86_64", status="failed")
+    x86.update(
+        {
+            "failed_stage": "dgoss",
+            "failure": "invalid Attribute for File:/tmp: dir",
+            "failure_details": {"returncode": 1},
+            "failures": [
+                {
+                    "stage": "dgoss",
+                    "failure": "invalid Attribute for File:/tmp: dir",
+                    "failure_details": {"returncode": 1},
+                },
+                {
+                    "stage": "shared_tests",
+                    "failure": "version assertion failed",
+                    "failure_details": {"returncode": 1},
+                },
+            ],
+        }
+    )
+
+    _decide(
+        tmp_path,
+        {"x86_64": x86, "aarch64": _report("aarch64")},
+        agent_runner=fixer,
+    )
+
+    report = json.loads(
+        (tmp_path / "evidence" / "fixer-native-dual-round1-attempt1.json").read_text()
+    )
+    classification = report["_input_review"]["classification"]["x86_64"]
+    assert [failure["stage"] for failure in classification["failures"]] == [
+        "dgoss",
+        "shared_tests",
+    ]
+    assert [failure["category"] for failure in classification["failures"]] == [
+        "config-parse",
+        "runtime-error",
+    ]
+
+
 def test_a_repair_breaking_a_hard_boundary_stops_without_reasking_fixer(tmp_path):
     fixer = Fixer()
     hard_stop = {
@@ -816,7 +886,44 @@ def test_unsuccessful_fixer_cannot_hide_a_hard_boundary_change(tmp_path):
     assert fixer_report["success"] is False
 
 
-def test_a_repair_leaving_tests_unexecutable_is_re_asked_before_rebuild(
+def test_a_repair_with_one_executable_check_advances_to_rebuild(
+    tmp_path,
+):
+    fixer = Fixer()
+    partial_gate = {
+        "status": "passed",
+        "build_allowed": True,
+        "goss_allowed": False,
+        "shared_tests_allowed": True,
+        "test_allowed": False,
+        "delivery_allowed": False,
+        "errors": ["goss.yaml must be valid YAML"],
+        "findings": [
+            {
+                "code": "tests.goss_yaml",
+                "level": "delivery_stop",
+                "owner": "testcase_creator",
+                "check": "dgoss",
+                "message": "goss.yaml must be valid YAML",
+            }
+        ],
+    }
+
+    decision = _decide(
+        tmp_path,
+        {
+            "x86_64": _report("x86_64", status="failed"),
+            "aarch64": _report("aarch64"),
+        },
+        agent_runner=fixer,
+        target_validator=lambda **_: partial_gate,
+    )
+
+    assert decision.repair_attempts == 1
+    assert len(fixer.calls) == 1
+
+
+def test_a_repair_with_no_executable_checks_is_re_asked_before_rebuild(
     tmp_path,
 ):
     fixer = Fixer()
@@ -825,21 +932,36 @@ def test_a_repair_leaving_tests_unexecutable_is_re_asked_before_rebuild(
             {
                 "status": "passed",
                 "build_allowed": True,
+                "goss_allowed": False,
+                "shared_tests_allowed": False,
                 "test_allowed": False,
                 "delivery_allowed": False,
-                "errors": ["goss.yaml must be valid YAML"],
+                "errors": [
+                    "goss.yaml must be valid YAML",
+                    "test.sh must be valid Bash",
+                ],
                 "findings": [
                     {
                         "code": "tests.goss_yaml",
                         "level": "delivery_stop",
                         "owner": "testcase_creator",
+                        "check": "dgoss",
                         "message": "goss.yaml must be valid YAML",
+                    },
+                    {
+                        "code": "tests.shell_syntax",
+                        "level": "delivery_stop",
+                        "owner": "testcase_creator",
+                        "check": "shared_tests",
+                        "message": "test.sh must be valid Bash",
                     }
                 ],
             },
             {
                 "status": "passed",
                 "build_allowed": True,
+                "goss_allowed": True,
+                "shared_tests_allowed": True,
                 "test_allowed": True,
                 "delivery_allowed": True,
                 "findings": [],
@@ -859,6 +981,51 @@ def test_a_repair_leaving_tests_unexecutable_is_re_asked_before_rebuild(
 
     assert decision.repair_attempts == 2
     assert "tests.goss_yaml" in fixer.calls[1]["prompt"]
+
+
+def test_format_and_native_failures_are_both_classified_for_the_fixer(tmp_path):
+    fixer = Fixer()
+    x86 = _report("x86_64", status="failed")
+    x86.update(
+        {
+            "failed_stage": "dgoss",
+            "failure": "invalid Attribute for File:/tmp: dir",
+            "failure_details": {"returncode": 1},
+            "failures": [
+                {
+                    "stage": "dgoss",
+                    "check": "dgoss",
+                    "failure": "invalid Attribute for File:/tmp: dir",
+                    "failure_details": {"returncode": 1},
+                }
+            ],
+            "format_check": {
+                "status": "failed",
+                "kind": "candidate",
+                "commit_sha": "a" * 40,
+                "failure": "image-info.yml is missing environment",
+            },
+        }
+    )
+
+    _decide(
+        tmp_path,
+        {"x86_64": x86, "aarch64": _report("aarch64")},
+        agent_runner=fixer,
+    )
+
+    report = json.loads(
+        (tmp_path / "evidence" / "fixer-native-dual-round1-attempt1.json").read_text()
+    )
+    failures = report["_input_review"]["classification"]["x86_64"]["failures"]
+    assert [failure["stage"] for failure in failures] == [
+        "dgoss",
+        "upstream_format",
+    ]
+    assert [failure["category"] for failure in failures] == [
+        "config-parse",
+        "image-contract",
+    ]
 
 
 def test_exhausting_the_repair_budget_returns_auditable_needs_human_state(tmp_path):
@@ -928,6 +1095,20 @@ def test_exhausted_infrastructure_failures_are_not_needs_human(tmp_path):
             round_number=4,
             max_rounds=3,
         )
+
+
+def test_exhausted_mixed_infra_and_candidate_failures_need_human_review(tmp_path):
+    decision = _decide(
+        tmp_path,
+        {
+            architecture: _mixed_infra_and_format_report(architecture)
+            for architecture in ("x86_64", "aarch64")
+        },
+        round_number=4,
+        max_rounds=3,
+    )
+
+    assert decision.terminal_status == "needs-human-review"
 
 
 def test_round_gate_repair_exhaustion_returns_needs_human(tmp_path):
@@ -1109,3 +1290,19 @@ def test_an_infrastructure_failure_does_not_pay_for_a_fixer_call(tmp_path):
     assert fixer.calls == []
     assert decision.converged is False
     assert decision.repair_attempts == 0
+
+
+def test_mixed_infra_and_candidate_failures_do_pay_for_a_fixer_call(tmp_path):
+    fixer = Fixer()
+
+    decision = _decide(
+        tmp_path,
+        {
+            architecture: _mixed_infra_and_format_report(architecture)
+            for architecture in ("x86_64", "aarch64")
+        },
+        agent_runner=fixer,
+    )
+
+    assert len(fixer.calls) == 1
+    assert decision.repair_attempts == 1

@@ -334,6 +334,52 @@ def test_contract_does_not_require_optional_test_helpers(tmp_path):
     assert report["delivery_allowed"] is True
 
 
+def test_test_contract_keeps_shared_tests_available_when_goss_is_invalid(
+    tmp_path,
+):
+    from scripts.lib.target_contract import validate_test_contract
+
+    repo, _ = _repo(tmp_path)
+    _write_valid_generated_candidate(repo)
+    (repo / "Database" / "kvrocks" / "tests" / "goss.yaml").write_text(
+        "command: [\n"
+    )
+
+    report = validate_test_contract(repo=repo, task=_task())
+
+    assert report["goss_allowed"] is False
+    assert report["shared_tests_allowed"] is True
+    assert report["test_allowed"] is False
+    assert any(
+        finding["code"] == "tests.goss_yaml"
+        and finding["check"] == "dgoss"
+        for finding in report["findings"]
+    )
+
+
+def test_test_contract_keeps_goss_available_when_shared_tests_are_invalid(
+    tmp_path,
+):
+    from scripts.lib.target_contract import validate_test_contract
+
+    repo, _ = _repo(tmp_path)
+    _write_valid_generated_candidate(repo)
+    (repo / "Database" / "kvrocks" / "tests" / "test.sh").write_text(
+        "#!/bin/bash\nif true; then\n"
+    )
+
+    report = validate_test_contract(repo=repo, task=_task())
+
+    assert report["goss_allowed"] is True
+    assert report["shared_tests_allowed"] is False
+    assert report["test_allowed"] is False
+    assert any(
+        finding["code"] == "tests.shell_syntax"
+        and finding["check"] == "shared_tests"
+        for finding in report["findings"]
+    )
+
+
 def test_generated_contract_uses_only_the_app_shared_test_entrypoint(tmp_path):
     from scripts.harness.gate_diff import validate_generated_target
 
@@ -600,6 +646,8 @@ def test_contract_keeps_buildable_candidate_with_invalid_goss_contract(tmp_path)
 
     assert report["status"] == "passed"
     assert report["build_allowed"] is True
+    assert report["goss_allowed"] is False
+    assert report["shared_tests_allowed"] is True
     assert report["test_allowed"] is False
     assert report["delivery_allowed"] is False
     assert any(

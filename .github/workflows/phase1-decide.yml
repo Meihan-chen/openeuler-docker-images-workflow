@@ -56,7 +56,7 @@ jobs:
   decide:
     name: Evaluate results and fix if needed
     runs-on: [self-hosted, Linux, X64, oe-image-x86]
-    timeout-minutes: 60
+    timeout-minutes: 180
     outputs:
       converged: ${{ steps.judge.outputs.converged }}
       terminal_status: ${{ steps.judge.outputs.terminal_status }}

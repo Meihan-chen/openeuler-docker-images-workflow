@@ -548,7 +548,7 @@ def _run_shared_tests(
                 "/opt/oe-tests/test.sh",
             ],
             cwd=workspace,
-            timeout=300,
+            timeout=600,
         )
         return
     command.extend(
@@ -620,97 +620,138 @@ def validate_native_image(
     image = f"oe-autopilot/{task.app}:{task.version}-{run_id}-{slug}"
     validated_patch_sha256 = validated_patch_digest(workspace)
     image_id = ""
-    failure: str | None = None
-    failure_details: dict[str, object] = {}
+    failures: list[dict[str, object]] = []
     container_evidence: dict[str, object] = {}
     # None means the check was never reached. Sharing one boolean across all
     # checks made a dgoss failure look like a build failure to the Fixer.
     checks: dict[str, bool | None] = {name: None for name in _E2E_CHECKS}
-    current_check = ""
     stage = f"native:{architecture}"
     log(stage, "START validation")
 
+    def record_failure(
+        check: str,
+        error: NativeValidationError,
+        *,
+        failed_stage: str | None = None,
+    ) -> None:
+        checks[check] = False
+        failures.append(
+            {
+                "stage": failed_stage or check,
+                "check": check,
+                "failure": str(error),
+                "failure_details": dict(error.details),
+            }
+        )
+        log(stage, f"FAIL {check}: {error}")
+
+    def run_check(check: str, action: Callable[[], None]) -> None:
+        log(stage, f"START {check}")
+        try:
+            action()
+        except NativeValidationError as error:
+            record_failure(check, error)
+        else:
+            checks[check] = True
+            log(stage, f"PASS {check}")
+
+    def contract_error(check: str) -> NativeValidationError:
+        findings = [
+            finding
+            for finding in test_contract["findings"]
+            if finding.get("check") == check
+        ]
+        return NativeValidationError(
+            "native test contract is not executable: "
+            + "; ".join(str(finding["message"]) for finding in findings),
+            details={"findings": findings},
+        )
+
     try:
-        current_check = "native_build"
-        log(stage, "START build")
-        _ensure_builder(runner, builder, cwd=workspace)
-        _run(
-            runner,
-            [
-                "docker",
-                "buildx",
-                "build",
-                "--builder",
-                builder,
-                "--load",
-                "--progress",
-                "plain",
-                "--platform",
-                platform,
-                "--tag",
-                image,
-                "--file",
-                str(dockerfile),
-                str(image_root),
-            ],
-            cwd=workspace,
-            timeout=3600,
-        )
-        checks["native_build"] = True
-        log(stage, "PASS build")
-        inspected = _run(
-            runner,
-            ["docker", "image", "inspect", "--format", "{{.Id}}", image],
-            cwd=workspace,
-        )
-        image_id = str(inspected.stdout or "").strip()
-        if test_contract["test_allowed"] is not True:
-            current_check = "test_contract"
-            raise NativeValidationError(
-                "native test contract is not executable: "
-                + "; ".join(str(error) for error in test_contract["errors"]),
-                details={"findings": test_contract["findings"]},
+        try:
+            log(stage, "START build")
+            _ensure_builder(runner, builder, cwd=workspace)
+            _run(
+                runner,
+                [
+                    "docker",
+                    "buildx",
+                    "build",
+                    "--builder",
+                    builder,
+                    "--load",
+                    "--progress",
+                    "plain",
+                    "--platform",
+                    platform,
+                    "--tag",
+                    image,
+                    "--file",
+                    str(dockerfile),
+                    str(image_root),
+                ],
+                cwd=workspace,
+                timeout=7200,
             )
-        current_check = "dgoss"
-        log(stage, "START dgoss")
-        _run_dgoss(
-            runner,
-            workspace=workspace,
-            image=image,
-            tests_root=tests_root,
-            version=task.version,
-            dgoss=dgoss,
-            goss=goss,
-            container=dgoss_container,
-            service_mode=service_mode,
-        )
-        checks["dgoss"] = True
-        log(stage, "PASS dgoss")
-        current_check = "shared_tests"
-        log(stage, "START shared tests")
-        _run_shared_tests(
-            runner,
-            workspace=workspace,
-            image=image,
-            tests_root=tests_root,
-            version=task.version,
-            container=container,
-            service_mode=service_mode,
-            run_id=run_id,
-        )
-        checks["shared_tests"] = True
-        log(stage, "PASS shared tests")
-    except NativeValidationError as error:
-        failure = str(error)
-        failure_details = dict(error.details)
-        if current_check in checks:
-            checks[current_check] = False
-        # Must run before the finally block force-removes the containers.
-        container_evidence = _container_evidence(
-            runner,
-            workspace=workspace,
-            containers=(dgoss_container, container),
-        )
+            inspected = _run(
+                runner,
+                ["docker", "image", "inspect", "--format", "{{.Id}}", image],
+                cwd=workspace,
+            )
+            image_id = str(inspected.stdout or "").strip()
+        except NativeValidationError as error:
+            record_failure("native_build", error)
+        else:
+            checks["native_build"] = True
+            log(stage, "PASS build")
+            if test_contract["goss_allowed"] is True:
+                run_check(
+                    "dgoss",
+                    lambda: _run_dgoss(
+                        runner,
+                        workspace=workspace,
+                        image=image,
+                        tests_root=tests_root,
+                        version=task.version,
+                        dgoss=dgoss,
+                        goss=goss,
+                        container=dgoss_container,
+                        service_mode=service_mode,
+                    ),
+                )
+            else:
+                record_failure(
+                    "dgoss",
+                    contract_error("dgoss"),
+                    failed_stage="test_contract",
+                )
+            if test_contract["shared_tests_allowed"] is True:
+                run_check(
+                    "shared_tests",
+                    lambda: _run_shared_tests(
+                        runner,
+                        workspace=workspace,
+                        image=image,
+                        tests_root=tests_root,
+                        version=task.version,
+                        container=container,
+                        service_mode=service_mode,
+                        run_id=run_id,
+                    ),
+                )
+            else:
+                record_failure(
+                    "shared_tests",
+                    contract_error("shared_tests"),
+                    failed_stage="test_contract",
+                )
+        if failures:
+            # Must run before the finally block force-removes the containers.
+            container_evidence = _container_evidence(
+                runner,
+                workspace=workspace,
+                containers=(dgoss_container, container),
+            )
     finally:
         # The builder outlives this call on purpose: repair rounds re-enter
         # validation and must keep the cached builder stage. It is released
@@ -730,6 +771,8 @@ def validate_native_image(
             )
 
     format_failure = _format_failure(format_check)
+    first_failure = failures[0] if failures else None
+    failure = str(first_failure["failure"]) if first_failure else None
     overall_failure = failure or format_failure
     report: dict[str, object] = {
         "status": "failed" if overall_failure else "passed",
@@ -744,10 +787,11 @@ def validate_native_image(
     }
     if format_check is not None:
         report["format_check"] = format_check
-    if failure:
+    if first_failure:
         report["failure"] = failure
-        report["failed_stage"] = current_check
-        report["failure_details"] = failure_details
+        report["failed_stage"] = first_failure["stage"]
+        report["failure_details"] = first_failure["failure_details"]
+        report["failures"] = failures
         if container_evidence:
             report["container_evidence"] = container_evidence
     elif format_failure:
@@ -761,14 +805,17 @@ def validate_native_image(
         failure=overall_failure,
     )
     if overall_failure:
-        log(stage, f"FAIL validation: {overall_failure}")
+        failure_summary = "\n".join(
+            f"{item['check']}: {item['failure']}" for item in failures
+        ) or str(overall_failure)
+        log(stage, f"FAIL validation: {failure_summary}")
         # Keep the structure a direct caller needs; only the report file had it.
         details = (
-            failure_details
-            if failure
+            dict(first_failure["failure_details"])
+            if first_failure
             else _format_failure_details(format_check or {})
         )
-        raise NativeValidationError(overall_failure, details=details)
+        raise NativeValidationError(failure_summary, details=details)
     log(stage, "PASS validation")
     return report
 

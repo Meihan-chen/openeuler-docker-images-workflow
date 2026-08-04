@@ -144,6 +144,13 @@ def _delivery_finding(
     )
 
 
+def _test_finding(code: str, message: str, *, check: str) -> dict[str, str]:
+    return {
+        **_delivery_finding(code, message, owner="testcase_creator"),
+        "check": check,
+    }
+
+
 def _advisory_finding(
     code: str,
     message: str,
@@ -430,10 +437,10 @@ def _lint_shell_file(
     if detail is None:
         return
     findings.append(
-        _delivery_finding(
+        _test_finding(
             "tests.shell_syntax",
             f"{path.name} is not valid Bash: {detail}",
-            owner="testcase_creator",
+            check="shared_tests",
         )
     )
 
@@ -451,10 +458,10 @@ def _validate_tests(
         except yaml.YAMLError:
             goss_data = None
             findings.append(
-                _delivery_finding(
+                _test_finding(
                     "tests.goss_yaml",
                     "goss.yaml must be valid YAML",
-                    owner="testcase_creator",
+                    check="dgoss",
                 )
             )
         if isinstance(goss_data, dict):
@@ -465,18 +472,18 @@ def _validate_tests(
                         continue
                     if not isinstance(assertion["stdout"], (str, list)):
                         findings.append(
-                            _delivery_finding(
+                            _test_finding(
                                 "tests.goss_stdout_schema",
                                 f"goss command {name} stdout must be a string or YAML list",
-                                owner="testcase_creator",
+                                check="dgoss",
                             )
                         )
         elif goss_data is not None:
             findings.append(
-                _delivery_finding(
+                _test_finding(
                     "tests.goss_schema",
                     "goss.yaml must contain a YAML mapping",
-                    owner="testcase_creator",
+                    check="dgoss",
                 )
             )
 
@@ -484,10 +491,10 @@ def _validate_tests(
     if goss_wait_path.is_file():
         if not goss_wait_path.stat().st_size:
             findings.append(
-                _delivery_finding(
+                _test_finding(
                     "tests.wait_empty",
                     "goss_wait.yaml must define at least one readiness resource",
-                    owner="testcase_creator",
+                    check="dgoss",
                 )
             )
             goss_wait_data = None
@@ -497,63 +504,63 @@ def _validate_tests(
             except yaml.YAMLError:
                 goss_wait_data = None
                 findings.append(
-                    _delivery_finding(
+                    _test_finding(
                         "tests.wait_yaml",
                         "goss_wait.yaml must be valid YAML",
-                        owner="testcase_creator",
+                        check="dgoss",
                     )
                 )
         if isinstance(goss_wait_data, dict) and not goss_wait_data:
             findings.append(
-                _delivery_finding(
+                _test_finding(
                     "tests.wait_empty",
                     "goss_wait.yaml must define at least one readiness resource",
-                    owner="testcase_creator",
+                    check="dgoss",
                 )
             )
         if isinstance(goss_wait_data, dict):
             port = goss_wait_data.get("port", {})
             if port and not isinstance(port, dict):
                 findings.append(
-                    _delivery_finding(
+                    _test_finding(
                         "tests.wait_port_schema",
                         "goss_wait.yaml port resource must be a YAML mapping",
-                        owner="testcase_creator",
+                        check="dgoss",
                     )
                 )
             elif isinstance(port, dict):
                 for name, assertion in port.items():
                     if not isinstance(assertion, dict):
                         findings.append(
-                            _delivery_finding(
+                            _test_finding(
                                 "tests.wait_port_schema",
                                 f"goss_wait.yaml port {name} must be a YAML mapping",
-                                owner="testcase_creator",
+                                check="dgoss",
                             )
                         )
                     elif "timeout" in assertion:
                         findings.append(
-                            _delivery_finding(
+                            _test_finding(
                                 "tests.wait_timeout",
                                 f"goss_wait.yaml port {name} does not support timeout; the native harness controls the readiness retry",
-                                owner="testcase_creator",
+                                check="dgoss",
                             )
                         )
         elif goss_wait_data is not None:
             findings.append(
-                _delivery_finding(
+                _test_finding(
                     "tests.wait_schema",
                     "goss_wait.yaml must contain a YAML mapping",
-                    owner="testcase_creator",
+                    check="dgoss",
                 )
             )
     shared_entry = shared / "test.sh"
     if shared_entry.is_file() and not shared_entry.stat().st_mode & 0o111:
         findings.append(
-            _delivery_finding(
+            _test_finding(
                 "tests.entrypoint_executable",
                 f"{shared_entry.relative_to(repo)} must be executable",
-                owner="testcase_creator",
+                check="shared_tests",
             )
         )
 
@@ -570,17 +577,17 @@ def validate_test_contract(
     repo = Path(repo)
     app_root = f"{task.domain}/{task.app}"
     findings: list[dict[str, str]] = []
-    for relative in (
-        f"{app_root}/tests/goss.yaml",
-        f"{app_root}/tests/test.sh",
+    for relative, check in (
+        (f"{app_root}/tests/goss.yaml", "dgoss"),
+        (f"{app_root}/tests/test.sh", "shared_tests"),
     ):
         path = repo / relative
         if not path.is_file() or path.stat().st_size == 0:
             findings.append(
-                _delivery_finding(
+                _test_finding(
                     "tests.required",
                     f"required generated file is missing or empty: {relative}",
-                    owner="testcase_creator",
+                    check=check,
                 )
             )
     _validate_tests(repo, app_root, findings)
@@ -589,9 +596,14 @@ def validate_test_contract(
         for finding in findings
         if finding["level"] == "delivery_stop"
     ]
+    blocked_checks = {finding["check"] for finding in blocking}
+    goss_allowed = "dgoss" not in blocked_checks
+    shared_tests_allowed = "shared_tests" not in blocked_checks
     return {
         "status": "passed" if not blocking else "failed",
-        "test_allowed": not blocking,
+        "test_allowed": goss_allowed and shared_tests_allowed,
+        "goss_allowed": goss_allowed,
+        "shared_tests_allowed": shared_tests_allowed,
         "findings": findings,
         "errors": [finding["message"] for finding in blocking],
     }
@@ -892,10 +904,16 @@ def validate_generated_target(
 
     _validate_link_hosts(repo, app_root, findings)
     _validate_docs(repo, task, app_root, findings)
+    test_permissions: dict[str, bool] = {}
     if phase == "full":
-        findings.extend(
-            validate_test_contract(repo=repo, task=task)["findings"]
-        )
+        test_contract = validate_test_contract(repo=repo, task=task)
+        findings.extend(test_contract["findings"])
+        test_permissions = {
+            "goss_allowed": test_contract["goss_allowed"] is True,
+            "shared_tests_allowed": (
+                test_contract["shared_tests_allowed"] is True
+            ),
+        }
 
     if hard_findings:
         raise TargetContractError(
@@ -916,6 +934,7 @@ def validate_generated_target(
         "build_allowed": True,
         "delivery_allowed": not delivery_findings,
         "test_allowed": test_allowed,
+        **test_permissions,
         "findings": findings,
         "errors": [finding["message"] for finding in delivery_findings],
         "task_id": task.task_id,

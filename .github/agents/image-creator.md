@@ -5,7 +5,7 @@
 
 ## 任务契约优先级
 
-Harness 追加的任务契约是本次任务中应用、版本、openEuler 版本、源码引用、目标路径和允许变更范围的唯一权威来源。应用的构建和运行行为必须来自 official upstream 源码、文档以及目标仓同类镜像，不得从其他应用套用固定用户、端口或命令。下文示例与任务契约冲突时，以任务契约为准。
+Harness 追加的任务契约是本次任务中应用、版本、openEuler 版本、源码引用、目标路径和允许变更范围的唯一权威来源。应用的构建和运行行为必须来自上游官方源码、文档以及目标仓同类镜像，不得从其他应用套用固定用户、端口或命令。下文示例与任务契约冲突时，以任务契约为准。
 
 不得运行 `git commit`、`git push` 或任何仓库/API 写操作。不得读取、输出、复制或提及环境中的凭据和密钥。
 
@@ -40,28 +40,25 @@ gh api repos/{owner}/{repo}/readme --jq '.content' | base64 -d | head -60
 
 确定：任务指定的精确稳定版本、构建语言、Go 版本（如果是 Go 项目）、主要二进制名称、License 类型、项目描述。不得将任务指定版本替换为“最新版本”或可变分支。
 
-Treat the TaskSpec source origin (`source_repo_url`) as the preferred download
-origin, and derive an immutable tag or release artifact from it when available.
-Do not switch to an equivalent archive or mirror merely for convenience. Use a
-different official origin only when upstream evidence shows that it is required
-or the TaskSpec source origin cannot provide the pinned artifact, and explain
-that choice in the final summary. Dockerfile network fetches must use a small
-bounded retry and connection timeout. Verify a published checksum when upstream
-provides one; never add an unverified mirror fallback.
+应将 TaskSpec 声明的源码来源（`source_repo_url`）作为首选下载来源，并尽可能从该来源
+解析出不可变的 tag 或 release 产物。不得仅为降低获取成本而改用内容等价的归档包或镜像站。
+仅当上游证据表明必须更换来源，或 TaskSpec 来源无法提供该固定产物时，才可改用其他官方
+来源，并在最终 summary 中说明该决定。Dockerfile 中的网络下载必须设置连接超时和有限次数
+的重试。上游发布了 checksum 时必须校验；不得引入未经校验的镜像站作为失败回退。
 
-研究阶段的每次网络操作都要选能回答该问题的最小代价手段：
-凡是固定版本源码、Release 元数据或上游发布的 checksum 文件能回答的，就不下载产物。
-单次研究网络操作最多 180 秒；失败后不得加大超时反复重试，也不得继续使用未验证文件，
-应改用源码或元数据继续生成，并把完整下载和校验交给后续原生构建。
+研究阶段的每次网络操作，都要选能回答当前问题的最低成本手段：
+固定版本源码、Release 元数据或上游发布的 checksum 文件能回答的，就不必下载产物。
+单次研究网络操作最多 180 秒；失败后不得加大超时反复重试，也不得继续使用未验证的文件，
+而应改用源码或元数据继续生成，并把完整下载和校验交给后续原生构建。
 
-运行环境的事实（基础镜像自带什么、仓库配置、某个命令或软件包是否可用）由基础镜像自己回答：
-Runner 上有 Docker，`docker run --rm <基础镜像>` 给出的是最终构建环境里的权威答案，
-不要靠下载镜像产物或仓库元数据来推断这些事实。
+运行环境的事实（基础镜像自带什么、仓库如何配置、某个命令或软件包是否可用）由基础镜像自己回答：
+Runner 上有 Docker，`docker run --rm <基础镜像>` 给出的是最终构建环境中的权威答案，
+不要靠下载镜像产物或仓库元数据来推断。
 
 必须确认发布产物内部结构时，只获取到足以回答当前问题的程度；
-同一产物整轮只下载一次，放在 `$OE_AGENT_SCRATCH` 下供后续问题复用，不要为同一个问题重复获取。
+同一产物整轮只下载一次，放在 `$OE_AGENT_SCRATCH` 下供后续问题复用，不要重复获取。
 Harness 会监控 scratch 体积，超过上限即终止本轮。
-无法在本轮确认的事实写入 `assumptions`，不要靠加大下载量换取确定性。
+本轮无法确认的事实写入 `assumptions`，不要靠加大下载量换取确定性。
 
 ### 步骤 2：研究同类参考包
 
@@ -73,8 +70,8 @@ Harness 会监控 scratch 体积，超过上限即终止本轮。
 
 只有 openEuler 自有仓库的迁移前链接需要替换：不得新增
 `gitee.com/openeuler/*` 或 `gitee.com/src-openeuler/*`，应使用对应的
-`gitcode.com` 地址。Third-party Gitee repositories are valid upstream sources；
-第三方项目位于 `gitee.com` 时必须保留其真实地址，不能全局替换域名。
+`gitcode.com` 地址。第三方项目本身托管在 Gitee 上，这是合法的上游来源，必须保留它的
+真实地址，不要按域名一刀切地替换。
 
 ### 步骤 3：创建目录结构
 
@@ -85,23 +82,23 @@ Harness 会监控 scratch 体积，超过上限即终止本轮。
 └── README.md
 ```
 
-这是 minimum required structure，不是完整文件白名单。应用确有需要时，可以在本次 MDU
+上面列的是最小必需结构，不是完整的文件白名单。应用确有需要时，可以在本次 MDU
 目录内增加配置、entrypoint、patch 或模板等附属文件。
 
-doc/ is optional。完全不生成 `doc/` 是合法结果；if any doc/ content is created，
-必须同时保证 `doc/image-info.yml` 可解析、目标仓必需字段完整，并且所有声明或引用的
-图片真实存在且格式有效。目标仓还要求 at least one doc/picture asset；无法获得可信
-图片时应完全省略 `doc/`，不要留下部分目录，也不要编造元数据或图片。
+`doc/` 是可选目录，完全不生成 `doc/` 是合法结果。但只要生成了任何 `doc/` 内容，下面几条
+就必须同时成立：`doc/image-info.yml` 可正常解析、目标仓要求的字段完整、其中声明或引用
+的图片都真实存在且格式有效。目标仓还要求 `doc/` 下至少有一个图片资源，因此拿不到可信
+图片时就完全省略 `doc/`，不要留下残缺目录，也不要编造元数据或图片。
 
-优先复用固定版本源码中的 upstream-provided configuration。只有上游配置不存在，或无法
-满足容器运行要求且不能通过启动参数覆盖时，才创建本地配置；在最终 summary 中说明其来源
-和相对上游的必要差异。配置文件应与 persistent data directory 分离，避免挂载数据卷时
-遮蔽启动所需配置。
+配置优先复用固定版本源码中上游提供的那份。只有上游没有提供配置，或上游配置满足不了
+容器运行要求、又不能通过启动参数覆盖时，才创建本地配置，并在最终 summary 中说明它的
+来源和相对上游的必要差异。配置文件要与持久化数据目录分开存放，否则挂载数据卷时会遮蔽
+启动所需配置。
 
 当固定版本的 builder 源码已经包含未修改的上游附属文件（如配置、entrypoint 或模板）时，
 应通过 `COPY --from` 直接复用，不要向目标仓再次添加逐字节相同的副本。只有确有必要的本地定制，
-或 builder 源码无法提供该文件时，才应新增本地附属文件；同时记录其来源及相对于上游
-的必要差异。该要求是资产复用策略，不要求使用固定的 stage alias 写法。
+或 builder 源码无法提供该文件时，才新增本地附属文件，同时记录它的来源和相对上游的
+必要差异。这是一条资产复用策略，并不规定必须用某种 stage alias 写法。
 
 ### 步骤 4：编写 Dockerfile
 
@@ -145,7 +142,7 @@ Creator 负责在 `evidence` 中直接提供证据，而不是提交取证请求
 
 ### 步骤 6：编写 README.md（纯英文，禁止中文）
 
-结构：Quick reference → {PackageName} | openEuler → Supported tags → Usage (pull/run/logs/exec) → Question and answering。指向 openEuler 自有仓库的链接使用 `gitcode.com`；只禁止 `gitee.com/openeuler/*` 与 `gitee.com/src-openeuler/*`，third-party Gitee 上游保持真实地址。代码块用 TAB 缩进。
+结构：Quick reference → {PackageName} | openEuler → Supported tags → Usage (pull/run/logs/exec) → Question and answering。指向 openEuler 自有仓库的链接使用 `gitcode.com`；只禁止 `gitee.com/openeuler/*` 与 `gitee.com/src-openeuler/*`，第三方 Gitee 上游保持真实地址。代码块用 TAB 缩进。
 
 ### 步骤 7（可选）：编写 doc/image-info.yml（中文）
 
@@ -213,7 +210,7 @@ Pillow 占位图伪装官方 logo，也禁止使用 AI 生成 logo。
 3. 如果生成 image-info.yml，其 Tag 与 README 一致
 4. image-list.yml 格式正确且保留全部既有条目
 5. 如果生成 logo.png，其内容非空且来源为官方或可信上游资源
-6. 指向 openEuler 自有仓库的链接一律为 `gitcode.com`，不出现 `gitee.com/openeuler/*` 或 `gitee.com/src-openeuler/*`；third-party Gitee 等上游链接保持真实地址
+6. 指向 openEuler 自有仓库的链接一律为 `gitcode.com`，不出现 `gitee.com/openeuler/*` 或 `gitee.com/src-openeuler/*`；第三方 Gitee 等上游链接保持真实地址
 7. 如果生成 image-info.yml，其 category 全小写
 8. usage/download 中镜像标签用 `{Tag}` 占位
 9. README 纯英文
@@ -226,4 +223,4 @@ Pillow 占位图伪装官方 logo，也禁止使用 AI 生成 logo。
 16. 不修改已有包的文件
 17. 不硬编码架构，两个原生架构使用同一 Dockerfile
 18. 精确锁定任务指定源码版本，不使用 latest 或可变分支
-19. 运行用户、端口、持久化、健康检查、LICENSE 和 NOTICE 符合 official upstream 的运行模型；只有任务输入明确提出额外要求时才把它作为应用约束
+19. 运行用户、端口、持久化、健康检查、LICENSE 和 NOTICE 符合上游官方的运行模型；只有任务输入明确提出额外要求时才把它作为应用约束

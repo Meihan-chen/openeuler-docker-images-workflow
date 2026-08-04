@@ -136,11 +136,15 @@ def _format_checker_commit(report: Mapping[str, object]) -> str:
 
 
 def _native_gate_ready(gate: Mapping[str, object]) -> bool:
-    """Require safe build input and executable tests before paying for Docker."""
+    """Build when the image is safe and at least one test can add evidence."""
+    some_test_allowed = gate.get("test_allowed") is True or any(
+        gate.get(name) is True
+        for name in ("goss_allowed", "shared_tests_allowed")
+    )
     return (
         gate.get("status") == "passed"
         and gate.get("build_allowed") is True
-        and gate.get("test_allowed") is True
+        and some_test_allowed
     )
 
 
@@ -262,14 +266,95 @@ def _classified(
     stray tarball became 496 "change outside task scope" errors whose obvious
     reading pointed at the candidate instead of at the tarball.
     """
-    return {
-        **review,
-        "classification": classify_failure(
+    classification = (
+        _classify_report_failures(report, allowed_roots=(task.domain,))
+        if report is not None and gate is None
+        else classify_failure(
             report=report,
             gate=gate,
             allowed_roots=(task.domain,),
-        ),
+        )
+    )
+    return {
+        **review,
+        "classification": classification,
     }
+
+
+def _classify_report_failures(
+    report: Mapping[str, object],
+    *,
+    allowed_roots: tuple[str, ...],
+) -> dict[str, object]:
+    """Classify every captured check failure, preserving the primary shape."""
+    primary = classify_failure(report=report, allowed_roots=allowed_roots)
+    failures = report.get("failures")
+    failures = failures if isinstance(failures, list) else []
+    classified = []
+    for failure in failures:
+        if not isinstance(failure, Mapping):
+            continue
+        isolated = {
+            **report,
+            "failed_stage": failure.get("stage", ""),
+            "failure": failure.get("failure", ""),
+            "failure_details": failure.get("failure_details", {}),
+        }
+        isolated.pop("failures", None)
+        result = classify_failure(
+            report=isolated,
+            allowed_roots=allowed_roots,
+        )
+        classified.append(
+            {
+                "stage": str(failure.get("stage", "")),
+                "check": str(failure.get("check", "")),
+                **result,
+            }
+        )
+    format_check = report.get("format_check")
+    if (
+        isinstance(format_check, Mapping)
+        and format_check.get("status") == "failed"
+        and not any(item["stage"] == "upstream_format" for item in classified)
+    ):
+        isolated = {
+            **report,
+            "failed_stage": "upstream_format",
+            "failure": (
+                format_check.get("failure")
+                or format_check.get("output")
+                or "upstream format check failed"
+            ),
+            "failure_details": {
+                key: format_check[key]
+                for key in ("kind", "stage", "commit_sha")
+                if key in format_check
+            },
+        }
+        isolated.pop("failures", None)
+        classified.append(
+            {
+                "stage": "upstream_format",
+                "check": "upstream_format",
+                **classify_failure(
+                    report=isolated,
+                    allowed_roots=allowed_roots,
+                ),
+            }
+        )
+    return {**primary, "failures": classified} if classified else primary
+
+
+def _all_failures_are_infra(classification: Mapping[str, object]) -> bool:
+    failures = classification.get("failures")
+    if isinstance(failures, list) and failures:
+        return all(
+            isinstance(failure, Mapping)
+            and failure.get("category") == "infra"
+            for failure in failures
+        )
+    return classification.get("category") == "infra"
 
 
 def decide_round(
@@ -358,8 +443,8 @@ def decide_round(
         )
 
     per_architecture = {
-        name: classify_failure(
-            report=reports[name],
+        name: _classify_report_failures(
+            reports[name],
             allowed_roots=(task.domain,),
         )
         for name in _ARCHITECTURES
@@ -369,7 +454,7 @@ def decide_round(
         raise NativeRepairError("zero-repair validation failed")
     if round_number > max_rounds:
         if all(
-            result["category"] == "infra"
+            _all_failures_are_infra(result)
             for result in per_architecture.values()
         ):
             raise NativeRepairError(
@@ -394,7 +479,8 @@ def decide_round(
     # for both. A Goss config fault on x86 next to a build failure on ARM must
     # not be handed over as "do not change the Dockerfile".
     if all(
-        result["category"] == "infra" for result in per_architecture.values()
+        _all_failures_are_infra(result)
+        for result in per_architecture.values()
     ):
         # The Fixer would be told to change nothing, so asking it buys nothing.
         # The round is still consumed, which keeps the retry bounded.

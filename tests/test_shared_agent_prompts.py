@@ -56,13 +56,13 @@ def test_image_prompts_define_generic_auxiliary_file_policy():
     image_creator = (AGENTS_DIR / "image-creator.md").read_text().lower()
     image_qa = (AGENTS_DIR / "image-qa.md").read_text().lower()
 
-    assert "minimum required structure" in image_creator
-    assert "doc/ is optional" in image_creator
-    assert "if any doc/ content is created" in image_creator
-    assert "at least one doc/picture asset" in image_creator
+    assert "最小必需结构" in image_creator
+    assert "`doc/` 是可选目录" in image_creator
+    assert "只要生成了任何 `doc/` 内容" in image_creator
+    assert "至少有一个图片资源" in image_creator
     assert "at least one doc/picture asset" in image_qa
-    assert "upstream-provided configuration" in image_creator
-    assert "persistent data directory" in image_creator
+    assert "上游提供的那份" in image_creator
+    assert "持久化数据目录" in image_creator
     assert "auxiliary files" in image_qa
     assert "configuration provenance" in image_qa
 
@@ -75,12 +75,19 @@ def test_image_prompts_keep_source_fetches_reproducible_and_bounded():
         (AGENTS_DIR / "image-qa.md").read_text().lower().split()
     )
 
-    for prompt in (image_creator, image_qa):
-        assert "taskspec source origin" in prompt
-        assert "immutable" in prompt
-        assert "bounded retry" in prompt
-        assert "published checksum" in prompt
-        assert "unverified mirror fallback" in prompt
+    assert "source_repo_url" in image_creator
+    assert "不可变" in image_creator
+    assert "有限次数" in image_creator
+    assert "checksum" in image_creator
+    assert "未经校验的镜像站" in image_creator
+    for phrase in (
+        "taskspec source origin",
+        "immutable",
+        "bounded retry",
+        "published checksum",
+        "unverified mirror fallback",
+    ):
+        assert phrase in image_qa
 
 
 def test_image_creator_bounds_optional_release_artifact_research():
@@ -95,7 +102,7 @@ def test_image_creator_bounds_optional_release_artifact_research():
         (AGENTS_DIR / "image-creator.md").read_text().lower().split()
     )
 
-    assert "最小代价手段" in image_creator
+    assert "最低成本手段" in image_creator
     assert "单次研究网络操作最多 180 秒" in image_creator
     assert "不得加大超时反复重试" in image_creator
     assert "完整下载和校验交给后续原生构建" in image_creator
@@ -149,8 +156,9 @@ def test_image_prompts_restrict_only_open_euler_owned_gitee_links():
     image_creator = (AGENTS_DIR / "image-creator.md").read_text().lower()
     image_qa = (AGENTS_DIR / "image-qa.md").read_text().lower()
 
+    assert "第三方" in image_creator
+    assert "third-party gitee" in image_qa
     for prompt in (image_creator, image_qa):
-        assert "third-party gitee" in prompt
         assert "gitee.com/openeuler" in prompt
         assert "gitee.com/src-openeuler" in prompt
     assert "`gitee.com` 是 openeuler 迁移前的旧域名，一律禁止" not in image_creator
@@ -160,9 +168,10 @@ def test_testcase_prompts_make_wait_and_helper_files_conditional():
     testcase_creator = (AGENTS_DIR / "testcase-creator.md").read_text().lower()
     testcase_qa = (AGENTS_DIR / "testcase-qa.md").read_text().lower()
 
-    for prompt in (testcase_creator, testcase_qa):
-        assert "goss_wait.yaml is optional" in prompt
-        assert "test_helpers.sh is optional" in prompt
+    assert "goss_wait.yaml 可选" in testcase_creator
+    assert "test_helpers.sh 可选" in testcase_creator
+    assert "goss_wait.yaml is optional" in testcase_qa
+    assert "test_helpers.sh is optional" in testcase_qa
 
 
 def test_testcase_prompts_define_service_and_cli_native_modes():
@@ -173,9 +182,10 @@ def test_testcase_prompts_define_service_and_cli_native_modes():
         (AGENTS_DIR / "testcase-qa.md").read_text().lower().split()
     )
 
-    for prompt in (testcase_creator, testcase_qa):
-        assert "absence declares cli/one-shot mode" in prompt
-        assert "bounded readiness" in prompt
+    assert "缺省该文件即声明为 cli／one-shot运行模式" in testcase_creator
+    assert "有上限的就绪等待" in testcase_creator
+    assert "absence declares cli/one-shot mode" in testcase_qa
+    assert "bounded readiness" in testcase_qa
     assert "read back after restart by the harness" not in testcase_qa
 
 
@@ -188,7 +198,7 @@ def test_shared_prompts_derive_application_behavior_instead_of_assuming_it():
         (image_creator, image_qa, testcase_creator, testcase_qa)
     )
 
-    assert "official upstream" in image_creator
+    assert "上游官方" in image_creator
     assert "if the application or task requires" in image_qa
     assert "dockerfile 与 official upstream" in " ".join(
         testcase_creator.split()
@@ -302,11 +312,16 @@ def test_fixer_prompt_documents_the_payload_the_harness_actually_sends():
         "repair_round",
         "architectures",
         "failed_stage",
+        "failures",
         "failure_details",
         "container_evidence",
         "stdout_head",
     ):
         assert field in fixer
+    assert "逐项分类" in fixer
+    assert "`failures` 是可选字段" in fixer
+    assert "取决于失败类型" in fixer
+    assert "按 `check` 逐项" in fixer
     for category in _GUIDANCE:
         assert category in fixer
 

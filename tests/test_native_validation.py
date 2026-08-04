@@ -12,12 +12,14 @@ class DockerRunner:
         fail_build=False,
         failure_text="source compilation failed",
         fail_dgoss=False,
+        fail_shared_tests=False,
         container_logs="",
         container_state="exited 1 kvrocks refused to start",
     ):
         self.fail_build = fail_build
         self.failure_text = failure_text
         self.fail_dgoss = fail_dgoss
+        self.fail_shared_tests = fail_shared_tests
         self.container_logs = container_logs
         self.container_state = container_state
         self.builders = set()
@@ -48,6 +50,10 @@ class DockerRunner:
         ):
             return subprocess.CompletedProcess(
                 command, 1, "", self.failure_text
+            )
+        if self.fail_shared_tests and command[:2] == ["docker", "exec"]:
+            return subprocess.CompletedProcess(
+                command, 1, "", "shared test assertion failed"
             )
         if command[:3] == ["docker", "buildx", "inspect"]:
             present = command[3] in self.builders
@@ -390,7 +396,7 @@ def test_native_cli_runs_shared_tests_without_a_detached_service(tmp_path):
     assert cli_run[-2:] == ["-c", "exec /opt/oe-tests/test.sh"]
 
 
-def test_native_builds_but_skips_runtime_tests_for_invalid_test_contract(
+def test_invalid_goss_contract_skips_only_dgoss(
     tmp_path,
 ):
     from scripts.lib.native_validation import (
@@ -424,15 +430,16 @@ def test_native_builds_but_skips_runtime_tests_for_invalid_test_contract(
     assert report["failed_stage"] == "test_contract"
     assert report["checks"] == {
         "native_build": True,
-        "dgoss": None,
-        "shared_tests": None,
+        "dgoss": False,
+        "shared_tests": True,
     }
+    assert report["failures"][0]["check"] == "dgoss"
     commands = "\n".join(
         " ".join(call["command"]) for call in runner.calls
     )
     assert "docker buildx build" in commands
     assert str(dgoss) not in commands
-    assert "docker exec" not in commands
+    assert "docker exec" in commands
 
 
 def test_native_validation_failure_still_cleans_exact_resources(tmp_path):
@@ -524,10 +531,9 @@ def test_native_validation_failure_keeps_both_ends_of_a_long_log(tmp_path):
     assert "docker buildx build" in " ".join(details["command"])
 
 
-def test_native_validation_failure_records_the_stage_that_actually_failed(
+def test_dgoss_failure_does_not_skip_shared_tests(
     tmp_path,
 ):
-    """Every check sharing one boolean sent the Fixer after the wrong stage."""
     from scripts.lib.native_validation import (
         NativeValidationError,
         validate_native_image,
@@ -557,8 +563,94 @@ def test_native_validation_failure_records_the_stage_that_actually_failed(
     assert report["checks"] == {
         "native_build": True,
         "dgoss": False,
-        "shared_tests": None,
+        "shared_tests": True,
     }
+    assert [failure["stage"] for failure in report["failures"]] == ["dgoss"]
+    assert any(
+        call["command"][:2] == ["docker", "exec"] for call in runner.calls
+    )
+
+
+def test_native_validation_aggregates_dgoss_and_shared_test_failures(tmp_path):
+    from scripts.lib.native_validation import (
+        NativeValidationError,
+        validate_native_image,
+    )
+
+    workspace = _workspace(tmp_path)
+    dgoss, goss = _tools(tmp_path)
+    report_path = tmp_path / "reports" / "x86_64.json"
+    runner = DockerRunner(
+        fail_dgoss=True,
+        fail_shared_tests=True,
+        failure_text="goss assertion failed",
+    )
+
+    with pytest.raises(NativeValidationError, match="goss assertion failed"):
+        validate_native_image(
+            workspace=workspace,
+            task=_task(),
+            architecture="x86_64",
+            run_id="123456",
+            dgoss=dgoss,
+            goss=goss,
+            report_path=report_path,
+            junit_path=tmp_path / "reports" / "x86_64.junit.xml",
+            runner=runner,
+            sleep=lambda _: None,
+        )
+
+    report = json.loads(report_path.read_text())
+    assert report["checks"] == {
+        "native_build": True,
+        "dgoss": False,
+        "shared_tests": False,
+    }
+    assert [failure["stage"] for failure in report["failures"]] == [
+        "dgoss",
+        "shared_tests",
+    ]
+    assert "goss assertion failed" in report["failures"][0]["failure"]
+    assert "shared test assertion failed" in report["failures"][1]["failure"]
+
+
+def test_invalid_shared_test_contract_does_not_skip_goss(tmp_path):
+    from scripts.lib.native_validation import (
+        NativeValidationError,
+        validate_native_image,
+    )
+
+    workspace = _workspace(tmp_path)
+    (workspace / "Database" / "kvrocks" / "tests" / "test.sh").write_text(
+        "#!/bin/bash\nif true; then\n"
+    )
+    dgoss, goss = _tools(tmp_path)
+    report_path = tmp_path / "reports" / "x86_64.json"
+    runner = DockerRunner()
+
+    with pytest.raises(NativeValidationError, match="test.sh is not valid Bash"):
+        validate_native_image(
+            workspace=workspace,
+            task=_task(),
+            architecture="x86_64",
+            run_id="123456",
+            dgoss=dgoss,
+            goss=goss,
+            report_path=report_path,
+            junit_path=tmp_path / "reports" / "x86_64.junit.xml",
+            runner=runner,
+            sleep=lambda _: None,
+        )
+
+    report = json.loads(report_path.read_text())
+    assert report["checks"] == {
+        "native_build": True,
+        "dgoss": True,
+        "shared_tests": False,
+    }
+    assert report["failures"][0]["check"] == "shared_tests"
+    assert report["failures"][0]["stage"] == "test_contract"
+    assert any(call["command"][0] == str(dgoss) for call in runner.calls)
 
 
 def test_format_failure_is_recorded_but_native_validation_still_runs(tmp_path):

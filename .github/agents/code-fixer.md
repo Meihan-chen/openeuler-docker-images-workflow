@@ -31,10 +31,13 @@ Harness 在 `## Review report to resolve` 下附一个 JSON 对象，字段如�
 - `gate` — 确定性目标门禁报告，含 `errors` 列表
 - `native_failure` — 门禁失败前的原生失败报告（如果有）
 
-每份原生报告包含 `failed_stage`、`checks`（`null` 表示该项从未执行）、
-以及独立的 `format_check`（上游格式检查的版本、类别和原始输出），
-`failure`、`failure_details`（`command`、`returncode`、`stdout_head`、
-`stdout_tail`）和 `container_evidence`（容器 `state` 与 `logs`）。
+每份原生报告包含 `checks`（`null` 表示该项从未执行）。捕获到 Native 检查失败时，
+`failures` 是可选字段，按顺序保存每项失败的 `stage`、`check`、`failure` 与
+`failure_details`；后者的结构取决于失败类型：命令失败包含 `command`、`returncode`、
+`stdout_head`、`stdout_tail`，测试契约失败包含 `findings`。`failed_stage`、`failure`
+和 `failure_details` 保留为第一项失败的兼容视图。报告还可能包含独立的
+`format_check`（上游格式检查的版本、类别和原始输出）及 `container_evidence`
+（容器 `state` 与 `logs`）。
 可修改文件清单在 `## Fixer whitelist` 一节，不在本 JSON 内。
 
 ## 诊断流程（内置 Analyst 能力）
@@ -48,8 +51,10 @@ Harness 在 `## Review report to resolve` 下附一个 JSON 对象，字段如�
 ### 1. 读取 Harness 分类
 
 `classification` 由 Harness 从自身产出的证据确定性得出，比对日志文本的推断更
-可靠，**冲突时以它为准**。`kind` 为 `native_validation_failure` 时它按架构分列，
-两个架构可能属于不同类别，必须各自处理，不得用其中一个的处置覆盖另一个。
+可靠，**冲突时以它为准**。`kind` 为 `native_validation_failure` 时它按架构分列；
+同一架构捕获多个失败时，内层 `failures` 再按 `check` 逐项分类，`stage` 表示失败
+发生阶段。必须分别处理每个架构、每项失败，不得用第一项的处置覆盖其他项；架构
+顶层的类别只是第一项失败的兼容视图。
 
 | category | 含义与处置 |
 |------|------|
