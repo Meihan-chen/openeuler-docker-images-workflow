@@ -558,11 +558,11 @@ def test_needs_human_comment_summarizes_stages_fixer_and_blocker(tmp_path):
     (generation / "image-creator.json").write_text(
         json.dumps({"success": True, "summary": "Created the image files."})
     )
-    (generation / "image-qa-round1.json").write_text(
+    (generation / "testcase-qa-round1.json").write_text(
         json.dumps(
             {
                 "status": "needs_fix",
-                "summary": "Runtime user assertion was inconsistent.",
+                "summary": "Runtime command assertion was inconsistent.",
                 "issues": [
                     {
                         "severity": "major",
@@ -570,6 +570,14 @@ def test_needs_human_comment_summarizes_stages_fixer_and_blocker(tmp_path):
                         "description": "Expected UID differs from Dockerfile.",
                     }
                 ],
+            }
+        )
+    )
+    (generation / "image-qa-round1.json").write_text(
+        json.dumps(
+            {
+                "status": "needs_fix",
+                "summary": "Legacy image review must be ignored.",
             }
         )
     )
@@ -632,7 +640,8 @@ def test_needs_human_comment_summarizes_stages_fixer_and_blocker(tmp_path):
     assert "## Stage summary" in summary
     assert "Image Creator" in summary
     assert "Created the image files" in summary
-    assert "Image QA round 1" in summary
+    assert "Image QA" not in summary
+    assert "Testcase QA round 1" in summary
     assert "Expected UID differs from Dockerfile" in summary
     assert "Native x86_64" in summary and "passed" in summary
     assert "Native aarch64" in summary and "native_build" in summary

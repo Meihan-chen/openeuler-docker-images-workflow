@@ -162,7 +162,7 @@ def test_default_agent_runner_logs_heartbeat_before_timeout(
     ):
         agent_runtime.run_agent(
             executable=executable,
-            role="image_qa",
+            role="testcase_qa",
             prompt="Review without exposing deepseek-secret.",
             workspace=workspace,
             api_key="deepseek-secret",
@@ -172,13 +172,13 @@ def test_default_agent_runner_logs_heartbeat_before_timeout(
 
     output = capsys.readouterr().out
     assert re.search(
-        r"\[flow\]\[agent:image_qa\] WAIT "
+        r"\[flow\]\[agent:testcase_qa\] WAIT "
         r"elapsed=\d+\.\d+s silence=\d+\.\d+s "
         r"last_action=none timeout=0.08s",
         output,
     )
     assert re.search(
-        r"\[flow\]\[agent:image_qa\] TIMEOUT elapsed=\d+\.\d+s",
+        r"\[flow\]\[agent:testcase_qa\] TIMEOUT elapsed=\d+\.\d+s",
         output,
     )
     assert "deepseek-secret" not in output
@@ -350,7 +350,7 @@ def test_agent_rejects_successful_process_without_required_json_contract(tmp_pat
     with pytest.raises(AgentRuntimeError, match="JSON contract"):
         run_agent(
             executable=executable,
-            role="image_qa",
+            role="testcase_qa",
             prompt="Review.",
             workspace=workspace,
             api_key="deepseek-secret",
@@ -393,7 +393,7 @@ def test_agent_ignores_contract_shaped_json_from_tool_output(tmp_path):
     with pytest.raises(AgentRuntimeError, match="JSON contract"):
         run_agent(
             executable=executable,
-            role="image_qa",
+            role="testcase_qa",
             prompt="Review.",
             workspace=workspace,
             api_key="deepseek-secret",
@@ -461,7 +461,7 @@ def test_fixer_contract_allows_role_specific_status_value(tmp_path):
     assert result.payload == payload
 
 
-def test_shared_legacy_adversarial_entrypoint_records_disagreement_and_continues(
+def test_shared_legacy_testcase_pair_records_disagreement_and_continues(
     tmp_path, monkeypatch
 ):
     from scripts.harness import run
@@ -470,24 +470,47 @@ def test_shared_legacy_adversarial_entrypoint_records_disagreement_and_continues
         {
             "success": True,
             "files_created": [],
-            "identity_decision": {
-                "mode": "dynamic",
-                "user": "example",
-                "group": "example",
-                "uid": None,
-                "gid": None,
-                "requirement_evidence_ids": [],
-            },
+            "command_evidence": [
+                {
+                    "command": "example --version",
+                    "semantics": "prints the installed version",
+                    "evidence_id": "command-version",
+                }
+            ],
             "evidence": [],
         }
     )
     responses = [
         creator,
-        '{"status": "needs_fix", "issues": ["broken"]}',
+        json.dumps(
+            {
+                "status": "needs_fix",
+                "issues": [
+                    {
+                        "file": "Cloud/example/tests/test.sh",
+                        "description": "broken",
+                        "evidence": "test.sh",
+                    }
+                ],
+            }
+        ),
         creator,
-        '{"status": "needs_fix", "issues": ["still broken"]}',
+        json.dumps(
+            {
+                "status": "needs_fix",
+                "issues": [
+                    {
+                        "file": "Cloud/example/tests/test.sh",
+                        "description": "still broken",
+                        "evidence": "test.sh",
+                    }
+                ],
+            }
+        ),
     ]
     monkeypatch.setattr(run, "_target_dir", lambda: tmp_path)
+    monkeypatch.setenv("DOMAIN", "Cloud")
+    monkeypatch.setenv("APP", "example")
     monkeypatch.setattr(
         run,
         "_run_opencode",
@@ -495,7 +518,7 @@ def test_shared_legacy_adversarial_entrypoint_records_disagreement_and_continues
     )
     monkeypatch.setattr(run, "_write_qa_record", lambda *args, **kwargs: None)
 
-    run._run_adversarial_pair("image")
+    run._run_adversarial_pair("testcase")
 
     assert responses == []
 
@@ -588,7 +611,7 @@ class SequenceRunner:
 
 
 def test_a_silent_timeout_is_retried_instead_of_failing_the_round(tmp_path):
-    """Run 30597380057: image QA produced messages=0 actions=0 for 180s.
+    """Run 30597380057: a QA produced messages=0 actions=0 for 180s.
 
     Nothing was attempted, so this is the provider hanging rather than the
     Agent overrunning its boundary, and failing the job made the run repay a
@@ -613,8 +636,8 @@ def test_a_silent_timeout_is_retried_instead_of_failing_the_round(tmp_path):
 
     result = run_agent(
         executable=executable,
-        role="image_qa",
-        prompt="Review the image.",
+        role="testcase_qa",
+        prompt="Review the testcases.",
         workspace=workspace,
         api_key="deepseek-secret",
         required_keys=("status", "issues", "summary"),
@@ -647,8 +670,8 @@ def test_a_timeout_after_real_activity_is_not_retried(tmp_path):
     with pytest.raises(AgentRuntimeError, match="timed out"):
         run_agent(
             executable=executable,
-            role="image_qa",
-            prompt="Review the image.",
+            role="testcase_qa",
+            prompt="Review the testcases.",
             workspace=workspace,
             api_key="deepseek-secret",
             required_keys=("status", "issues", "summary"),
@@ -880,8 +903,8 @@ def test_generation_runtime_keys_leave_creator_contract_for_the_gate(
     assert result.payload == payload
 
 
-def test_generation_runtime_keys_leave_qa_outcome_for_normalization(tmp_path):
-    from scripts.lib.agent_runtime import run_agent
+def test_image_qa_role_is_unsupported(tmp_path):
+    from scripts.lib.agent_runtime import AgentRuntimeError, run_agent
 
     executable = _executable(tmp_path)
     workspace = tmp_path / "target"
@@ -893,35 +916,37 @@ def test_generation_runtime_keys_leave_qa_outcome_for_normalization(tmp_path):
     event = {"type": "text", "part": {"text": json.dumps(payload)}}
     runner = RecordingRunner(_completed(stdout=json.dumps(event) + "\n"))
 
-    result = run_agent(
-        executable=executable,
-        role="image_qa",
-        prompt="Review the image.",
-        workspace=workspace,
-        api_key="deepseek-secret",
-        required_keys=("issues", "summary"),
-        runner=runner,
-    )
+    with pytest.raises(AgentRuntimeError, match="unsupported Agent role: image_qa"):
+        run_agent(
+            executable=executable,
+            role="image_qa",
+            prompt="Review the image.",
+            workspace=workspace,
+            api_key="deepseek-secret",
+            required_keys=("issues", "summary"),
+            runner=runner,
+        )
 
-    assert result.payload == payload
 
-
-def test_image_contract_rejects_fixed_identity_without_requirement_evidence(
+def test_image_contract_rejects_fixed_identity_without_semantic_review(
     tmp_path,
 ):
-    result = _run_image_creator(
-        tmp_path,
-        {
-            "mode": "fixed",
-            "user": "kvrocks",
-            "group": "kvrocks",
-            "uid": 991,
-            "gid": 991,
-            "requirement_evidence_ids": [],
-        },
-    )
+    from scripts.lib.agent_runtime import AgentRuntimeError
 
-    assert result.payload["identity_decision"]["mode"] == "fixed"
+    with pytest.raises(
+        AgentRuntimeError,
+        match="identity_decision mode must be dynamic or reuse_existing",
+    ):
+        _run_image_creator(
+            tmp_path,
+            {
+                "mode": "fixed",
+                "user": "kvrocks",
+                "group": "kvrocks",
+                "uid": 991,
+                "gid": 991,
+            },
+        )
 
 
 def test_image_contract_rejects_dynamic_identity_with_numeric_ids(tmp_path):
@@ -941,9 +966,11 @@ def test_image_contract_rejects_dynamic_identity_with_numeric_ids(tmp_path):
         )
 
 
-def test_image_contract_accepts_fixed_identity_referencing_evidence_request(
+def test_image_contract_rejects_fixed_identity_even_with_legacy_evidence(
     tmp_path,
 ):
+    from scripts.lib.agent_runtime import AgentRuntimeError
+
     decision = {
         "mode": "fixed",
         "user": "example",
@@ -959,37 +986,43 @@ def test_image_contract_accepts_fixed_identity_referencing_evidence_request(
         "excerpts": ["USER 10001"],
     }
 
-    result = _run_image_creator(tmp_path, decision, [request])
+    with pytest.raises(
+        AgentRuntimeError,
+        match="identity_decision mode must be dynamic or reuse_existing",
+    ):
+        _run_image_creator(tmp_path, decision, [request])
 
-    assert result.payload["evidence"] == [request]
 
+def test_image_contract_rejects_numeric_reused_identity(tmp_path):
+    from scripts.lib.agent_runtime import AgentRuntimeError
 
-def test_image_contract_leaves_unknown_evidence_id_for_qa(tmp_path):
-    result = _run_image_creator(
-        tmp_path,
-        {
-            "mode": "fixed",
-            "user": "example",
-            "group": "example",
-            "uid": 10001,
-            "gid": 10001,
-            "requirement_evidence_ids": ["identity-missing"],
-        },
-        [
+    with pytest.raises(AgentRuntimeError, match="reuse_existing identity.*null"):
+        _run_image_creator(
+            tmp_path,
             {
-                "id": "identity-other",
-                "claim": "another claim",
-                "source": (
-                    "https://github.com/acme/example/blob/v1.2.3/README.md"
-                ),
-                "excerpts": ["runtime user"],
-            }
-        ],
-    )
+                "mode": "reuse_existing",
+                "user": "example",
+                "group": "example",
+                "uid": 10001,
+                "gid": 10001,
+            },
+        )
 
-    assert result.payload["identity_decision"]["requirement_evidence_ids"] == [
-        "identity-missing"
-    ]
+
+def test_image_contract_rejects_variable_identity_names(tmp_path):
+    from scripts.lib.agent_runtime import AgentRuntimeError
+
+    with pytest.raises(AgentRuntimeError, match="literal Linux name"):
+        _run_image_creator(
+            tmp_path,
+            {
+                "mode": "reuse_existing",
+                "user": "${APP_UID}",
+                "group": "${APP_GID}",
+                "uid": None,
+                "gid": None,
+            },
+        )
 
 
 def test_testcase_contract_leaves_unknown_evidence_id_for_qa(tmp_path):
@@ -1009,7 +1042,7 @@ def test_testcase_contract_leaves_unknown_evidence_id_for_qa(tmp_path):
     assert result.payload["command_evidence"][0]["evidence_id"] == "command-missing"
 
 
-def test_creator_contract_leaves_too_many_evidence_entries_for_qa(tmp_path):
+def test_testcase_contract_leaves_too_many_evidence_entries_for_qa(tmp_path):
     evidence = [
         {
             "id": f"evidence-{index}",
@@ -1022,34 +1055,18 @@ def test_creator_contract_leaves_too_many_evidence_entries_for_qa(tmp_path):
         for index in range(13)
     ]
 
-    result = _run_image_creator(
+    result = _run_testcase_creator(
         tmp_path,
-        {
-            "mode": "dynamic",
-            "user": "example",
-            "group": "example",
-            "uid": None,
-            "gid": None,
-            "requirement_evidence_ids": [],
-        },
-        evidence,
+        _testcase_creator_payload(evidence=evidence),
     )
 
     assert len(result.payload["evidence"]) == 13
 
 
-def test_creator_contract_leaves_oversized_evidence_for_qa(tmp_path):
-    result = _run_image_creator(
+def test_testcase_contract_leaves_oversized_evidence_for_qa(tmp_path):
+    result = _run_testcase_creator(
         tmp_path,
-        {
-            "mode": "dynamic",
-            "user": "example",
-            "group": "example",
-            "uid": None,
-            "gid": None,
-            "requirement_evidence_ids": [],
-        },
-        [
+        _testcase_creator_payload(evidence=[
             {
                 "id": "too-large",
                 "claim": "x" * 4001,
@@ -1059,7 +1076,7 @@ def test_creator_contract_leaves_oversized_evidence_for_qa(tmp_path):
                 ),
                 "excerpts": ["claim"],
             }
-        ],
+        ]),
     )
 
     assert len(result.payload["evidence"][0]["claim"]) == 4001

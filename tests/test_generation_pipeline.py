@@ -32,16 +32,21 @@ class StubAgent:
         return AgentResult(role=role, payload=self.responses[role].pop(0))
 
 
-def _approved_image():
-    return {"status": "approved", "issues": [], "summary": "approved"}
-
-
 def _approved_tests():
     return {
         "status": "approved",
         "issues": [],
         "coverage_score": 0.95,
         "summary": "approved",
+    }
+
+
+def _test_issue(description="fix version check", severity="major"):
+    return {
+        "severity": severity,
+        "file": "Database/kvrocks/tests/test.sh",
+        "description": description,
+        "evidence": "Database/kvrocks/tests/test.sh contains the defective assertion",
     }
 
 
@@ -55,9 +60,7 @@ def _image_creator_output(**overrides):
             "group": "kvrocks",
             "uid": None,
             "gid": None,
-            "requirement_evidence_ids": [],
         },
-        "evidence": [],
     }
     payload.update(overrides)
     return payload
@@ -90,19 +93,14 @@ def _testcase_creator_output(**overrides):
     return payload
 
 
-def _fully_approved_agent(*, image_summary="approved"):
+def _fully_approved_agent(*, testcase_summary="approved"):
     return StubAgent(
         {
             "image_creator": [_image_creator_output()],
-            "image_qa": [
-                {
-                    "status": "approved",
-                    "issues": [],
-                    "summary": image_summary,
-                }
-            ],
             "testcase_creator": [_testcase_creator_output()],
-            "testcase_qa": [_approved_tests()],
+            "testcase_qa": [
+                {**_approved_tests(), "summary": testcase_summary}
+            ],
         }
     )
 
@@ -125,38 +123,22 @@ def _repairable_gate(*, owner, code, message):
     }
 
 
-def _agent_with_repair(pair):
+def _agent_with_testcase_repair():
     image_creator = _image_creator_output()
     testcase_creator = _testcase_creator_output()
-    image_qa = [_approved_image()]
-    testcase_qa = [_approved_tests()]
-    if pair == "image":
-        image_qa = [
-            {
-                "status": "needs_fix",
-                "issues": [{"severity": "major", "description": "fix health"}],
-                "summary": "one issue",
-            },
-            _approved_image(),
-        ]
-    else:
-        testcase_qa = [
-            {
-                "status": "needs_fix",
-                "issues": [
-                    {"severity": "major", "description": "fix version check"}
-                ],
-                "coverage_score": 0.70,
-                "summary": "one issue",
-            },
-            _approved_tests(),
-        ]
+    testcase_qa = [
+        {
+            "status": "needs_fix",
+            "issues": [_test_issue()],
+            "coverage_score": 0.70,
+            "summary": "one issue",
+        },
+        _approved_tests(),
+    ]
     return StubAgent(
         {
-            "image_creator": [image_creator] * (2 if pair == "image" else 1),
-            "image_qa": image_qa,
-            "testcase_creator": [testcase_creator]
-            * (2 if pair == "testcase" else 1),
+            "image_creator": [image_creator],
+            "testcase_creator": [testcase_creator] * 2,
             "testcase_qa": testcase_qa,
         }
     )
@@ -205,7 +187,7 @@ def _run_recorded_pipeline(
     return events, reports
 
 
-def test_generation_lints_image_before_paid_qa(tmp_path):
+def test_generation_lints_image_before_testcase_generation(tmp_path):
     events, reports = _run_recorded_pipeline(
         tmp_path,
         _fully_approved_agent(),
@@ -216,7 +198,6 @@ def test_generation_lints_image_before_paid_qa(tmp_path):
         "agent:image_creator",
         "gate:image",
         "lint:Dockerfile",
-        "agent:image_qa",
         "agent:testcase_creator",
         "gate:full",
         "agent:testcase_qa",
@@ -225,6 +206,26 @@ def test_generation_lints_image_before_paid_qa(tmp_path):
     assert json.loads((reports / "image-lint.json").read_text()) == {
         "status": "passed"
     }
+
+
+def test_generation_skips_image_qa_but_keeps_deterministic_image_checks(
+    tmp_path,
+):
+    events, _ = _run_recorded_pipeline(
+        tmp_path,
+        _fully_approved_agent(),
+        lint=True,
+    )
+
+    assert events == [
+        "agent:image_creator",
+        "gate:image",
+        "lint:Dockerfile",
+        "agent:testcase_creator",
+        "gate:full",
+        "agent:testcase_qa",
+        "gate:full",
+    ]
 
 
 def test_hadolint_runner_reports_findings_without_policy_allowlist(
@@ -299,7 +300,6 @@ def test_generation_records_hadolint_findings_without_creator_repair(
     agent = StubAgent(
         {
             "image_creator": [image_creator],
-            "image_qa": [_approved_image()],
             "testcase_creator": [_testcase_creator_output()],
             "testcase_qa": [_approved_tests()],
         }
@@ -327,7 +327,6 @@ def test_generation_records_hadolint_findings_without_creator_repair(
     assert result.status == "passed"
     assert [call["role"] for call in agent.calls] == [
         "image_creator",
-        "image_qa",
         "testcase_creator",
         "testcase_qa",
     ]
@@ -356,7 +355,6 @@ def test_generation_returns_failed_testcase_gate_to_creator_once(tmp_path):
     agent = StubAgent(
         {
             "image_creator": [_image_creator_output()],
-            "image_qa": [_approved_image()],
             "testcase_creator": [testcase_creator, testcase_creator],
             "testcase_qa": [_approved_tests()],
         }
@@ -404,12 +402,11 @@ def test_generation_returns_failed_testcase_gate_to_creator_once(tmp_path):
     assert result.status == "passed"
     assert [call["role"] for call in agent.calls] == [
         "image_creator",
-        "image_qa",
         "testcase_creator",
         "testcase_creator",
         "testcase_qa",
     ]
-    assert "required generated file is missing" in agent.calls[3]["prompt"]
+    assert "required generated file is missing" in agent.calls[2]["prompt"]
     assert json.loads((reports / "precheck-gates.json").read_text())[
         "delivery_allowed"
     ] is False
@@ -426,10 +423,9 @@ def test_generation_continues_when_image_delivery_finding_survives_repair(
     workspace = tmp_path / "target"
     reports = tmp_path / "evidence"
     workspace.mkdir()
-    image_creator = {
-        "success": True,
-        "files_created": ["Database/kvrocks/README.md"],
-    }
+    image_creator = _image_creator_output(
+        files_created=["Database/kvrocks/README.md"],
+    )
     agent = _fully_approved_agent()
     agent.responses["image_creator"].append(image_creator)
     unresolved = _repairable_gate(
@@ -462,7 +458,7 @@ def test_generation_continues_when_image_delivery_finding_survives_repair(
     assert [call["role"] for call in agent.calls][:3] == [
         "image_creator",
         "image_creator",
-        "image_qa",
+        "testcase_creator",
     ]
     assert json.loads(
         (reports / "image-precheck-repair-gates.json").read_text()
@@ -605,7 +601,7 @@ def test_testcase_creator_cannot_change_image_owned_files(
         / "Dockerfile"
     )
     agent = (
-        _agent_with_repair("testcase")
+        _agent_with_testcase_repair()
         if repair
         else _fully_approved_agent()
     )
@@ -615,11 +611,17 @@ def test_testcase_creator_cannot_change_image_owned_files(
         nonlocal testcase_calls
         if role == "image_creator":
             dockerfile.parent.mkdir(parents=True)
-            dockerfile.write_text("FROM scratch\n")
+            dockerfile.write_text(
+                "FROM scratch\n"
+                "RUN groupadd -r kvrocks && useradd -r -g kvrocks kvrocks\n"
+                "USER kvrocks\n"
+            )
         elif role == "testcase_creator":
             testcase_calls += 1
             if testcase_calls == (2 if repair else 1):
-                dockerfile.write_text("FROM scratch\nRUN echo changed\n")
+                dockerfile.write_text(
+                    dockerfile.read_text() + "RUN echo changed\n"
+                )
 
     from scripts.lib.generation_pipeline import GenerationPipelineError
     with pytest.raises(
@@ -644,40 +646,26 @@ def test_testcase_creator_cannot_change_image_owned_files(
     ]
 
 
-@pytest.mark.parametrize("pair", ["image", "testcase"])
 def test_generation_rechecks_creator_repair_before_second_qa(
     tmp_path,
-    pair,
 ):
     events, _ = _run_recorded_pipeline(
         tmp_path,
-        _agent_with_repair(pair),
+        _agent_with_testcase_repair(),
         lint=True,
     )
 
-    if pair == "image":
-        assert events[:8] == [
-            "agent:image_creator",
-            "gate:image",
-            "lint:Dockerfile",
-            "agent:image_qa",
-            "agent:image_creator",
-            "gate:image",
-            "lint:Dockerfile",
-            "agent:image_qa",
-        ]
-    else:
-        assert events[-7:-1] == [
-            "agent:testcase_creator",
-            "gate:full",
-            "agent:testcase_qa",
-            "agent:testcase_creator",
-            "gate:full",
-            "agent:testcase_qa",
-        ]
+    assert events[-7:-1] == [
+        "agent:testcase_creator",
+        "gate:full",
+        "agent:testcase_qa",
+        "agent:testcase_creator",
+        "gate:full",
+        "agent:testcase_qa",
+    ]
 
 
-def test_generation_runs_adversarial_pairs_and_records_evidence(
+def test_generation_runs_testcase_review_pair_and_records_evidence(
     tmp_path,
     capsys,
 ):
@@ -688,17 +676,20 @@ def test_generation_runs_adversarial_pairs_and_records_evidence(
     workspace.mkdir()
     agent = StubAgent(
         {
-            "image_creator": [_image_creator_output(), _image_creator_output()],
-            "image_qa": [
+            "image_creator": [_image_creator_output()],
+            "testcase_creator": [
+                _testcase_creator_output(),
+                _testcase_creator_output(),
+            ],
+            "testcase_qa": [
                 {
                     "status": "needs_fix",
-                    "issues": [{"severity": "major", "description": "fix health"}],
+                    "issues": [_test_issue("fix version")],
+                    "coverage_score": 0.7,
                     "summary": "one issue",
                 },
-                _approved_image(),
+                _approved_tests(),
             ],
-            "testcase_creator": [_testcase_creator_output()],
-            "testcase_qa": [_approved_tests()],
         }
     )
     gate_calls = []
@@ -722,54 +713,51 @@ def test_generation_runs_adversarial_pairs_and_records_evidence(
     assert result.qa_fix_rounds == 1
     assert [call["role"] for call in agent.calls] == [
         "image_creator",
-        "image_qa",
-        "image_creator",
-        "image_qa",
+        "testcase_creator",
+        "testcase_qa",
         "testcase_creator",
         "testcase_qa",
     ]
     assert [call["timeout"] for call in agent.calls] == [
         3600,
-        1200,
         3600,
         1200,
         3600,
         1200,
     ]
-    assert "Review report to resolve" in agent.calls[2]["prompt"]
-    assert "fix health" in agent.calls[2]["prompt"]
-    assert "Only fix the reported issues" in agent.calls[2]["prompt"]
+    assert "Review report to resolve" in agent.calls[3]["prompt"]
+    assert "fix version" in agent.calls[3]["prompt"]
+    assert "Only fix the reported issues" in agent.calls[3]["prompt"]
     assert (
         "Your final response MUST be exactly one JSON object"
-        in agent.calls[2]["prompt"]
+        in agent.calls[3]["prompt"]
     )
-    assert "Previous QA findings to verify" not in agent.calls[1]["prompt"]
-    assert "Previous QA findings to verify" in agent.calls[3]["prompt"]
-    assert "fix health" in agent.calls[3]["prompt"]
-    assert "independent QA session" in agent.calls[3]["prompt"]
-    assert "complete review" in agent.calls[3]["prompt"]
+    assert "Previous QA findings to verify" not in agent.calls[2]["prompt"]
+    assert "Previous QA findings to verify" in agent.calls[4]["prompt"]
+    assert "fix version" in agent.calls[4]["prompt"]
+    assert "independent QA session" in agent.calls[4]["prompt"]
+    assert "complete review" in agent.calls[4]["prompt"]
     assert [call["phase"] for call in gate_calls] == [
         "image",
-        "image",
+        "full",
         "full",
         "full",
     ]
     assert gate_calls[0]["workspace"] == workspace
     assert sorted(path.name for path in reports.iterdir()) == [
         "gates.json",
-        "image-creator-round2.json",
         "image-creator.json",
         "image-precheck-gates.json",
-        "image-qa-round1.json",
-        "image-qa-round2.json",
-        "image-repair-gates.json",
-        "image-round1-evidence-bundle.json",
-        "image-round2-evidence-bundle.json",
         "precheck-gates.json",
+        "testcase-creator-round2.json",
         "testcase-creator.json",
         "testcase-ownership.json",
         "testcase-qa-round1.json",
+        "testcase-qa-round2.json",
+        "testcase-repair-gates.json",
+        "testcase-repair-ownership.json",
         "testcase-round1-evidence-bundle.json",
+        "testcase-round2-evidence-bundle.json",
     ]
     gate_report = json.loads((reports / "gates.json").read_text())
     assert gate_report["status"] == "passed"
@@ -778,22 +766,21 @@ def test_generation_runs_adversarial_pairs_and_records_evidence(
     )
     output = capsys.readouterr().out
     assert (
-        '[flow][review] RESULT image_qa round=1 status=needs_fix '
+        '[flow][review] RESULT testcase_qa round=1 status=needs_fix '
         'issues=1 summary="one issue"'
     ) in output
     assert (
-        '[flow][review] RESULT image_qa round=2 status=approved '
+        '[flow][review] RESULT testcase_qa round=2 status=approved '
         'issues=0 summary="approved"'
     ) in output
     markers = [
         "[flow][generate] START image_creator",
         "[flow][generate] PASS image_creator",
-        "[flow][review] START image_qa round=1",
-        "[flow][repair] START image_creator round=2",
-        "[flow][review] PASS image_qa round=2",
         "[flow][generate] START testcase_creator",
         "[flow][gate] PASS generated_precheck",
-        "[flow][review] PASS testcase_qa round=1",
+        "[flow][review] START testcase_qa round=1",
+        "[flow][repair] START testcase_creator round=2",
+        "[flow][review] PASS testcase_qa round=2",
         "[flow][gate] PASS target_contract",
     ]
     positions = [output.index(marker) for marker in markers]
@@ -811,15 +798,20 @@ def test_generation_continues_when_second_qa_records_disagreement(
     workspace.mkdir()
     needs_fix = {
         "status": "needs_fix",
-        "issues": [{"severity": "blocker", "description": "still broken"}],
+        "issues": [_test_issue("still broken", severity="blocker")],
         "summary": "not approved",
     }
     agent = StubAgent(
         {
-            "image_creator": [_image_creator_output(), _image_creator_output()],
-            "image_qa": [needs_fix, needs_fix],
-            "testcase_creator": [_testcase_creator_output()],
-            "testcase_qa": [_approved_tests()],
+            "image_creator": [_image_creator_output()],
+            "testcase_creator": [
+                _testcase_creator_output(),
+                _testcase_creator_output(),
+            ],
+            "testcase_qa": [
+                {**needs_fix, "coverage_score": 0.5},
+                {**needs_fix, "coverage_score": 0.5},
+            ],
         }
     )
     gate_calls = []
@@ -842,7 +834,7 @@ def test_generation_continues_when_second_qa_records_disagreement(
     assert result.status == "passed"
     assert result.qa_disagreements == (
         {
-            "role": "image_qa",
+            "role": "testcase_qa",
             "round": 2,
             "issues": needs_fix["issues"],
             "summary": "not approved",
@@ -854,15 +846,15 @@ def test_generation_continues_when_second_qa_records_disagreement(
     }
     assert [call["phase"] for call in gate_calls] == [
         "image",
-        "image",
+        "full",
         "full",
         "full",
     ]
-    assert json.loads((reports / "image-qa-round2.json").read_text())[
+    assert json.loads((reports / "testcase-qa-round2.json").read_text())[
         "status"
     ] == "needs_fix"
     assert (
-        "[flow][review] DISAGREEMENT image_qa round=2; "
+        "[flow][review] DISAGREEMENT testcase_qa round=2; "
         "continue=local_validation"
     ) in capsys.readouterr().out
 
@@ -876,19 +868,18 @@ def test_invalid_first_qa_status_without_issues_continues_without_repair(
     workspace = tmp_path / "target"
     reports = tmp_path / "evidence"
     workspace.mkdir()
-    creator = _image_creator_output()
     agent = StubAgent(
         {
-            "image_creator": [creator],
-            "image_qa": [
+            "image_creator": [_image_creator_output()],
+            "testcase_creator": [_testcase_creator_output()],
+            "testcase_qa": [
                 {
                     "status": "looks_good",
                     "issues": [],
+                    "coverage_score": 0.95,
                     "summary": "No candidate issue was described.",
                 }
             ],
-            "testcase_creator": [_testcase_creator_output()],
-            "testcase_qa": [_approved_tests()],
         }
     )
 
@@ -906,11 +897,10 @@ def test_invalid_first_qa_status_without_issues_continues_without_repair(
     assert result.status == "passed"
     assert [call["role"] for call in agent.calls] == [
         "image_creator",
-        "image_qa",
         "testcase_creator",
         "testcase_qa",
     ]
-    report = json.loads((reports / "image-qa-round1.json").read_text())
+    report = json.loads((reports / "testcase-qa-round1.json").read_text())
     assert report["status"] == "approved"
     warning = report["harness"]["protocol_warnings"][0]
     assert warning["reported"] == "looks_good"
@@ -918,7 +908,7 @@ def test_invalid_first_qa_status_without_issues_continues_without_repair(
     assert report["issues"] == []
     assert result.qa_fix_rounds == 0
     assert (
-        "[flow][review] WARNING image_qa round=1 field=status "
+        "[flow][review] WARNING testcase_qa round=1 field=status "
         'reported="looks_good" effective=approved'
     ) in capsys.readouterr().out
 
@@ -979,25 +969,22 @@ def test_invalid_first_qa_status_with_real_issues_uses_creator_repair(
     workspace = tmp_path / "target"
     reports = tmp_path / "evidence"
     workspace.mkdir()
-    creator = _image_creator_output()
     agent = StubAgent(
         {
-            "image_creator": [creator, creator],
-            "image_qa": [
+            "image_creator": [_image_creator_output()],
+            "testcase_creator": [
+                _testcase_creator_output(),
+                _testcase_creator_output(),
+            ],
+            "testcase_qa": [
                 {
                     "status": "looks_good",
-                    "issues": [
-                        {
-                            "severity": "major",
-                            "description": "The service binds only to localhost.",
-                        }
-                    ],
+                    "issues": [_test_issue("The version assertion is too weak.")],
+                    "coverage_score": 0.6,
                     "summary": "The generated service is unreachable.",
                 },
-                _approved_image(),
+                _approved_tests(),
             ],
-            "testcase_creator": [_testcase_creator_output()],
-            "testcase_qa": [_approved_tests()],
         }
     )
 
@@ -1015,39 +1002,55 @@ def test_invalid_first_qa_status_with_real_issues_uses_creator_repair(
     assert result.qa_fix_rounds == 1
     assert [call["role"] for call in agent.calls] == [
         "image_creator",
-        "image_qa",
-        "image_creator",
-        "image_qa",
+        "testcase_creator",
+        "testcase_qa",
         "testcase_creator",
         "testcase_qa",
     ]
-    assert "The service binds only to localhost." in agent.calls[2]["prompt"]
-    assert "qa_protocol" not in agent.calls[2]["prompt"]
+    assert "The version assertion is too weak." in agent.calls[3]["prompt"]
+    assert "qa_protocol" not in agent.calls[3]["prompt"]
 
 
-def test_approved_qa_status_with_real_issues_uses_creator_repair(tmp_path):
+@pytest.mark.parametrize(
+    "issue_file",
+    [
+        "Database/kvrocks/2.16.0/24.03-lts-sp4/Dockerfile",
+        "/tmp/tests/test.sh",
+        "Other/app/tests/test.sh",
+    ],
+)
+def test_out_of_scope_qa_issue_cannot_trigger_testcase_creator_repair(
+    tmp_path,
+    issue_file,
+):
     agent = _fully_approved_agent()
-    agent.responses["image_creator"].append(_image_creator_output())
-    agent.responses["image_qa"] = [
+    agent.responses["testcase_creator"].append(_testcase_creator_output())
+    agent.responses["testcase_qa"] = [
         {
             "status": "approved",
             "issues": [
                 {
                     "severity": "major",
+                    "file": issue_file,
                     "description": "The service binds only to localhost.",
+                    "evidence": "Dockerfile binds the service to localhost",
                 }
             ],
+            "coverage_score": 0.6,
             "summary": "The generated service is unreachable.",
         },
-        _approved_image(),
     ]
 
     _, reports = _run_recorded_pipeline(tmp_path, agent)
 
-    assert [call["role"] for call in agent.calls].count("image_creator") == 2
-    report = json.loads((reports / "image-qa-round1.json").read_text())
-    assert report["status"] == "needs_fix"
-    assert report["harness"]["reported_status"] == "approved"
+    assert [call["role"] for call in agent.calls].count("testcase_creator") == 1
+    report = json.loads((reports / "testcase-qa-round1.json").read_text())
+    assert report["status"] == "approved"
+    assert report["issues"] == []
+    assert any(
+        warning["field"] == "issues"
+        for warning in report["harness"]["protocol_warnings"]
+    )
 
 
 def test_malformed_qa_issues_do_not_trigger_creator_repair():
@@ -1089,7 +1092,6 @@ def test_invalid_coverage_score_becomes_warning_without_agent_repair(
 
     assert [call["role"] for call in agent.calls] == [
         "image_creator",
-        "image_qa",
         "testcase_creator",
         "testcase_qa",
     ]
@@ -1124,7 +1126,7 @@ def test_missing_coverage_score_becomes_unavailable_warning(tmp_path):
     assert warning["reported"] is None
 
 
-def test_image_qa_receives_latest_identity_decision_after_precheck_repair(
+def test_image_precheck_repair_flows_directly_to_testcase_generation(
     tmp_path,
 ):
     from scripts.lib.generation_pipeline import run_generation_pipeline
@@ -1141,7 +1143,6 @@ def test_image_qa_receives_latest_identity_decision_after_precheck_repair(
             "group": "kvrocks",
             "uid": None,
             "gid": None,
-            "requirement_evidence_ids": [],
         },
     }
     repaired = {
@@ -1149,18 +1150,16 @@ def test_image_qa_receives_latest_identity_decision_after_precheck_repair(
         "files_created": ["Database/kvrocks/meta.yml"],
         "summary": "deterministic repair applied",
         "identity_decision": {
-            "mode": "fixed",
-            "user": "kvrocks",
-            "group": "kvrocks",
-            "uid": 991,
-            "gid": 991,
-            "requirement_evidence_ids": ["upstream-identity-001"],
+            "mode": "reuse_existing",
+            "user": "root",
+            "group": "root",
+            "uid": None,
+            "gid": None,
         },
     }
     agent = StubAgent(
         {
             "image_creator": [initial, repaired],
-            "image_qa": [_approved_image()],
             "testcase_creator": [_testcase_creator_output()],
             "testcase_qa": [_approved_tests()],
         }
@@ -1192,14 +1191,12 @@ def test_image_qa_receives_latest_identity_decision_after_precheck_repair(
         target_validator=validator,
     )
 
-    image_qa_prompt = next(
-        call["prompt"] for call in agent.calls if call["role"] == "image_qa"
-    )
-    assert "Image Creator identity decision" in image_qa_prompt
-    assert '"uid": 991' in image_qa_prompt
-    assert "upstream-identity-001" in image_qa_prompt
-    assert '"files_created"' in image_qa_prompt
-    assert "deterministic repair applied" in image_qa_prompt
+    assert [call["role"] for call in agent.calls] == [
+        "image_creator",
+        "image_creator",
+        "testcase_creator",
+        "testcase_qa",
+    ]
 
 
 def test_image_creator_contract_error_joins_the_existing_precheck_repair(
@@ -1218,7 +1215,6 @@ def test_image_creator_contract_error_joins_the_existing_precheck_repair(
             "group": None,
             "uid": None,
             "gid": None,
-            "requirement_evidence_ids": [],
         },
     }
     repaired = {
@@ -1229,13 +1225,11 @@ def test_image_creator_contract_error_joins_the_existing_precheck_repair(
             "group": "root",
             "uid": None,
             "gid": None,
-            "requirement_evidence_ids": [],
         },
     }
     agent = StubAgent(
         {
             "image_creator": [initial, repaired],
-            "image_qa": [_approved_image()],
             "testcase_creator": [_testcase_creator_output()],
             "testcase_qa": [_approved_tests()],
         }
@@ -1260,11 +1254,12 @@ def test_image_creator_contract_error_joins_the_existing_precheck_repair(
     assert report["findings"][0]["owner"] == "image_creator"
     assert report["findings"][0]["code"] == "agent.identity_decision"
     assert "user must be non-empty" in report["findings"][0]["message"]
-    image_qa_prompt = next(
-        call["prompt"] for call in agent.calls if call["role"] == "image_qa"
-    )
-    assert '"mode": "reuse_existing"' in image_qa_prompt
-    assert '"user": "root"' in image_qa_prompt
+    assert [call["role"] for call in agent.calls] == [
+        "image_creator",
+        "image_creator",
+        "testcase_creator",
+        "testcase_qa",
+    ]
 
 
 def test_missing_image_creator_contract_joins_existing_precheck_repair(tmp_path):
@@ -1284,13 +1279,11 @@ def test_missing_image_creator_contract_joins_existing_precheck_repair(tmp_path)
             "group": "root",
             "uid": None,
             "gid": None,
-            "requirement_evidence_ids": [],
         },
     }
     agent = StubAgent(
         {
             "image_creator": [initial, repaired],
-            "image_qa": [_approved_image()],
             "testcase_creator": [_testcase_creator_output()],
             "testcase_qa": [_approved_tests()],
         }
@@ -1364,7 +1357,6 @@ def test_testcase_qa_receives_latest_evidence_after_precheck_repair(tmp_path):
     agent = StubAgent(
         {
             "image_creator": [_image_creator_output()],
-            "image_qa": [_approved_image()],
             "testcase_creator": [initial, repaired],
             "testcase_qa": [_approved_tests()],
         }
@@ -1412,7 +1404,7 @@ def test_generation_redacts_secret_from_one_line_qa_summary(tmp_path, capsys):
     reports = tmp_path / "evidence"
     workspace.mkdir()
     agent = _fully_approved_agent(
-        image_summary="approved\nwithout deepseek-secret",
+        testcase_summary="approved\nwithout deepseek-secret",
     )
 
     run_generation_pipeline(
@@ -1511,7 +1503,6 @@ def test_generation_full_hard_stop_fails_before_testcase_qa(tmp_path):
 
     assert [call["role"] for call in agent.calls] == [
         "image_creator",
-        "image_qa",
         "testcase_creator",
     ]
     assert json.loads((reports / "precheck-gates.json").read_text()) == {
@@ -1606,7 +1597,121 @@ def test_generation_records_unsuccessful_creator_payload_before_raising(
     }
 
 
-def test_qa_prompts_embed_candidate_snapshot_without_tool_reads(tmp_path):
+def test_generation_fails_closed_on_unsuccessful_initial_testcase_creator(
+    tmp_path,
+):
+    from scripts.lib.generation_pipeline import (
+        GenerationPipelineError,
+        run_generation_pipeline,
+    )
+
+    workspace = tmp_path / "target"
+    workspace.mkdir()
+    agent = StubAgent(
+        {
+            "image_creator": [_image_creator_output()],
+            "testcase_creator": [
+                _testcase_creator_output(success=False),
+            ],
+        }
+    )
+
+    with pytest.raises(
+        GenerationPipelineError,
+        match="testcase_creator did not complete successfully",
+    ):
+        run_generation_pipeline(
+            workspace=workspace,
+            report_dir=tmp_path / "evidence",
+            task=_task(),
+            base_sha="1" * 40,
+            executable=tmp_path / "opencode",
+            api_key="deepseek-secret",
+            agent_runner=agent,
+            target_validator=lambda **_: {"status": "passed"},
+        )
+
+
+def test_generation_fails_closed_on_unsuccessful_testcase_qa_repair(tmp_path):
+    from scripts.lib.generation_pipeline import (
+        GenerationPipelineError,
+        run_generation_pipeline,
+    )
+
+    workspace = tmp_path / "target"
+    workspace.mkdir()
+    agent = StubAgent(
+        {
+            "image_creator": [_image_creator_output()],
+            "testcase_creator": [
+                _testcase_creator_output(),
+                _testcase_creator_output(success=False),
+            ],
+            "testcase_qa": [
+                {
+                    "status": "needs_fix",
+                    "issues": [_test_issue()],
+                    "coverage_score": 0.7,
+                    "summary": "repair tests",
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(
+        GenerationPipelineError,
+        match="testcase_creator repair failed",
+    ):
+        run_generation_pipeline(
+            workspace=workspace,
+            report_dir=tmp_path / "evidence",
+            task=_task(),
+            base_sha="1" * 40,
+            executable=tmp_path / "opencode",
+            api_key="deepseek-secret",
+            agent_runner=agent,
+            target_validator=lambda **_: {"status": "passed"},
+        )
+
+
+def test_generation_fails_closed_on_unsuccessful_deterministic_repair(tmp_path):
+    from scripts.lib.generation_pipeline import (
+        GenerationPipelineError,
+        run_generation_pipeline,
+    )
+
+    workspace = tmp_path / "target"
+    workspace.mkdir()
+    agent = StubAgent(
+        {
+            "image_creator": [
+                _image_creator_output(),
+                _image_creator_output(success=False),
+            ],
+        }
+    )
+
+    with pytest.raises(
+        GenerationPipelineError,
+        match="image_creator deterministic repair failed",
+    ):
+        run_generation_pipeline(
+            workspace=workspace,
+            report_dir=tmp_path / "evidence",
+            task=_task(),
+            base_sha="1" * 40,
+            executable=tmp_path / "opencode",
+            api_key="deepseek-secret",
+            agent_runner=agent,
+            target_validator=lambda **_: _repairable_gate(
+                owner="image_creator",
+                code="readme.section",
+                message="README.md is missing section: # Usage",
+            ),
+        )
+
+
+def test_testcase_qa_prompt_embeds_candidate_snapshot_without_tool_reads(tmp_path):
     from scripts.lib.generation_pipeline import run_generation_pipeline
 
     workspace = tmp_path / "target"
@@ -1621,7 +1726,11 @@ def test_qa_prompts_embed_candidate_snapshot_without_tool_reads(tmp_path):
     tests = workspace / "Database" / "kvrocks" / "tests"
     image.mkdir(parents=True)
     tests.mkdir(parents=True)
-    (image / "Dockerfile").write_text("FROM openEuler\n")
+    (image / "Dockerfile").write_text(
+        "FROM openEuler\n"
+        "RUN groupadd -r kvrocks && useradd -r -g kvrocks kvrocks\n"
+        "USER kvrocks\n"
+    )
     (tests / "test.sh").write_text("redis-cli -p 6666 PING\n")
     agent = _fully_approved_agent()
 
@@ -1636,15 +1745,11 @@ def test_qa_prompts_embed_candidate_snapshot_without_tool_reads(tmp_path):
         target_validator=lambda **_: {"status": "passed"},
     )
 
-    image_qa_prompt = agent.calls[1]["prompt"]
-    testcase_qa_prompt = agent.calls[3]["prompt"]
-    assert "Embedded candidate snapshot" in image_qa_prompt
-    assert "Do not call tools" in image_qa_prompt
-    assert "Database/kvrocks/2.16.0/24.03-lts-sp4/Dockerfile" in image_qa_prompt
-    assert "FROM openEuler" in image_qa_prompt
-    assert "Database/kvrocks/tests/test.sh" not in image_qa_prompt
-    assert "Required shared test files" not in image_qa_prompt
+    testcase_qa_prompt = agent.calls[2]["prompt"]
     assert "Embedded candidate snapshot" in testcase_qa_prompt
+    assert "Do not call tools" in testcase_qa_prompt
+    assert "Database/kvrocks/2.16.0/24.03-lts-sp4/Dockerfile" in testcase_qa_prompt
+    assert "FROM openEuler" in testcase_qa_prompt
     assert "Database/kvrocks/2.16.0/24.03-lts-sp4/test.sh" not in (
         testcase_qa_prompt
     )
@@ -1652,7 +1757,7 @@ def test_qa_prompts_embed_candidate_snapshot_without_tool_reads(tmp_path):
     assert "redis-cli -p 6666 PING" in testcase_qa_prompt
 
 
-def test_image_qa_snapshot_includes_auxiliary_image_files(tmp_path):
+def test_testcase_qa_does_not_inherit_removed_image_semantic_review(tmp_path):
     auxiliary_root = (
         tmp_path
         / "target"
@@ -1668,14 +1773,17 @@ def test_image_qa_snapshot_includes_auxiliary_image_files(tmp_path):
             return
         auxiliary_root.mkdir(parents=True)
         (auxiliary_root / "Dockerfile").write_text(
-            "FROM openEuler\nCOPY service.conf /etc/example/service.conf\n"
+            "FROM openEuler\n"
+            "RUN groupadd -r kvrocks && useradd -r -g kvrocks kvrocks\n"
+            "COPY service.conf /etc/example/service.conf\n"
+            "USER kvrocks\n"
         )
         (auxiliary_root / "service.conf").write_text("listen = 0.0.0.0\n")
         (auxiliary_root / "entrypoint.sh").write_text("#!/bin/sh\nexec example\n")
-        tests_root = auxiliary_root.parents[2] / "tests"
+        tests_root = auxiliary_root.parents[1] / "tests"
         tests_root.mkdir()
-        (tests_root / "test.sh").write_text("should not reach image QA\n")
-        results_root = auxiliary_root.parents[2] / "results"
+        (tests_root / "test.sh").write_text("test candidate image\n")
+        results_root = auxiliary_root.parents[1] / "results"
         results_root.mkdir()
         (results_root / "results.json").write_text('{"status": "passed"}\n')
 
@@ -1685,18 +1793,12 @@ def test_image_qa_snapshot_includes_auxiliary_image_files(tmp_path):
         mutation=write_candidate,
     )
 
-    image_qa_prompt = agent.calls[1]["prompt"]
-    assert (
-        "Database/kvrocks/2.16.0/24.03-lts-sp4/service.conf"
-        in image_qa_prompt
-    )
-    assert "listen = 0.0.0.0" in image_qa_prompt
-    assert (
-        "Database/kvrocks/2.16.0/24.03-lts-sp4/entrypoint.sh"
-        in image_qa_prompt
-    )
-    assert "Database/kvrocks/tests/test.sh" not in image_qa_prompt
-    assert "Database/kvrocks/results/results.json" not in image_qa_prompt
+    testcase_qa_prompt = agent.calls[2]["prompt"]
+    assert "Database/kvrocks/2.16.0/24.03-lts-sp4/service.conf" not in testcase_qa_prompt
+    assert "listen = 0.0.0.0" not in testcase_qa_prompt
+    assert "Database/kvrocks/2.16.0/24.03-lts-sp4/entrypoint.sh" not in testcase_qa_prompt
+    assert "Database/kvrocks/tests/test.sh" in testcase_qa_prompt
+    assert "Database/kvrocks/results/results.json" not in testcase_qa_prompt
 
 
 def test_testcase_role_owns_nested_shared_test_assets_and_qa_reads_them(tmp_path):
@@ -1741,7 +1843,12 @@ def test_qa_snapshot_compacts_large_files_and_continues_review(tmp_path):
         if role == "image_creator":
             dockerfile.parent.mkdir(parents=True)
             dockerfile.write_text(
-                "HEAD-MARKER\n" + "X" * 70_000 + "\nTAIL-MARKER\n"
+                "FROM openEuler\n"
+                "RUN groupadd -r kvrocks && useradd -r -g kvrocks kvrocks\n"
+                "RUN printf 'HEAD-MARKER\n"
+                + "X" * 70_000
+                + "\nTAIL-MARKER' >/snapshot-fixture\n"
+                "USER kvrocks\n"
             )
 
     events, reports = _run_recorded_pipeline(
@@ -1750,17 +1857,17 @@ def test_qa_snapshot_compacts_large_files_and_continues_review(tmp_path):
         mutation=write_oversized_candidate,
     )
 
-    assert "agent:image_qa" in events
-    image_qa_prompt = next(
-        call["prompt"] for call in agent.calls if call["role"] == "image_qa"
+    assert "agent:testcase_qa" in events
+    testcase_qa_prompt = next(
+        call["prompt"] for call in agent.calls if call["role"] == "testcase_qa"
     )
-    assert len(image_qa_prompt) <= 100_000
-    assert "compacted text file" in image_qa_prompt
-    assert "HEAD-MARKER" in image_qa_prompt
-    assert "TAIL-MARKER" in image_qa_prompt
-    assert "sha256" in image_qa_prompt
+    assert len(testcase_qa_prompt) <= 100_000
+    assert "compacted text file" in testcase_qa_prompt
+    assert "HEAD-MARKER" in testcase_qa_prompt
+    assert "TAIL-MARKER" in testcase_qa_prompt
+    assert "sha256" in testcase_qa_prompt
     assert not (reports / "generation-failure.json").exists()
-    qa_report = json.loads((reports / "image-qa-round1.json").read_text())
+    qa_report = json.loads((reports / "testcase-qa-round1.json").read_text())
     snapshot = qa_report["harness"]["snapshot"]
     assert snapshot["status"] == "compacted"
     assert snapshot["complete_text"] is False
@@ -1771,12 +1878,12 @@ def test_non_png_binary_is_hashed_without_decoding_into_qa_prompt(tmp_path):
     from scripts.lib.generation_pipeline import _qa_prompt
 
     workspace = tmp_path / "target"
-    app = workspace / "Database" / "kvrocks"
+    app = workspace / "Database" / "kvrocks" / "tests" / "fixtures"
     app.mkdir(parents=True)
     (app / "payload.tar").write_bytes(b"\0" * 70_000)
 
     prompt, snapshot = _qa_prompt(
-        role="image_qa",
+        role="testcase_qa",
         workspace=workspace,
         task=_task(),
         base_sha="1" * 40,
@@ -1785,7 +1892,9 @@ def test_non_png_binary_is_hashed_without_decoding_into_qa_prompt(tmp_path):
 
     assert "<binary file: 70000 bytes" in prompt
     assert len(prompt) <= 100_000
-    assert snapshot["hashed_binary_files"] == ["Database/kvrocks/payload.tar"]
+    assert snapshot["hashed_binary_files"] == [
+        "Database/kvrocks/tests/fixtures/payload.tar"
+    ]
 
 
 def test_generation_reports_must_be_outside_target_workspace(tmp_path):
@@ -1810,24 +1919,13 @@ def test_generation_reports_must_be_outside_target_workspace(tmp_path):
         )
 
 
-def test_unavailable_creator_evidence_reaches_qa_without_a_repair_round(tmp_path):
+def test_unavailable_testcase_evidence_reaches_qa_without_a_repair_round(tmp_path):
     from scripts.lib.generation_pipeline import run_generation_pipeline
 
     workspace = tmp_path / "target"
     workspace.mkdir()
     agent = _fully_approved_agent()
-    image_payload = agent.responses["image_creator"][0]
-    image_payload["evidence"] = [
-        {
-            "id": "identity-runtime-001",
-            "claim": "upstream runs as uid 999",
-            "source": (
-                "https://github.com/apache/kvrocks/blob/"
-                "v2.16.0/Dockerfile"
-            ),
-            "excerpts": ["USER 999"],
-        }
-    ]
+    testcase_payload = agent.responses["testcase_creator"][0]
     resolver_calls = []
 
     def unavailable_resolver(**kwargs):
@@ -1852,10 +1950,12 @@ def test_unavailable_creator_evidence_reaches_qa_without_a_repair_round(tmp_path
 
     assert result.status == "passed"
     assert len(resolver_calls) >= 1
-    assert resolver_calls[0]["evidence"] == image_payload["evidence"]
-    image_qa_call = next(call for call in agent.calls if call["role"] == "image_qa")
-    assert '"status": "unavailable"' in image_qa_call["prompt"]
-    assert [call["role"] for call in agent.calls].count("image_creator") == 1
+    assert resolver_calls[0]["evidence"] == testcase_payload["evidence"]
+    testcase_qa_call = next(
+        call for call in agent.calls if call["role"] == "testcase_qa"
+    )
+    assert '"status": "unavailable"' in testcase_qa_call["prompt"]
+    assert [call["role"] for call in agent.calls].count("testcase_creator") == 1
 
 
 def test_generation_accepts_a_task_it_has_never_seen(tmp_path):
@@ -2151,7 +2251,6 @@ def test_generation_hard_stops_on_stray_tarball_outside_task_scope(
     agent = StubAgent(
         {
             "image_creator": [created],
-            "image_qa": [_approved_image()],
             "testcase_creator": [_testcase_creator_output()],
             "testcase_qa": [_approved_tests()],
         }
@@ -2267,15 +2366,12 @@ def test_testcase_qa_prompt_carries_the_creator_command_evidence(tmp_path):
         evidence_resolver=lambda **_: fixed,
     )
 
-    image_qa_prompt = agent.calls[1]["prompt"]
-    testcase_qa_prompt = agent.calls[3]["prompt"]
+    testcase_qa_prompt = agent.calls[2]["prompt"]
     assert "Testcase Creator command evidence" in testcase_qa_prompt
     assert "refreshed by DBSIZE SCAN" in testcase_qa_prompt
     assert "Harness-fixed Creator evidence bundle" in testcase_qa_prompt
     assert "DBSize::Execute reads the cached key count" in testcase_qa_prompt
     assert "Record an actual candidate concern" not in testcase_qa_prompt
-    # Image QA reviews image-owned content and never sees the test evidence.
-    assert "Testcase Creator command evidence" not in image_qa_prompt
 
 
 def test_testcase_qa_receives_harness_fixed_evidence_bundle(tmp_path):
@@ -2371,7 +2467,6 @@ def test_testcase_creator_contract_error_joins_the_existing_precheck_repair(
     agent = StubAgent(
         {
             "image_creator": [_fully_approved_agent().responses["image_creator"][0]],
-            "image_qa": [_approved_image()],
             "testcase_creator": [initial, repaired],
             "testcase_qa": [_approved_tests()],
         }
@@ -2444,23 +2539,19 @@ def test_evidence_only_needs_fix_does_not_start_a_creator_repair(tmp_path):
     workspace = tmp_path / "target"
     workspace.mkdir()
     agent = _fully_approved_agent()
-    agent.responses["image_creator"].append(
-        dict(agent.responses["image_creator"][0])
-    )
-    agent.responses["image_qa"] = [
+    agent.responses["testcase_qa"] = [
         {
             "status": "needs_fix",
             "issues": [],
             "evidence_reviews": [
                 {
-                    "evidence_id": "identity-001",
+                    "evidence_id": "command-ping-001",
                     "status": "unavailable",
                     "reason": "source could not be fetched",
                 }
             ],
             "summary": "candidate is sound but evidence is unavailable",
         },
-        _approved_image(),
     ]
 
     result = run_generation_pipeline(
@@ -2477,8 +2568,8 @@ def test_evidence_only_needs_fix_does_not_start_a_creator_repair(tmp_path):
     roles = [call["role"] for call in agent.calls]
     assert result.status == "passed"
     assert result.qa_fix_rounds == 0
-    assert roles.count("image_creator") == 1
-    assert roles.count("image_qa") == 1
+    assert roles.count("testcase_creator") == 1
+    assert roles.count("testcase_qa") == 1
 
 
 def test_large_evidence_remains_reviewable_in_the_bounded_qa_prompt(tmp_path):
@@ -2696,7 +2787,6 @@ def test_creator_timeout_fails_without_starting_a_finalize_agent(tmp_path):
     agent = TimingOutAgent(
         {
             "image_creator": [_image_creator_output()],
-            "image_qa": [_approved_image()],
             "testcase_creator": [_testcase_creator_output()],
             "testcase_qa": [_approved_tests()],
         },
@@ -2722,22 +2812,21 @@ def test_qa_timeout_is_advisory_without_being_reported_as_approved(tmp_path):
     agent = TimingOutAgent(
         {
             "image_creator": [_image_creator_output()],
-            "image_qa": [_approved_image()],
             "testcase_creator": [_testcase_creator_output()],
             "testcase_qa": [_approved_tests()],
         },
-        timing_out_role="image_qa",
+        timing_out_role="testcase_qa",
     )
 
     result = _run_pipeline(tmp_path, agent, workspace=workspace, base_sha=base_sha)
 
     timeout_report = json.loads(
-        (tmp_path / "evidence" / "image-qa-timeout.json").read_text()
+        (tmp_path / "evidence" / "testcase-qa-timeout.json").read_text()
     )
     assert timeout_report["status"] == "timeout"
-    assert timeout_report["role"] == "image_qa"
+    assert timeout_report["role"] == "testcase_qa"
     review = json.loads(
-        (tmp_path / "evidence" / "image-qa-round1.json").read_text()
+        (tmp_path / "evidence" / "testcase-qa-round1.json").read_text()
     )
     assert review["status"] == "unavailable"
     assert review["harness_qa_timeout"] is True

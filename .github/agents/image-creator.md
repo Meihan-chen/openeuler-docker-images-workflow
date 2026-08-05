@@ -126,9 +126,9 @@ RUN pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple <pack
 创建专用用户时，运行身份与步骤 10 的 `identity_decision` 对应：
 
 - **默认动态分配**：用 `groupadd -r <name>` / `useradd -r -g <name> <name>` 让系统分配空闲 ID，对应 `mode: dynamic`。这避免数字冲突，但不自动解决名称冲突；runtime 包已创建同名身份时，确认其用户、组和目录权限符合应用契约后选 `reuse_existing`，不重复创建
-- **保持 root**：如果应用按照官方运行模型直接使用基础镜像已有的 root、不创建也不切换到其他用户，用 `reuse_existing` 表达该决定：`"user": "root"`、`"group": "root"`，`uid`/`gid` 保持 `null`；不得写成用户名为空的 `dynamic`
-- **🚫 禁止自行声明数字空闲**：只有上游或任务契约要求稳定的数字身份时才固定 UID/GID，并在 `evidence` 中提供上游原文。Creator 不得自行声明某个数字在最终 runtime 镜像中空闲；只有使用最终包集合的原生构建能验证冲突
-- **同步测试**：数字身份变更时，`{app}/tests/` 下的运行身份断言必须同步
+- **保持 root**：如果应用按照官方运行模型直接使用基础镜像已有的 root、不创建也不切换到其他用户，用 `reuse_existing` 表达该决定：`"user": "root"`、`"group": "root"`，`uid`/`gid` 保持 `null`，并在最终阶段显式声明 `USER root`；不得写成用户名为空的 `dynamic`
+- **🚫 禁止固定数字身份**：不得向 `useradd`、`groupadd` 或等价命令传入固定 UID/GID，也不得在 `USER`、`chown`、`install` 或 `COPY --chown` 中写数字或变量身份；系统只接受可由确定性门禁直接验证的动态分配或复用已有身份
+- **同步测试**：运行身份变更时，`{app}/tests/` 下的身份断言必须同步
 
 ### 步骤 5：编写 meta.yml
 
@@ -171,9 +171,7 @@ RUN pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple <pack
 
 ### 步骤 10：输出结构化结果
 
-- **`identity_decision`**：`mode` 只能是 `dynamic`、`fixed` 或 `reuse_existing`；动态分配和复用已有身份时 `uid`/`gid` 为 `null`。固定数字时必须填写正整数 UID/GID，并在 `requirement_evidence_ids` 中引用本次 `evidence` 的 ID；数字是否可用由后续原生构建判定
-- **`evidence`**：Creator 直接提供证据，而不是提交取证请求。每项包含 1 个 claim、1 个与 TaskSpec 同源且 ref 精确等于固定 revision 的 source，以及 1—2 段从原文件逐字复制的 `excerpts`；每次最多 6 项。claim、source、每段 excerpt 分别不超过 512、1024、512 个字符。一项 claim 可以用两段原文共同证明，不得拼接不连续文本
-- **证据不阻断**：Harness 只负责下载、哈希和逐字匹配，QA 判断原文是否支持 claim。证据缺失、格式错误、网络失败或原文不匹配不会阻断 QA，也不会单独触发修复轮次
+- **`identity_decision`**：`mode` 只能是 `dynamic` 或 `reuse_existing`，`uid`/`gid` 必须为 `null`。不得输出或实现固定数字 UID/GID
 - **输出方式**：默认只向 stdout 返回一个 JSON 对象；只有追加的任务契约明确允许时，才在指定位置写入 `ai-result.json`
 
 ```json
@@ -183,29 +181,16 @@ RUN pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple <pack
   "version": "...",
   "files_created": [],
   "identity_decision": {
-    "mode": "dynamic|fixed|reuse_existing",
+    "mode": "dynamic|reuse_existing",
     "user": "...",
     "group": "...",
     "uid": null,
-    "gid": null,
-    "requirement_evidence_ids": []
+    "gid": null
   },
-  "evidence": [
-    {
-      "id": "identity-requirement-001",
-      "claim": "上游要求固定数字 UID/GID",
-      "source": "固定到任务版本或提交 SHA 的上游文件 URL",
-      "excerpts": [
-        "创建固定 UID/GID 的上游原文",
-        "切换到该运行身份的上游原文"
-      ]
-    }
-  ],
   "assumptions": [
     {
       "claim": "未能在本轮确认的事实",
-      "reason": "为什么没有确认",
-      "verified_by": "native_build|qa|human"
+      "reason": "为什么没有确认"
     }
   ],
   "summary": "...",
@@ -214,7 +199,7 @@ RUN pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple <pack
 ```
 
 `assumptions` 是可选数组，用于声明本轮未能确认的事实。无法确认某个事实时，
-写进 `assumptions` 并按当前最佳判断继续产出候选，交由 QA 和原生构建验证；
+写进 `assumptions` 并按当前最佳判断继续产出候选，交由确定性门禁、原生构建和功能测试验证；
 不要为确认它而反复重试网络操作，也不要把未确认的推断写成已验证结论。
 
 ## 📋 自查清单（输出前必须逐条核对）

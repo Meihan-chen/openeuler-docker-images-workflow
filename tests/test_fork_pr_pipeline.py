@@ -54,7 +54,7 @@ def _candidate(tmp_path):
         '{"status":"passed","delivery_allowed":true}\n'
     )
     (root / "reports" / "hadolint.txt").write_text("")
-    for name in ("image-qa", "testcase-qa"):
+    for name in ("testcase-qa",):
         (agents / f"{name}-round1.json").write_text(
             '{"status":"approved"}\n'
         )

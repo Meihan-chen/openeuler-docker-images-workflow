@@ -14,6 +14,12 @@ You receive the Testcase Creator's complete output:
 - any allowed Creator self-assessment
 - The Dockerfile (read-only, for context)
 
+The Dockerfile is context only for deciding whether the candidate tests are
+correct. Actionable issues must identify a defect under `tests/` that the
+Testcase Creator can repair. An image-only defect must not be reported as a
+Testcase QA issue, request an image change, or trigger the testcase repair
+loop; deterministic and native image gates own those defects.
+
 ## Review Checklist
 
 `goss_wait.yaml is optional` and `test_helpers.sh is optional`. Their absence

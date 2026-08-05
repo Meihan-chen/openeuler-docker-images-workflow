@@ -132,9 +132,6 @@ def _agent_stage_lines(generation_dir: Path) -> list[str]:
     stage_files = (
         ("image-creator.json", "Image Creator"),
         ("image-creator-precheck-repair.json", "Image Creator precheck repair"),
-        ("image-qa-round1.json", "Image QA round 1"),
-        ("image-creator-round2.json", "Image Creator QA repair"),
-        ("image-qa-round2.json", "Image QA round 2"),
         ("testcase-creator.json", "Testcase Creator"),
         (
             "testcase-creator-precheck-repair.json",

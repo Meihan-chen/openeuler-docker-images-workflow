@@ -38,7 +38,7 @@
 
 - **确定性承载不确定**：主流程由代码承载（GitHub Actions Workflow + Python），不可预见的决策（Dockerfile 编写、故障诊断、测试生成）由 Agent 处理
 - **只能新增，不能修改**：已有镜像目录为只读，新版本只能追加新目录
-- **Agent 对抗协作**：Image Creator + Image QA、Testcase Creator + Testcase QA 构成两个 QA 对抗对，生成者在 QA 挑战下修正输出，通过后再进入本地验证
+- **分层协作**：Image Creator 不再经过 Image QA 复核，生成结果直接进入确定性镜像门禁；Testcase Creator + Testcase QA 保留 QA 对抗复核，之后统一进入本地验证
 - **本地验证**：提 PR 前在 Actions Runner 上完成双架构构建 + 测试，结果内嵌 PR 描述
 - **一次性执行模型**：每次事件（webhook / workflow_dispatch）触发后独立运行，执行完毕后退出（参考 easysoftware 的 `System.exit(0)` 模式）
 
@@ -65,7 +65,7 @@
 | 构建验证 | 无（由仓库 CI 单独处理） | **PR 生成前在 Runner 上完成** | 这是需求的硬要求：提 PR 前必须证明 Dockerfile 可构建且通过测试 |
 | 运行载体 | SpringBoot 独立部署 | **GitHub Actions** | 这是系统部署约束：必须通过 GitHub Actions 部署 |
 
-**互补关系：** 两个系统操作同一仓库但触发条件和覆盖范围不同。easysoftware 侧重持续性的版本跟踪和批量升级，本系统在此基础上增加了 Issue 驱动的新镜像创建、Agent 对抗协作质量保障、双架构构建验证。两者可以共享版本检测服务，互不冲突。
+**互补关系：** 两个系统操作同一仓库但触发条件和覆盖范围不同。easysoftware 侧重持续性的版本跟踪和批量升级，本系统在此基础上增加了 Issue 驱动的新镜像创建、分层 Agent 协作质量保障、双架构构建验证。两者可以共享版本检测服务，互不冲突。
 
 #### easysoftware 完整接口清单
 
@@ -200,49 +200,40 @@ RUN yum install -y <packages> && \
                                │
                     ┌──────────▼───────────────┐
                     │     确定性编排器           │
-                    │     (run.py)              │
+                    │     (flow.py)             │
                     └──────────┬───────────────┘
                                │
-          ┌────────────────────┼────────────────────┐
-          │  并行启动           │                    │
-          ▼                    ▼                    │
-   ┌─────────────┐     ┌─────────────┐              │
-   │ 对抗对一     │     │ 对抗对二     │              │
-   │             │     │             │              │
-   │ Creator → QA│     │ Creator → QA│              │
-   │ (生成↔挑战) │     │ (生成↔挑战) │              │
-   └──────┬──────┘     └──────┬──────┘              │
-          │  QA 认可后        │  QA 认可后          │
-          └────────┬──────────┘                     │
-                   │                                │
-                   ▼                                │
-        ┌──────────────────────┐                    │
-        │   本地验证（确定性代码） │                    │
-        │  构建 + 测试 + 差分    │                    │
-        └──────────┬───────────┘                    │
-                   │                                │
-         ┌─────────┴─────────┐                      │
-         ▼                   ▼                      │
-      通过                 失败                      │
-         │                   │                      │
-         ▼                   ▼                      │
-  ┌──────────┐       ┌──────────────┐               │
-  │  提交 PR  │       │    Fixer     │               │
-  │ (附两对    │       │  (分析+修复)  │               │
-  │  对抗记录) │       └──────┬───────┘               │
-  └──────────┘              │                       │
-                            │ ← ← ← loop             │
-                            │ (最多 3 轮)             │
-                            ▼                       │
-                     ┌──────────────┐               │
-                     │ needs-human  │               │
-                     │   -review    │               │
-                     └──────────────┘               │
+                               │
+                    ┌──────────▼───────────┐
+                    │   Image Creator 生成    │
+                    └──────────┬───────────┘
+                               │
+                    ┌──────────▼───────────┐
+                    │ 确定性镜像门禁与 lint   │
+                    └──────────┬───────────┘
+                               │
+                    ┌──────────▼───────────┐
+                    │ Testcase Creator ↔ QA │
+                    │     最多 2 轮          │
+                    └──────────┬───────────┘
+                               │
+                    ┌──────────▼───────────┐
+                    │ 双架构本地构建与测试    │
+                    └──────────┬───────────┘
+                               │
+                    ┌──────────┴───────────┐
+                    ▼                      ▼
+                 提交 PR                 Fixer
+                                           │
+                                      最多 3 轮
+                                           │
+                                    needs-human-review
 ```
 
 **关键时序：**
-- 两个对抗对**并行启动**，对内部 Creator 先生成 → QA 挑战 → Creator 修正（最多 2 轮）→ QA 认可
-- 两对都完成后进入本地验证
+- Image Creator 不再进入 Image QA 语义复核；镜像预检、身份契约、hadolint 等确定性检查在 Testcase Creator 启动前完成，确定性失败仍可触发定向修复
+- 镜像侧不再进行 Agent 语义复核，也不存在 QA 驱动的镜像修复轮次；固定 UID/GID 因缺少语义证明链而禁止，只允许动态身份或复用基础镜像已有身份
+- Testcase Creator → QA1 → Creator 修正 → QA2；分歧不 veto，完成后由本地验证裁决
 - Fixer **仅在本地验证失败后介入**，与本地验证形成 loop（最多 3 轮）
 - 本地验证通过是提 PR 的唯一路径
 
@@ -252,11 +243,10 @@ RUN yum install -y <packages> && \
 GitCode Issue 创建 [new-image 标签]
   → Webhook / Polling Bridge
     → parse_issue.py 解析 (package_name, source_repo_url, domain, os_version)
-      → 两个对抗对并行启动：
-        ┌ 对抗对一：Image Creator 生成 → Image QA 挑战 → Creator 修正（最多 2 轮）→ QA 认可
-        └ 对抗对二：Testcase Creator 生成 → Testcase QA 挑战 → Creator 补充（最多 2 轮）→ QA 认可
+      → Image Creator 生成 → 确定性镜像门禁
+      → Testcase Creator 生成 → QA1 → Creator 修正 → QA2；分歧不 veto
       → docker build（x86_64 + ARM64 并行）+ 测试执行
-        ┌─ 通过？→ gate_diff.py → compose_pr.py → 提 PR（附两个对抗对的审查记录）
+        ┌─ 通过？→ 最终目标门禁 → fork-deliver → 提 PR（附 Testcase QA 审查记录）
         └─ 失败？→ Fixer 分析日志 + 修复 → 重新本地验证
                                             ↑                    │
                                             └── loop（最多 3 轮）──┘
@@ -306,19 +296,20 @@ anitya 检测到上游新版本
 
 ### 4.1 角色定义
 
-系统共 5 个 Agent 角色。核心设计模式：每个"生成者"配一个"QA 挑战者"构成对抗对。CI Failure Analyst 不设为独立角色，其诊断能力作为 Fixer 的内置能力通过知识库驱动。
+系统共 4 个 Agent 角色：Image Creator、Testcase Creator、Testcase QA 和 Code Fixer。只有测试用例生成保留 QA 对抗复核；CI Failure Analyst 不设为独立角色，其诊断能力作为 Fixer 的内置能力通过知识库驱动。
 
-#### 对抗对一：Image Creator + Image QA
+#### Image Creator（镜像生成者）
 
-| | Image Creator（生成者） | Image QA（挑战者） |
-|------|------|------|
-| 职责 | 根据应用信息生成完整镜像目录 | 审查 Creator 的输出，挑战其正确性与合规性 |
-| 输入 | package_name, source_repo_url, domain, os_version, os_tag | Creator 的全部输出：Dockerfile、meta.yml、README.md、doc/、logo |
-| 输出 | Dockerfile + meta.yml + README.md + doc/image-info.yml + logo | 审查报告（问题清单 + 严重程度 + 修改建议） |
-| 对抗方式 | 根据 QA 反馈修正输出 | 从以下角度挑战：依赖是否完整？包名是否正确？端口是否暴露？文档是否符合规范？meta.yml 路径是否匹配？ |
-| 禁止 | 修改已有文件 | 直接修改文件（只提问题，由 Creator 修改） |
+| 属性 | 说明 |
+|------|------|
+| 职责 | 根据应用信息生成完整镜像目录，不经过 Image QA 复核 |
+| 输入 | package_name, source_repo_url, domain, os_version, os_tag |
+| 输出 | Dockerfile + meta.yml + README.md + 可选 doc/ 资产 |
+| 后续检查 | 确定性镜像预检、身份契约、hadolint、差分所有权门禁和双架构原生验证 |
+| 身份限制 | 只允许动态身份或复用基础镜像已有身份；禁止固定数字 UID/GID |
+| 禁止 | 修改已有版本目录、生成镜像语义复核证据或依赖语义反馈修复 |
 
-#### 对抗对二：Testcase Creator + Testcase QA
+#### Testcase Creator + Testcase QA
 
 | | Testcase Creator（生成者） | Testcase QA（挑战者） |
 |------|------|------|
@@ -340,84 +331,39 @@ anitya 检测到上游新版本
 
 ### 4.2 对抗模型
 
-对抗不是 Creator 和 Testcase Creator 之间互相对抗，而是**每个生成者都有一个 QA 来挑战它**。两个对抗对内部先辩论修正，通过后再进入本地验证。Fixer 仅在本验证失败后介入。
+Image Creator 完成生成后由确定性门禁检查，不进入语义审查或 QA 修复闭环；确定性门禁仍可要求 Creator 定向修复。对抗关系只存在于 Testcase Creator 与 Testcase QA 之间；Fixer 仅在本地验证失败后介入。
 
 ```
-                         ┌──────────────────┐
-                         │   Orchestrator   │
-                         │   (确定性代码)    │
-                         └────────┬─────────┘
-                                  │
-           ┌──────────────────────┼──────────────────────┐
-           │                      │                      │
-           ▼                      ▼                      │
-  ┌─────────────────┐    ┌─────────────────┐             │
-  │  对抗对一（并行） │    │  对抗对二（并行） │             │
-  │                 │    │                 │             │
-  │ ┌─────────────┐ │    │ ┌─────────────┐ │             │
-  │ │Image Creator│ │    │ │  Testcase   │ │             │
-  │ │  (生成)     │ │    │ │  Creator    │ │             │
-  │ └──────┬──────┘ │    │ │  (生成)     │ │             │
-  │        │        │    │ └──────┬──────┘ │             │
-  │        ▼        │    │        │        │             │
-  │ ┌─────────────┐ │    │        ▼        │             │
-  │ │  Image QA   │ │    │ ┌─────────────┐ │             │
-  │ │  (挑战)     │ │    │ │ Testcase QA │ │             │
-  │ └──────┬──────┘ │    │ │  (挑战)     │ │             │
-  │        │        │    │ └──────┬──────┘ │             │
-  │        │ 有问   │    │        │ 有问   │             │
-  │        │ 题？   │    │        │ 题？   │             │
-  │        ▼        │    │        ▼        │             │
-  │  Creator 修正   │    │  Creator 补充   │             │
-  │  (最多 2 轮)   │    │  (最多 2 轮)   │             │
-  │        │        │    │        │        │             │
-  │        ▼        │    │        ▼        │             │
-  │   QA 认可       │    │   QA 认可       │             │
-  └────────┬────────┘    └────────┬────────┘             │
-           │                      │                      │
-           └──────────────────────┼──────────────────────┘
-                                  │
-                                  ▼
-                         ┌──────────────────┐
-                         │   本地验证         │
-                         │  build + 测试     │
-                         └────────┬─────────┘
-                                  │
-                        ┌─────────┴─────────┐
-                        ▼                   ▼
-                     通过                 失败
-                        │                   │
-                        ▼                   ▼
-                 ┌──────────┐       ┌──────────────┐
-                 │  提交 PR  │       │    Fixer     │
-                 │ (附两对    │       │  (分析+修复)   │
-                 │  对抗记录) │       └──────┬───────┘
-                 └──────────┘              │
-                                           │ ← ← ← loop（最多 3 轮）← ← ←
-                                           ▼ (3 轮后仍失败)
-                                    ┌──────────────────┐
-                                    │ needs-human      │
-                                    │   -review        │
-                                    │ 附完整对抗+修复记录│
-                                    └──────────────────┘
+Orchestrator（确定性代码）
+  → Image Creator 生成（无 Image QA 复核）
+  → 镜像预检 + 身份契约 + hadolint
+  → 冻结镜像归属快照
+  → Testcase Creator 生成
+  → 测试用例预检 + 镜像归属检查
+  → Testcase QA 挑战
+      ├─ 有候选问题：Creator 定向修正，最多再审 1 次
+      └─ 无候选问题：直接继续
+  → 最终目标契约 + 双架构本地验证
+      ├─ 通过：提交 PR，附测试用例复核记录
+      └─ 失败：Fixer 修复并重试，最多 3 轮
+                    └─ 仍失败：needs-human-review
 ```
 
 **对抗的本质：**
 
-Image QA 和 Testcase QA 各自与配对的 Creator 形成**开发-QA 对抗关系**。QA 不直接动手改，而是提出问题迫使 Creator 修正。这与传统 CI（所有人都同意后再检查）的区别在于：对抗对内的辩论发生在本地验证之前，输出的质量已经被 QA 挑战过了，本地验证是用来裁决的。QA 赢了（发现问题）说明 Creator 需要修正；Creator 修正到 QA 无话可说，才进入本地验证。
+Testcase QA 与 Testcase Creator 形成**开发-QA 对抗关系**。QA 不直接动手改，而是提出问题促使 Creator 修正。测试用例对抗发生在本地验证之前；QA 的结论用于提高候选质量，但不拥有工作流的一票否决权，本地验证负责最终裁决。镜像内容没有对应的语义复核角色。
 
 ### 4.3 收敛策略
 
 系统有两层收敛控制：
 
-**第一层：对抗对内 QA 轮次（最多 2 轮）**
+**第一层：测试用例 QA 轮次（最多 2 轮）**
 ```
-QA 提出问题 → Creator 修正 → QA 再次审查
-  → 认可？→ 通过，进入本地验证
-  → 仍有问题？→ Creator 再修正（第 2 轮）
-    → 2 轮后 QA 仍不认可？→ 记录分歧，标注在 PR 中，仍进入本地验证
+QA1 → Creator 修正 → QA2
+  → QA2 认可？→ 通过，进入本地验证
+  → QA2 仍不认可？→ 记录分歧，标注在 PR 中，仍进入本地验证
 ```
-QA 不认可不代表阻塞——对抗对的任务是尽可能提高质量，但最终裁决权在本地验证。
+Testcase QA 不认可不代表阻塞——复核的任务是尽可能提高测试质量，但最终裁决权在本地验证。
 
 **第二层：Fixer 修复轮次（最多 3 轮）**
 ```
@@ -520,10 +466,10 @@ openeuler-docker-images/
 
 ### 5.4 公众可信性
 
-可信性来自对抗而非自证：
+可信性来自可复现验证与公开复核，而非 Agent 自证：
 
-1. **QA 审查记录公开**：PR 内嵌 Image QA 和 Testcase QA 的审查报告——生成者的输出被独立角色挑战过，不是自我证明
-2. **对抗分歧透明**：QA 不认可的问题标注在 PR 中，即使通过本地验证也保留分歧记录——任何人都能看到 QA 发现了什么
+1. **镜像验证可复现**：镜像差分、身份契约、lint、双架构原生构建和运行测试由确定性代码执行并记录；不把镜像正确性归因于语义审查
+2. **测试用例复核公开**：PR 内嵌 Testcase QA 审查报告及分歧；即使通过本地验证也保留未解决意见
 3. **JUnit XML 归档**：测试结果以机器可解析格式作为 Artifact 归档（不可变、带时间戳、绑定构建 SHA）
 4. **双架构独立**：x86_64 和 ARM64 各自独立记录，一个架构通过不代表另一个通过
 
@@ -675,19 +621,7 @@ anitya 检测到上游新版本
 ### Adversarial Review Records
 
 <details>
-<summary>对抗对一：Image Creator ↔ Image QA</summary>
-
-| 角色 | 结论 |
-|------|------|
-| Image Creator | 生成完成 (confidence: 0.92) |
-| Image QA | 审查通过，发现 X 个问题已修正，Y 个建议 |
-
-QA 审查角度：依赖完整性 ✓、包名正确性 ✓、端口暴露 ✓、文档合规 ✓、meta.yml 路径匹配 ✓
-
-</details>
-
-<details>
-<summary>对抗对二：Testcase Creator ↔ Testcase QA</summary>
+<summary>Testcase Creator ↔ Testcase QA</summary>
 
 | 角色 | 结论 |
 |------|------|
@@ -716,8 +650,8 @@ QA 审查角度：攻击面覆盖 ✓、误报风险 ✓、关键功能验证 �
 </details>
 
 ### Generated By
-- Image Creator + Image QA (对抗对一)
-- Testcase Creator + Testcase QA (对抗对二)
+- Image Creator（无 Image QA 复核，后接确定性镜像门禁）
+- Testcase Creator + Testcase QA（最多 2 轮）
 ```
 
 ---
@@ -775,7 +709,6 @@ openeuler-docker-images-workflow/
 │   │   └── verify.yml                  # 本地验证（构建 + 测试 + 差分）
 │   └── agents/
 │       ├── image-creator.md           # Image Creator（生成者）
-│       ├── image-qa.md                # Image QA（挑战者）
 │       ├── testcase-creator.md        # Testcase Creator（生成者）
 │       ├── testcase-qa.md             # Testcase QA（挑战者）
 │       └── code-fixer.md              # Fixer（修复者，内置故障分析）

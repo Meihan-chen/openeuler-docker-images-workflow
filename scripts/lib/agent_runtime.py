@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import threading
 import time
@@ -43,7 +44,7 @@ _VISIBLE_ACTION_TOOLS = {
     "write",
 }
 _WRITE_ROLES = {"image_creator", "testcase_creator", "fixer"}
-_READ_ONLY_ROLES = {"image_qa", "testcase_qa"}
+_READ_ONLY_ROLES = {"testcase_qa"}
 _ROLES = _WRITE_ROLES | _READ_ONLY_ROLES
 SCRATCH_DIR = ".oe-scratch"
 # The two event types emit() counts toward the ACTIVITY summary.
@@ -344,7 +345,8 @@ def _parse_contract(
 
 
 _COMMAND_EVIDENCE_FIELDS = ("command", "semantics")
-_IDENTITY_MODES = {"dynamic", "fixed", "reuse_existing"}
+_IDENTITY_MODES = {"dynamic", "reuse_existing"}
+_LINUX_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*\$?$")
 
 
 def qa_requests_repair(payload: Mapping[str, object]) -> bool:
@@ -384,8 +386,8 @@ def _validate_identity_decision(decision: object) -> None:
     mode = decision.get("mode")
     if mode not in _IDENTITY_MODES:
         raise AgentRuntimeError(
-            "Agent contract identity_decision mode must be dynamic, fixed, "
-            "or reuse_existing"
+            "Agent contract identity_decision mode must be dynamic or "
+            "reuse_existing"
         )
     for field in ("user", "group"):
         value = decision.get(field)
@@ -393,21 +395,14 @@ def _validate_identity_decision(decision: object) -> None:
             raise AgentRuntimeError(
                 f"Agent contract identity_decision {field} must be non-empty"
             )
+        if _LINUX_NAME_RE.fullmatch(value.strip()) is None:
+            raise AgentRuntimeError(
+                "Agent contract identity_decision "
+                f"{field} must be a literal Linux name"
+            )
     uid = decision.get("uid")
     gid = decision.get("gid")
-    if mode == "fixed":
-        if (
-            isinstance(uid, bool)
-            or isinstance(gid, bool)
-            or not isinstance(uid, int)
-            or not isinstance(gid, int)
-            or uid <= 0
-            or gid <= 0
-        ):
-            raise AgentRuntimeError(
-                "Agent contract fixed identity must set positive numeric uid and gid"
-            )
-    elif uid is not None or gid is not None:
+    if uid is not None or gid is not None:
         raise AgentRuntimeError(
             f"Agent contract {mode} identity must leave uid and gid null"
         )

@@ -1,6 +1,5 @@
 import subprocess
 
-
 def _git(repo, *args):
     return subprocess.run(
         ["git", "-C", str(repo), *args],
@@ -76,5 +75,9 @@ def test_deterministic_smoke_candidate_passes_the_real_target_contract(
     dockerfile_text = dockerfile.read_text()
     assert "dnf install -y redis" in dockerfile_text
     assert "dnf clean all" in dockerfile_text
-    assert "groupadd --non-unique --gid 999" in dockerfile_text
-    assert "useradd --non-unique --uid 999" in dockerfile_text
+    assert "groupadd -r kvrocks" in dockerfile_text
+    assert "useradd -r -g kvrocks kvrocks" in dockerfile_text
+    assert "USER kvrocks" in dockerfile_text
+    assert "--uid" not in dockerfile_text
+    assert "--gid" not in dockerfile_text
+    assert "999" not in dockerfile_text

@@ -22,7 +22,6 @@ runs:
         prompt_dir="${GITHUB_WORKSPACE}/.github/agents"
         prompts=(
           image-creator.md
-          image-qa.md
           testcase-creator.md
           testcase-qa.md
           code-fixer.md

@@ -31,14 +31,10 @@ def test_scenario_one_reuses_the_shared_agent_definitions():
 
 
 def test_shared_qa_prompts_preserve_findings_for_local_validation():
-    image_qa = (AGENTS_DIR / "image-qa.md").read_text().lower()
     testcase_qa = (AGENTS_DIR / "testcase-qa.md").read_text().lower()
     testcase_creator = (AGENTS_DIR / "testcase-creator.md").read_text().lower()
 
-    assert "approve anyway" not in image_qa
-    assert "must fail closed" not in image_qa
     assert "must fail closed" not in testcase_qa
-    assert "local validation" in image_qa
     assert "local validation" in testcase_qa
     assert "模糊匹配" not in testcase_creator
     assert "exact" in testcase_creator or "精确" in testcase_creator
@@ -52,42 +48,26 @@ def test_shared_qa_prompts_preserve_findings_for_local_validation():
     assert "dockerfile-level" not in testcase_qa
 
 
-def test_image_prompts_define_generic_auxiliary_file_policy():
+def test_image_creator_defines_generic_auxiliary_file_policy():
     image_creator = (AGENTS_DIR / "image-creator.md").read_text().lower()
-    image_qa = (AGENTS_DIR / "image-qa.md").read_text().lower()
 
     assert "最小必需结构" in image_creator
     assert "`doc/` 是可选目录" in image_creator
     assert "只要生成了任何 `doc/` 内容" in image_creator
     assert "至少有一个图片资源" in image_creator
-    assert "at least one doc/picture asset" in image_qa
     assert "上游提供的那份" in image_creator
     assert "持久化数据目录" in image_creator
-    assert "auxiliary files" in image_qa
-    assert "configuration provenance" in image_qa
 
 
-def test_image_prompts_keep_source_fetches_reproducible_and_bounded():
+def test_image_creator_keeps_source_fetches_reproducible_and_bounded():
     image_creator = " ".join(
         (AGENTS_DIR / "image-creator.md").read_text().lower().split()
     )
-    image_qa = " ".join(
-        (AGENTS_DIR / "image-qa.md").read_text().lower().split()
-    )
-
     assert "source_repo_url" in image_creator
     assert "不可变" in image_creator
     assert "有限次数" in image_creator
     assert "checksum" in image_creator
     assert "未经校验的镜像站" in image_creator
-    for phrase in (
-        "taskspec source origin",
-        "immutable",
-        "bounded retry",
-        "published checksum",
-        "unverified mirror fallback",
-    ):
-        assert phrase in image_qa
 
 
 def test_image_creator_bounds_optional_release_artifact_research():
@@ -103,6 +83,15 @@ def test_image_creator_bounds_optional_release_artifact_research():
     )
 
     assert "最低成本手段" in image_creator
+
+
+def test_image_creator_has_no_image_qa_evidence_contract():
+    image_creator = (AGENTS_DIR / "image-creator.md").read_text().lower()
+
+    assert "requirement_evidence_ids" not in image_creator
+    assert '"evidence"' not in image_creator
+    assert "禁止固定数字身份" in image_creator
+    assert "mode: fixed" not in image_creator
     assert "单次研究网络操作最多 180 秒" in image_creator
     assert "不得加大超时反复重试" in image_creator
     assert "完整下载和校验交给后续原生构建" in image_creator
@@ -117,27 +106,16 @@ def test_image_creator_defines_the_existing_root_identity_contract():
     image_creator = " ".join(
         (AGENTS_DIR / "image-creator.md").read_text().lower().split()
     )
-    image_qa = " ".join(
-        (AGENTS_DIR / "image-qa.md").read_text().lower().split()
-    )
-
     assert "reuse_existing" in image_creator
     assert '"user": "root"' in image_creator
     assert '"group": "root"' in image_creator
     assert "直接使用基础镜像已有的 root" in image_creator
-    assert "reuse_existing" in image_qa
-    assert '"user": "root"' in image_qa
-    assert '"group": "root"' in image_qa
 
 
-def test_image_prompts_reuse_unchanged_upstream_assets_from_builder():
+def test_image_creator_reuses_unchanged_upstream_assets_from_builder():
     image_creator = " ".join(
         (AGENTS_DIR / "image-creator.md").read_text().lower().split()
     )
-    image_qa = " ".join(
-        (AGENTS_DIR / "image-qa.md").read_text().lower().split()
-    )
-
     assert "固定版本的 builder 源码" in image_creator
     assert "未修改的上游附属文件" in image_creator
     assert "逐字节相同" in image_creator
@@ -146,21 +124,14 @@ def test_image_prompts_reuse_unchanged_upstream_assets_from_builder():
     assert "stage alias" in image_creator
     assert "copy --from" in image_creator
 
-    assert "unchanged upstream asset" in image_qa
-    assert "copy --from" in image_qa
-    assert "byte-identical" in image_qa
-    assert "necessary local customization" in image_qa
 
 
-def test_image_prompts_restrict_only_open_euler_owned_gitee_links():
+def test_image_creator_restricts_only_open_euler_owned_gitee_links():
     image_creator = (AGENTS_DIR / "image-creator.md").read_text().lower()
-    image_qa = (AGENTS_DIR / "image-qa.md").read_text().lower()
 
     assert "第三方" in image_creator
-    assert "third-party gitee" in image_qa
-    for prompt in (image_creator, image_qa):
-        assert "gitee.com/openeuler" in prompt
-        assert "gitee.com/src-openeuler" in prompt
+    assert "gitee.com/openeuler" in image_creator
+    assert "gitee.com/src-openeuler" in image_creator
     assert "`gitee.com` 是 openeuler 迁移前的旧域名，一律禁止" not in image_creator
 
 
@@ -191,15 +162,11 @@ def test_testcase_prompts_define_service_and_cli_native_modes():
 
 def test_shared_prompts_derive_application_behavior_instead_of_assuming_it():
     image_creator = (AGENTS_DIR / "image-creator.md").read_text().lower()
-    image_qa = (AGENTS_DIR / "image-qa.md").read_text().lower()
     testcase_creator = (AGENTS_DIR / "testcase-creator.md").read_text().lower()
     testcase_qa = (AGENTS_DIR / "testcase-qa.md").read_text().lower()
-    prompts = "\n".join(
-        (image_creator, image_qa, testcase_creator, testcase_qa)
-    )
+    prompts = "\n".join((image_creator, testcase_creator, testcase_qa))
 
     assert "上游官方" in image_creator
-    assert "if the application or task requires" in image_qa
     assert "dockerfile 与 official upstream" in " ".join(
         testcase_creator.split()
     )
@@ -208,45 +175,68 @@ def test_shared_prompts_derive_application_behavior_instead_of_assuming_it():
         assert fragment not in prompts
 
 
-def test_image_prompts_treat_fixed_numeric_identity_as_a_collision_risk():
-    """Fixed identities need upstream evidence and native collision checks."""
+def test_image_creator_forbids_fixed_numeric_identity_without_semantic_review():
     image_creator = " ".join(
         (AGENTS_DIR / "image-creator.md").read_text().lower().split()
     )
-    image_qa = " ".join(
-        (AGENTS_DIR / "image-qa.md").read_text().lower().split()
-    )
-
-    # The default is an identity that cannot collide.
     assert "groupadd -r" in image_creator
     assert "useradd -r" in image_creator
-    assert '"evidence"' in image_creator
-    assert '"excerpts"' in image_creator
-    assert "creator 不得自行声明" in image_creator
+    assert "禁止固定数字身份" in image_creator
+    assert '"evidence"' not in image_creator
     assert "原生构建" in image_creator
 
-    assert "fixed number" in image_qa
-    assert "harness-fixed" in image_qa
-    assert "creator cannot prove" in image_qa
-    assert "native build is authoritative" in image_qa
 
-
-def test_image_qa_leaves_unproven_package_resolution_to_native_build():
-    image_qa = " ".join(
-        (AGENTS_DIR / "image-qa.md").read_text().lower().split()
+def test_fixer_cannot_reintroduce_fixed_numeric_identity():
+    fixer = " ".join(
+        (AGENTS_DIR / "code-fixer.md").read_text().lower().split()
     )
 
-    assert "concrete evidence in the provided snapshot" in image_qa
-    assert "native build is authoritative" in image_qa
+    assert "禁止固定数字 uid/gid" in fixer
 
 
-def test_image_prompts_do_not_require_one_dockerfile_spelling_or_package_blacklist():
+def test_testcase_qa_cannot_report_image_only_defects():
+    testcase_qa = " ".join(
+        (AGENTS_DIR / "testcase-qa.md").read_text().lower().split()
+    )
+
+    assert "dockerfile is context only" in testcase_qa
+    assert "actionable issues must identify a defect under `tests/`" in testcase_qa
+    assert "image-only defect" in testcase_qa
+
+
+def test_design_matches_the_advisory_testcase_evidence_model():
+    design = (ROOT / "DESIGN.md").read_text()
+
+    assert "`evidence_requests`" not in design
+    assert "Creator 直接提交结构化 `evidence`" in design
+    assert "证据不可用不阻断" in design
+
+
+def test_design_describes_one_creator_repair_between_two_qa_reviews():
+    design = (ROOT / "DESIGN.md").read_text()
+
+    assert "QA1 → Creator 修正 → QA2" in design
+    assert "Creator 再修正（第 2 轮）" not in design
+
+
+def test_image_qa_prompt_is_removed():
+    assert not (AGENTS_DIR / "image-qa.md").exists()
+
+
+def test_docs_do_not_claim_image_creator_always_runs_once():
+    design = (ROOT / "DESIGN.md").read_text()
+    template = (ROOT / "templates" / "pr.md").read_text()
+
+    assert "Image Creator 单次生成" not in design
+    assert "single generation pass" not in template
+    assert "Image QA" not in template
+
+
+def test_image_creator_does_not_require_one_dockerfile_spelling_or_package_blacklist():
     image_creator = (AGENTS_DIR / "image-creator.md").read_text().lower()
-    image_qa = (AGENTS_DIR / "image-qa.md").read_text().lower()
 
     assert "禁止使用的包" not in image_creator
     assert "arg version 全大写" not in image_creator
-    assert "arg base=openeuler/openeuler" not in image_qa
     assert "version_filter 完整" not in image_creator
 
 
@@ -356,24 +346,17 @@ def test_testcase_qa_issues_must_cite_evidence():
 
 
 def test_creator_prompts_keep_evidence_within_harness_bounds():
-    for name in ("image-creator.md", "testcase-creator.md"):
-        prompt = " ".join((AGENTS_DIR / name).read_text().split())
-        assert "最多 6" in prompt
-        assert "1—2" in prompt
-        assert "逐字" in prompt
-        assert "TaskSpec 同源" in prompt
-        assert "固定 revision" in prompt
+    prompt = " ".join((AGENTS_DIR / "testcase-creator.md").read_text().split())
+    assert "最多 6" in prompt
+    assert "1—2" in prompt
+    assert "逐字" in prompt
+    assert "TaskSpec 同源" in prompt
+    assert "固定 revision" in prompt
 
 
 def test_creator_provides_evidence_and_qa_reviews_it_without_a_gate():
-    creators = "\n".join(
-        (AGENTS_DIR / name).read_text()
-        for name in ("image-creator.md", "testcase-creator.md")
-    )
-    reviewers = "\n".join(
-        (AGENTS_DIR / name).read_text()
-        for name in ("image-qa.md", "testcase-qa.md")
-    )
+    creators = (AGENTS_DIR / "testcase-creator.md").read_text()
+    reviewers = (AGENTS_DIR / "testcase-qa.md").read_text()
     normalized_reviewers = " ".join(reviewers.split())
 
     assert '"excerpts"' in creators

@@ -42,6 +42,11 @@ _OPENEULER_GITEE_URL_RE = re.compile(
     r"(?=/|[\s?#)]|$)",
     re.IGNORECASE,
 )
+_USER_INSTRUCTION_RE = re.compile(
+    r"^\s*USER\s+(?P<identity>[^\s#]+)",
+    re.IGNORECASE | re.MULTILINE,
+)
+_LINUX_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*\$?$")
 _VERSION_INFO_FIELDS = {
     "test_time",
     "Model",
@@ -168,6 +173,118 @@ def _advisory_finding(
 def _image_tag(version: str, os_version: str) -> str:
     suffix = os_version.replace("-lts-sp", "sp").replace("-lts", "lts")
     return f"{version}-oe{suffix.replace('.', '').replace('-', '')}"
+
+
+def _identity_scan(content: str) -> str:
+    """Flatten quoting and JSON-array punctuation for conservative inspection."""
+    lines: list[str] = []
+    delimiter: str | None = None
+    for line in content.replace("\\\n", " ").splitlines():
+        if delimiter is not None:
+            if line.lstrip("\t").strip() == delimiter:
+                delimiter = None
+            continue
+        lines.append(line)
+        match = re.search(
+            r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1",
+            line,
+        )
+        if match:
+            delimiter = match.group(2)
+    return re.sub(r"[\"'\[\],]", " ", "\n".join(lines))
+
+
+def _command_matches(content: str, commands: str):
+    return re.finditer(
+        rf"(?:^|[\n;&|])\s*(?:RUN\s+)?(?:\[\s*)?"
+        rf"(?:(?:then|do|sudo)\s+)*"
+        rf"(?:(?:\S*/)?env(?:\s+-\S+)*\s+)?"
+        rf"(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*"
+        rf"(?:(?:command|exec|busybox)\s+)?(?:\S*/)?(?:{commands})\b"
+        rf"(?P<args>[^;&|\n]*)",
+        content,
+        re.IGNORECASE,
+    )
+
+
+def _option_value(tokens: list[str], *options: str) -> str | None:
+    for index, token in enumerate(tokens):
+        for option in options:
+            if token == option and index + 1 < len(tokens):
+                return tokens[index + 1]
+            if token.startswith(option + "="):
+                return token.partition("=")[2]
+            if len(option) == 2 and token.startswith(option) and len(token) > 2:
+                return token[len(option):]
+    return None
+
+
+def _unsafe_ownership(content: str) -> bool:
+    def unsafe(value: str | None) -> bool:
+        if not value:
+            return False
+        return any(
+            part.lstrip("+").isdigit() or "$" in part
+            for part in re.split(r"[:.]", value)
+        )
+
+    for match in _command_matches(content, "chown"):
+        values = [
+            token
+            for token in match.group("args").split()
+            if not token.startswith("-")
+        ]
+        if values and unsafe(values[0]):
+            return True
+    for match in re.finditer(
+        r"^\s*COPY\b[^\n]*?--chown(?:=|\s+)(?P<owner>\S+)",
+        content,
+        re.I | re.M,
+    ):
+        if unsafe(match.group("owner")):
+            return True
+    for match in _command_matches(content, "install"):
+        tokens = match.group("args").split()
+        if unsafe(_option_value(tokens, "-o", "--owner")) or unsafe(
+            _option_value(tokens, "-g", "--group")
+        ):
+            return True
+    return False
+
+
+def _uses_explicit_id_assignment(content: str) -> bool:
+    for match in _command_matches(content, "useradd|adduser|usermod"):
+        tokens = match.group("args").split()
+        if _option_value(tokens, "-u", "--uid") is not None:
+            return True
+        group = _option_value(tokens, "-g", "--gid", "-G")
+        if group is not None and _LINUX_NAME_RE.fullmatch(group) is None:
+            return True
+    return any(
+        _option_value(match.group("args").split(), "-g", "--gid") is not None
+        for match in _command_matches(content, "groupadd|addgroup|groupmod")
+    )
+
+
+def validate_dockerfile_identity(
+    dockerfile: str | Path,
+) -> list[str]:
+    """Reject fixed or variable identities without adding semantic policy."""
+    content = _identity_scan(Path(dockerfile).read_text())
+    unsafe_user = any(
+        any(_LINUX_NAME_RE.fullmatch(part) is None for part in identity.split(":"))
+        for identity in (
+            match.group("identity")
+            for match in _USER_INSTRUCTION_RE.finditer(content)
+        )
+    )
+    if (
+        _uses_explicit_id_assignment(content)
+        or _unsafe_ownership(content)
+        or unsafe_user
+    ):
+        return ["Dockerfile must not assign a fixed numeric UID or GID"]
+    return []
 
 
 def validate_meta_file(meta_path: str | Path) -> list[str]:
@@ -877,6 +994,22 @@ def validate_generated_target(
                 _hard_finding(
                     "scope.symlink",
                     f"generated symlink is forbidden: {path.relative_to(repo)}",
+                )
+            )
+
+    dockerfile = repo / required[-1]
+    if dockerfile.is_file():
+        for message in validate_dockerfile_identity(dockerfile):
+            code = (
+                "dockerfile.fixed_identity"
+                if message.startswith("Dockerfile must not assign")
+                else "dockerfile.identity"
+            )
+            findings.append(
+                _delivery_finding(
+                    code,
+                    message,
+                    owner="image_creator",
                 )
             )
 

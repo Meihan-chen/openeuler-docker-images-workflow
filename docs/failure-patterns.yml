@@ -9,17 +9,17 @@ patterns:
       - not unique
       - "exit code: 4"
     diagnosis: >-
-      A requested numeric user or group identifier is already occupied after
-      runtime packages are installed. A name lookup cannot prove that a numeric
-      identifier is free.
+      An explicitly assigned numeric user or group identifier can already be
+      occupied after runtime packages are installed. The deterministic image
+      contract rejects fixed numeric identities instead of trying to prove a
+      numeric identifier is free.
     remediation:
       - Prefer dynamic allocation or reuse a compatible account created by an installed package.
-      - Use a fixed numeric identity only when the upstream contract requires it and QA verifies the Creator evidence against Harness-fixed source material.
       - Synchronize runtime ownership and identity assertions when the identity changes.
     prevention: >-
-      Require a structured identity decision whose fixed identifiers reference
-      QA-verified Creator evidence from Harness-fixed upstream material, then let the native build validate the
-      final package set.
+      Use a named identity that is dynamically allocated or safely reused, then
+      enforce the deterministic identity gate and native build against the final
+      package set.
     verification:
       status: verified
       sources:

@@ -174,7 +174,6 @@ def test_existing_as_new_context_action_updates_every_agent_prompt(tmp_path):
     prompt_dir.mkdir(parents=True)
     prompts = (
         "image-creator.md",
-        "image-qa.md",
         "testcase-creator.md",
         "testcase-qa.md",
         "code-fixer.md",
@@ -202,6 +201,13 @@ def test_existing_as_new_context_action_updates_every_agent_prompt(tmp_path):
         assert "`kylin-e2e-test` is only a temporary" in text
         assert "Do not create a probe-only, client-only" in text
         assert "Tests must start and validate the candidate image itself" in text
+
+
+def test_existing_as_new_context_does_not_require_image_qa_prompt():
+    action = _action("phase1-existing-as-new-context")
+    step = action["runs"]["steps"][0]
+
+    assert "image-qa.md" not in step["run"]
 
 
 def test_existing_as_new_probe_shell_restores_reference_without_diff(tmp_path):

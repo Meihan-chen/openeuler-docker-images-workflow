@@ -104,10 +104,10 @@ def _write_valid_generated_candidate(repo):
         "tar -zxf source.tar.gz -C /src/kvrocks --strip-components=1 && "
         "cd /src/kvrocks && ./x.py build -j 4\n"
         "FROM ${BASE}\n"
-        "RUN groupadd --gid 999 kvrocks && "
-        "useradd --uid 999 --gid kvrocks kvrocks\n"
+        "RUN groupadd -r kvrocks && "
+        "useradd -r -g kvrocks kvrocks\n"
         "COPY --from=builder /src/kvrocks/build/kvrocks /usr/local/bin/kvrocks\n"
-        "USER 999\n"
+        "USER kvrocks\n"
         "EXPOSE 6666\n"
         "HEALTHCHECK CMD redis-cli -p 6666 PING | grep PONG\n"
         "ENTRYPOINT [\"kvrocks\", \"--bind\", \"0.0.0.0\"]\n"
@@ -138,7 +138,7 @@ def _write_valid_generated_candidate(repo):
         ": \"${EXPECTED_VERSION:?}\"\n"
         "kvrocks --version | grep -F \"${EXPECTED_VERSION}\"\n"
         "redis-cli -p 6666 PING | grep -F PONG\n"
-        "test \"$(id -u)\" = 999\n"
+        "test \"$(id -u)\" != 0\n"
     )
     (tests / "test.sh").chmod(0o755)
 
@@ -401,7 +401,6 @@ def test_generated_contract_uses_only_the_app_shared_test_entrypoint(tmp_path):
         "unbraced_base_variable",
         "alternative_builder_alias",
         "named_runtime_user",
-        "numeric_runtime_user_with_group",
         "git_clone_source",
         "fixed_binary_variable",
         "defaulted_binary_variable",
@@ -435,11 +434,7 @@ def test_generated_contract_does_not_gate_application_implementation_syntax(
             dockerfile_text.replace(
                 "FROM ${BASE}\nRUN groupadd",
                 "FROM openeuler/openeuler:24.03-lts-sp4\nRUN groupadd",
-            ).replace("USER 999", "USER kvrocks")
-        )
-    elif variant == "numeric_runtime_user_with_group":
-        dockerfile.write_text(
-            dockerfile_text.replace("USER 999", "USER 999:999")
+            )
         )
     elif variant == "git_clone_source":
         dockerfile.write_text(
@@ -476,7 +471,7 @@ def test_generated_contract_does_not_gate_application_implementation_syntax(
             "FROM ${BASE}\n"
             "ARG VERSION=\"2.16.0\"\n"
             "RUN printf '%s\\n' \"${VERSION}\" >/requested-version\n"
-            "USER 1000:1000\n"
+            "USER application\n"
             "CMD [\"sh\"]\n"
         )
     elif variant == "application_selected_test_strategy":
@@ -506,7 +501,78 @@ def test_generated_contract_does_not_gate_application_implementation_syntax(
     assert report["status"] == "passed"
 
 
-def test_contract_does_not_require_one_application_runtime_uid(tmp_path):
+@pytest.mark.parametrize(
+    "fixed_identity",
+    [
+        "RUN groupadd --gid 1000 app && useradd -r -g app app\nUSER app\n",
+        "RUN groupadd -g 1000 app && useradd -r -g app app\nUSER app\n",
+        "RUN groupadd -g1000 app && useradd -r -g app app\nUSER app\n",
+        "RUN addgroup -g 1000 app && adduser -S -G app app\nUSER app\n",
+        "RUN groupadd -r app && useradd --uid=1000 -g app app\nUSER app\n",
+        "RUN groupadd -r app && useradd -u1000 -g app app\nUSER app\n",
+        "RUN addgroup -S app && adduser -u 1000 -S -G app app\nUSER app\n",
+        "USER 1000:1000\n",
+        "RUN mkdir -p /data && chown -R 1000:1000 /data\nUSER app\n",
+        "RUN mkdir -p /data && chown -R 1000.1000 /data\nUSER app\n",
+        "COPY --chown=1000:1000 binary /usr/local/bin/binary\nUSER app\n",
+        "COPY --chown=1000.1000 binary /usr/local/bin/binary\nUSER app\n",
+        'RUN groupadd --gid "1000" app && useradd --uid "1000" -g app app\nUSER app\n',
+        'RUN ["useradd", "--uid", "1000", "app"]\nUSER app\n',
+        "ARG APP_ID=1000\nRUN groupadd -r app && useradd -u ${APP_ID} -g app app\nUSER app\n",
+        "ARG APP_ID=1000\nCOPY --chown=${APP_ID}:${APP_ID} binary /bin/binary\nUSER app\n",
+        'RUN chown -R "1000:1000" /data\nUSER app\n',
+        "RUN install -o 1000 -g 1000 binary /bin/binary\nUSER app\n",
+        "RUN install -o1000 -g1000 binary /bin/binary\nUSER app\n",
+        "RUN APP_ID=1000; groupadd -g ${APP_ID} app; useradd -u ${APP_ID} -g app app\nUSER app\n",
+        'RUN APP_UID=1000 useradd -u "$APP_UID" app\nUSER app\n',
+        'RUN env APP_UID=1000 useradd -u "$APP_UID" app\nUSER app\n',
+        'RUN /usr/bin/env APP_UID=1000 useradd -u "$APP_UID" app\nUSER app\n',
+        'RUN env -i APP_UID=1000 useradd -u "$APP_UID" app\nUSER app\n',
+        'RUN APP_ID=1000 chown "$APP_ID:$APP_ID" /app\nUSER app\n',
+        "RUN /usr/sbin/useradd -u 1000 app\nUSER app\n",
+        "RUN busybox adduser -u 1000 app\nUSER app\n",
+        "ARG APP_ID=1000\nUSER ${APP_ID}\n",
+    ],
+)
+def test_contract_rejects_fixed_numeric_identity(tmp_path, fixed_identity):
+    from scripts.harness.gate_diff import validate_generated_target
+
+    repo, base_sha = _repo(tmp_path)
+    _write_valid_generated_candidate(repo)
+    dockerfile = (
+        repo
+        / "Database"
+        / "kvrocks"
+        / "2.16.0"
+        / "24.03-lts-sp4"
+        / "Dockerfile"
+    )
+    dockerfile.write_text("FROM openeuler/openeuler:24.03-lts-sp4\n" + fixed_identity)
+
+    report = validate_generated_target(
+        repo=repo,
+        task=_task(),
+        base_sha=base_sha,
+    )
+
+    assert report["delivery_allowed"] is False
+    assert any(
+        finding["code"] == "dockerfile.fixed_identity"
+        for finding in report["findings"]
+    )
+
+
+@pytest.mark.parametrize(
+    "non_command_text",
+    [
+        "# never use: useradd -u 1000 app\n",
+        'RUN echo "never use: useradd -u 1000 app" >/policy\n',
+    ],
+)
+def test_contract_ignores_fixed_identity_text_that_is_not_a_command(
+    tmp_path,
+    non_command_text,
+):
     from scripts.harness.gate_diff import validate_generated_target
 
     repo, base_sha = _repo(tmp_path)
@@ -520,9 +586,10 @@ def test_contract_does_not_require_one_application_runtime_uid(tmp_path):
         / "Dockerfile"
     )
     dockerfile.write_text(
-        dockerfile.read_text()
-        .replace("--uid 999", "--uid 1000")
-        .replace("USER 999", "USER kvrocks")
+        "FROM openeuler/openeuler:24.03-lts-sp4\n"
+        + non_command_text
+        + "RUN groupadd -r app && useradd -r -g app app\n"
+        + "USER app\n"
     )
 
     report = validate_generated_target(
@@ -531,7 +598,74 @@ def test_contract_does_not_require_one_application_runtime_uid(tmp_path):
         base_sha=base_sha,
     )
 
-    assert report["status"] == "passed"
+    assert report["delivery_allowed"] is True
+
+
+def test_contract_ignores_identity_examples_inside_heredoc(tmp_path):
+    from scripts.harness.gate_diff import validate_generated_target
+
+    repo, base_sha = _repo(tmp_path)
+    _write_valid_generated_candidate(repo)
+    dockerfile = (
+        repo
+        / "Database"
+        / "kvrocks"
+        / "2.16.0"
+        / "24.03-lts-sp4"
+        / "Dockerfile"
+    )
+    dockerfile.write_text(
+        "FROM openeuler/openeuler:24.03-lts-sp4\n"
+        "RUN cat >/policy <<'EOF'\n"
+        "useradd -u 1000 app\n"
+        "USER 1000\n"
+        "EOF\n"
+        "USER app\n"
+    )
+
+    report = validate_generated_target(
+        repo=repo,
+        task=_task(),
+        base_sha=base_sha,
+    )
+
+    assert report["delivery_allowed"] is True
+
+
+@pytest.mark.parametrize(
+    "identity_text",
+    [
+        "CMD [\"sh\"]\n",
+        "RUN groupadd -r app\nUSER app\n",
+    ],
+)
+def test_contract_does_not_require_runtime_identity_semantics(
+    tmp_path,
+    identity_text,
+):
+    from scripts.harness.gate_diff import validate_generated_target
+
+    repo, base_sha = _repo(tmp_path)
+    _write_valid_generated_candidate(repo)
+    dockerfile = (
+        repo
+        / "Database"
+        / "kvrocks"
+        / "2.16.0"
+        / "24.03-lts-sp4"
+        / "Dockerfile"
+    )
+    dockerfile.write_text(
+        "FROM openeuler/openeuler:24.03-lts-sp4\n" + identity_text
+    )
+
+    report = validate_generated_target(
+        repo=repo,
+        task=_task(),
+        base_sha=base_sha,
+    )
+
+    assert report["delivery_allowed"] is True
 
 
 def test_contract_rejects_change_outside_task_scope(tmp_path):

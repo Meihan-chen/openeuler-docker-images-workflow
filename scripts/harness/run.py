@@ -1,7 +1,8 @@
 """Main orchestrator for the openEuler Docker image automation system.
 
 Invokes agent roles (defined under .github/agents/*.md) via opencode CLI.
-Each adversarial pair runs Creator -> QA -> Creator-fix (<=2 rounds) per DESIGN §4.3.
+Image generation has no QA review. Testcase generation uses the Creator ->
+QA1 -> Creator-fix -> QA2 review loop.
 
 Usage:
     python run.py adversarial-pair --role image|testcase
@@ -212,6 +213,8 @@ def _parse_json_output(output: str) -> dict:
 
 def _build_creator_prompt(role: str, *, round_num: int, qa_feedback: dict | None = None) -> str:
     """Build the Creator agent prompt for the given round."""
+    if role not in _CREATOR_REQUIRED_KEYS:
+        raise ValueError(f"unsupported Creator role: {role}")
     creator_name = f"{role}-creator"
     creator_md = _load_agent_prompt(creator_name)
     target = _target_dir()
@@ -225,22 +228,24 @@ def _build_creator_prompt(role: str, *, round_num: int, qa_feedback: dict | None
 
     if role == "image":
         instruction = (
-            f"Create the container image directory for {pkg} {app_ver} on openEuler {os_ver}.\n\n"
-            f"Parameters: package_name={pkg}, source_repo_url={src}, category={domain}, "
-            f"os_version={os_ver}, os_tag={os_tag}, app_version={app_ver}, "
-            f"image_repo_dir={target}\n\n"
-            f"Create ONLY: Dockerfile, meta.yml, README.md, doc/image-info.yml, "
-            f"doc/picture/logo.png, update image-list.yml, and write ai-result.json.\n"
+            f"Create the container image directory for {pkg} {app_ver} on "
+            f"openEuler {os_ver}.\n\n"
+            f"Parameters: package_name={pkg}, source_repo_url={src}, "
+            f"category={domain}, os_version={os_ver}, os_tag={os_tag}, "
+            f"app_version={app_ver}, image_repo_dir={target}\n\n"
+            "Create ONLY: Dockerfile, meta.yml, README.md, "
+            "doc/image-info.yml, doc/picture/logo.png, update "
+            "image-list.yml, and write ai-result.json.\n"
             f"Place files under {target}/{domain}/{pkg}/."
         )
     else:
         instruction = (
             f"Create functional test cases for {pkg} {app_ver}.\n"
-            f"Place tests under {target}/{domain}/{pkg}/tests/ (goss.yaml, goss_wait.yaml, "
-            f"test_helpers.sh, test.sh).\n"
-            f"Read the Dockerfile at {target}/{domain}/{pkg}/{app_ver}/{os_ver}/Dockerfile "
-            f"to determine binary name, ports, and version.\n"
-            f"Write test-ai-result.json with your self-assessment."
+            f"Place tests under {target}/{domain}/{pkg}/tests/ "
+            "(goss.yaml, goss_wait.yaml, test_helpers.sh, test.sh).\n"
+            f"Read the Dockerfile at {target}/{domain}/{pkg}/{app_ver}/"
+            f"{os_ver}/Dockerfile to determine binary name, ports, and "
+            "version.\nWrite test-ai-result.json with your self-assessment."
         )
 
     if round_num > 1 and qa_feedback:
@@ -262,6 +267,8 @@ def _build_qa_prompt(
     evidence_bundle: dict | None = None,
 ) -> str:
     """Build the QA reviewer prompt."""
+    if role != "testcase":
+        raise ValueError("only testcase has a QA prompt")
     qa_name = f"{role}-qa"
     qa_md = _load_agent_prompt(qa_name)
     target = _target_dir()
@@ -269,15 +276,16 @@ def _build_qa_prompt(
     domain = os.environ.get("DOMAIN", "")
     scenario = os.environ.get("SCENARIO", "new-image")
 
+    tests_root = f"{target}/{domain}/{pkg}/tests/"
     instruction = (
-        f"Review the files created by the {role} creator under "
-        f"{target}/{domain}/{pkg}/.\n"
+        f"Review only the files created by the testcase creator under "
+        f"{tests_root}.\n"
         f"Scenario: {scenario}. Apply the same evidence contract regardless "
         f"of whether this is new-image, version-update, or oe-upgrade.\n"
-        f"Read the actual files on disk (Dockerfile, meta.yml, README.md, "
-        f"doc/image-info.yml, image-list.yml, ai-result.json"
-        + (", tests/goss.yaml, tests/goss_wait.yaml, test-ai-result.json" if role == "testcase" else "")
-        + ").\n"
+        f"Read tests/goss.yaml, optional tests/goss_wait.yaml, optional "
+        f"tests/test_helpers.sh, tests/test.sh, and test-ai-result.json.\n"
+        f"The Dockerfile (read-only context) may explain the runtime contract, "
+        f"but image-only findings are out of scope and must not trigger repair.\n"
         f"Output your review as JSON per the schema in your instructions.\n"
         f"If no issues found, output {{\"status\": \"approved\", \"issues\": [], \"summary\": \"...\"}}.\n\n"
         "## Creator structured result\n"
@@ -356,12 +364,53 @@ def _write_qa_record(role: str, round_num: int, qa_result: dict, *, approved: bo
     print(f"[{role}] QA round {round_num} {'approved' if approved else 'needs_fix'} -> {out}")
 
 
+def _testcase_qa_issues(payload: dict) -> list[dict]:
+    root = (
+        os.environ.get("DOMAIN", ""),
+        os.environ.get("PACKAGE", os.environ.get("APP", "")),
+        "tests",
+    )
+    issues = []
+    for issue in payload.get("issues", []):
+        if not isinstance(issue, dict) or not isinstance(issue.get("file"), str):
+            continue
+        path = Path(issue["file"].replace("\\", "/"))
+        if (
+            not path.is_absolute()
+            and ".." not in path.parts
+            and path.parts[: len(root)] == root
+            and len(path.parts) > len(root)
+            and issue.get("description")
+            and issue.get("evidence")
+        ):
+            issues.append(issue)
+    return issues
+
+
 def _run_adversarial_pair(
     role: str,
     *,
     evidence_resolver=freeze_creator_evidence,
 ) -> None:
     """Run Creator <-> QA adversarial pair with up to MAX_QA_ROUNDS rounds."""
+    if role == "image":
+        scenario = os.environ.get("SCENARIO", "new-image")
+        if scenario != "new-image":
+            raise RuntimeError(
+                f"legacy image generation for {scenario} has not migrated"
+            )
+        target = _target_dir()
+        creator_out = _run_opencode(
+            _build_creator_prompt(role, round_num=1),
+            cwd=target,
+        )
+        validate_agent_payload(
+            _parse_json_output(creator_out),
+            required_keys=_CREATOR_REQUIRED_KEYS[role],
+        )
+        return
+    if role != "testcase":
+        raise ValueError(f"unsupported adversarial role: {role}")
     target = _target_dir()
     print(f"\n=== Adversarial pair: {role} (cwd={target}) ===")
 
@@ -391,6 +440,7 @@ def _run_adversarial_pair(
             cwd=target,
         )
         qa_result = _parse_json_output(qa_out)
+        qa_result["issues"] = _testcase_qa_issues(qa_result)
         approved = qa_result.get("status") == "approved"
         evidence_only = (
             qa_result.get("status") == "needs_fix"

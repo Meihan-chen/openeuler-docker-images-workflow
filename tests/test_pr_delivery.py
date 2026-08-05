@@ -80,15 +80,6 @@ def _candidate(
         json.dumps({"status": "passed", "delivery_allowed": True})
     )
     (root / "reports" / "hadolint.txt").write_text(hadolint_output)
-    (root / "reports" / "agents" / "image-qa-round1.json").write_text(
-        json.dumps(
-            {
-                "status": "approved",
-                "issues": [],
-                "summary": "Image metadata and runtime contract are consistent.",
-            }
-        )
-    )
     if testcase_repaired or testcase_qa_status == "needs_fix":
         (root / "reports" / "agents" / "testcase-qa-round1.json").write_text(
             json.dumps(
@@ -247,7 +238,7 @@ def test_pr_content_contains_candidate_and_dual_architecture_evidence(tmp_path):
     assert bundle.manifest.content_sha256 in content.body
     assert "validated run `123456`" in content.body
     assert "Final result: `approved` after 1 round." in content.body
-    assert "Image metadata and runtime contract are consistent." in content.body
+    assert "### Image review" not in content.body
     assert "Result evidence: `results.json`, `version_info.json`" in content.body
     assert "https://github.com/apache/kvrocks/tree/v2.16.0" in content.body
     assert "### Confidence Score" in content.body
@@ -339,12 +330,28 @@ def test_pr_content_reports_hadolint_findings_as_advisory(tmp_path):
     assert "`0.94` (`auto-merge`)" in content.body
 
 
-@pytest.mark.parametrize("prefix", ("image-qa", "testcase-qa"))
-def test_pr_content_rejects_missing_adversarial_qa_evidence(tmp_path, prefix):
+def test_pr_content_does_not_require_image_qa_evidence(tmp_path):
+    from scripts.harness.compose_pr import compose_pull_request
+
+    bundle = _candidate(tmp_path)
+    for path in (bundle.root / "reports" / "agents").glob(
+        "image-qa-round*.json"
+    ):
+        path.unlink()
+
+    content = compose_pull_request(bundle)
+
+    assert "### Image review" not in content.body
+    assert "### Testcase review" in content.body
+
+
+def test_pr_content_rejects_missing_testcase_qa_evidence(tmp_path):
     from scripts.harness.compose_pr import PRDeliveryError, compose_pull_request
 
     bundle = _candidate(tmp_path)
-    for path in (bundle.root / "reports" / "agents").glob(f"{prefix}-round*.json"):
+    for path in (bundle.root / "reports" / "agents").glob(
+        "testcase-qa-round*.json"
+    ):
         path.unlink()
 
     with pytest.raises(PRDeliveryError, match="QA evidence is required"):
@@ -366,7 +373,7 @@ def test_pr_content_accepts_normalized_non_actionable_qa_warning(tmp_path):
 
     bundle = _candidate(tmp_path)
     report_path = (
-        bundle.root / "reports" / "agents" / "image-qa-round1.json"
+        bundle.root / "reports" / "agents" / "testcase-qa-round1.json"
     )
     report_path.write_text(
         json.dumps(
@@ -401,7 +408,7 @@ def test_pr_content_discloses_partial_qa_snapshot(tmp_path):
 
     bundle = _candidate(tmp_path)
     report_path = (
-        bundle.root / "reports" / "agents" / "image-qa-round1.json"
+        bundle.root / "reports" / "agents" / "testcase-qa-round1.json"
     )
     report = json.loads(report_path.read_text())
     report["harness"] = {
@@ -467,8 +474,7 @@ def test_pr_content_records_non_blocking_qa_disagreement(tmp_path):
 
     content = compose_pull_request(bundle)
 
-    assert "### Image review" in content.body
-    assert "Final result: `approved` after 1 round." in content.body
+    assert "### Image review" not in content.body
     assert "### Testcase review" in content.body
     assert "Final result: `needs_fix` after 2 rounds." in content.body
     assert "`major` — coverage gap" in content.body

@@ -1,4 +1,4 @@
-"""Adversarial Agent generation stage followed by deterministic target gates."""
+"""Agent generation stage followed by testcase review and target gates."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import hashlib
 import json
 import subprocess
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Callable, Mapping, Sequence
 
 import yaml
@@ -42,7 +42,6 @@ _KNOWLEDGE_PATH = (
 )
 _PROMPT_FILES = {
     "image_creator": "image-creator.md",
-    "image_qa": "image-qa.md",
     "testcase_creator": "testcase-creator.md",
     "testcase_qa": "testcase-qa.md",
     "fixer": "code-fixer.md",
@@ -53,7 +52,6 @@ _REQUIRED_KEYS = {
         "files_created",
         "identity_decision",
     ),
-    "image_qa": ("status", "issues", "summary"),
     "testcase_creator": (
         "success",
         "files_created",
@@ -64,14 +62,13 @@ _REQUIRED_KEYS = {
 }
 _RUNTIME_REQUIRED_KEYS = {
     "image_creator": ("success", "files_created"),
-    "image_qa": ("issues", "summary"),
     "testcase_creator": ("success", "files_created"),
     "testcase_qa": ("issues", "summary"),
     "fixer": ("success", "changes"),
 }
-# QA receives a bounded candidate snapshot and Harness-fixed source material.
+# Testcase QA receives a bounded snapshot and Harness-fixed source material.
 # Evidence fetching has its own wall-clock budget and completes before this timeout.
-_QA_ROLES = {"image_qa", "testcase_qa"}
+_QA_ROLES = {"testcase_qa"}
 _QA_TIMEOUT_SECONDS = 1200
 _DEFAULT_AGENT_TIMEOUT_SECONDS = 3600
 _QA_SNAPSHOT_MAX_CHARS = 64_000
@@ -528,33 +525,24 @@ def _qa_prompt(
 ) -> str | tuple[str, Mapping[str, object]]:
     app_root = workspace / task.domain / task.app
     image_root = app_root / task.version / task.os_version
-    if role == "image_qa":
-        tests_root = app_root / "tests"
-        paths = [
-            path
-            for path in _candidate_paths(
-                workspace=workspace,
-                task=task,
+    if role != "testcase_qa":
+        raise GenerationPipelineError(f"unsupported QA role: {role}")
+    tests_root = app_root / "tests"
+    paths = [
+        image_root / "Dockerfile",
+        tests_root / "goss.yaml",
+        tests_root / "goss_wait.yaml",
+        tests_root / "test_helpers.sh",
+        tests_root / "test.sh",
+    ]
+    if tests_root.is_dir():
+        paths.extend(
+            sorted(
+                path
+                for path in tests_root.rglob("*")
+                if path.is_file() and path not in paths
             )
-            if tests_root not in path.parents
-        ]
-    else:
-        tests_root = app_root / "tests"
-        paths = [
-            image_root / "Dockerfile",
-            tests_root / "goss.yaml",
-            tests_root / "goss_wait.yaml",
-            tests_root / "test_helpers.sh",
-            tests_root / "test.sh",
-        ]
-        if tests_root.is_dir():
-            paths.extend(
-                sorted(
-                    path
-                    for path in tests_root.rglob("*")
-                    if path.is_file() and path not in paths
-                )
-            )
+        )
 
     previous_findings = ""
     if previous_review is not None:
@@ -573,27 +561,7 @@ def _qa_prompt(
             + "\n```\n"
         )
     creator_evidence = ""
-    if role == "image_qa" and isinstance(creator_payload, Mapping):
-        decision = creator_payload.get("identity_decision")
-        if isinstance(decision, Mapping):
-            creator_evidence = (
-                "\n## Image Creator identity decision\n\n"
-                "The JSON below is the latest complete Creator result. "
-                "Review its structured identity decision against the Dockerfile and "
-                "the source material fixed by the Harness. Creator evidence "
-                "is a claim to review, not a trusted result. Native build "
-                "remains authoritative for whether identity creation "
-                "actually succeeds.\n\n"
-                "```json\n"
-                + json.dumps(
-                    creator_result_for_qa(creator_payload),
-                    ensure_ascii=False,
-                    indent=2,
-                    sort_keys=True,
-                )
-                + "\n```\n"
-            )
-    if role == "testcase_qa" and isinstance(creator_payload, Mapping):
+    if isinstance(creator_payload, Mapping):
         entries = creator_payload.get("command_evidence")
         if isinstance(entries, list):
             creator_evidence = (
@@ -701,6 +669,7 @@ def _normalize_qa_payload(
     *,
     require_coverage: bool,
     snapshot: Mapping[str, object],
+    issue_root: str | None = None,
 ) -> dict[str, object]:
     """Map QA outcome mistakes onto existing orchestration without an Agent call."""
     normalized = dict(payload)
@@ -714,13 +683,33 @@ def _normalize_qa_payload(
     harness: dict[str, object] = {"snapshot": dict(snapshot)}
     warnings: list[dict[str, object]] = []
     raw_issues = normalized.get("issues")
-    actionable_issues = [
-        dict(issue)
-        for issue in raw_issues
-        if isinstance(issue, Mapping)
-        and isinstance(issue.get("description"), str)
-        and bool(issue["description"].strip())
-    ] if isinstance(raw_issues, list) else []
+
+    def actionable(issue: object) -> bool:
+        if not isinstance(issue, Mapping):
+            return False
+        description = issue.get("description")
+        if not isinstance(description, str) or not description.strip():
+            return False
+        if issue_root is None:
+            return True
+        file = issue.get("file")
+        evidence = issue.get("evidence")
+        if not isinstance(file, str) or not file.strip() or not evidence:
+            return False
+        path = PurePosixPath(file.replace("\\", "/"))
+        root = PurePosixPath(issue_root)
+        return (
+            not path.is_absolute()
+            and ".." not in path.parts
+            and path.parts[: len(root.parts)] == root.parts
+            and len(path.parts) > len(root.parts)
+        )
+
+    actionable_issues = (
+        [dict(issue) for issue in raw_issues if actionable(issue)]
+        if isinstance(raw_issues, list)
+        else []
+    )
     normalized["issues"] = actionable_issues
     if isinstance(raw_issues, list) and len(actionable_issues) != len(raw_issues):
         warnings.append(
@@ -729,8 +718,8 @@ def _normalize_qa_payload(
                 "reported": len(raw_issues),
                 "effective": len(actionable_issues),
                 "message": (
-                    "Malformed QA issues were ignored; only object entries "
-                    "with a non-empty description can trigger Creator repair."
+                    "Out-of-scope or malformed QA issues were ignored; only "
+                    "actionable test-file issues can trigger Creator repair."
                 ),
             }
         )
@@ -788,11 +777,13 @@ def _normalize_and_log_qa_result(
     payload: Mapping[str, object],
     api_key: str,
     snapshot: Mapping[str, object],
+    issue_root: str | None = None,
 ) -> Mapping[str, object]:
     normalized = _normalize_qa_payload(
         payload,
         require_coverage=qa_role == "testcase_qa",
         snapshot=snapshot,
+        issue_root=issue_root,
     )
     harness = normalized.get("harness", {})
     warnings = (
@@ -1029,6 +1020,7 @@ def _review_pair(
         payload=review.payload,
         api_key=api_key,
         snapshot=first_snapshot,
+        issue_root=f"{task.domain}/{task.app}/tests",
     )
     _write_report(report_dir, f"{qa_role.replace('_', '-')}-round1.json", review_payload, api_key)
     _log_review_result(
@@ -1116,6 +1108,7 @@ def _review_pair(
         payload=second.payload,
         api_key=api_key,
         snapshot=second_snapshot,
+        issue_root=f"{task.domain}/{task.app}/tests",
     )
     _write_report(
         report_dir,
@@ -1477,47 +1470,8 @@ def run_generation_pipeline(
             stage="image_lint_repair",
         )
 
-    def recheck_image_repair(payload: Mapping[str, object]) -> None:
-        enforce_gate(
-            phase="image",
-            report_name="image-repair-gates.json",
-            stage="image_repair_precheck",
-            failure_message=(
-                "deterministic image repair precheck did not pass"
-            ),
-            creator_payloads={"image_creator": payload},
-        )
-        lint_image(
-            report_name="image-repair-lint.json",
-            stage="image_repair_lint",
-        )
-
-    image_review = _review_pair(
-        creator_role="image_creator",
-        qa_role="image_qa",
-        agent_runner=agent_runner,
-        executable=executable,
-        workspace=workspace,
-        report_dir=report_dir,
-        task=task,
-        base_sha=base_sha,
-        api_key=api_key,
-        post_repair_check=recheck_image_repair,
-        creator_payload=latest_image_payload,
-        resolve_evidence=lambda payload, round_number: resolve_creator_evidence(
-            "image",
-            payload,
-            round_number,
-        ),
-    )
-    if image_review.creator_payload is not None:
-        latest_image_payload = image_review.creator_payload
-    fix_rounds = image_review.fix_rounds
-    disagreements = [
-        item
-        for item in (image_review.disagreement,)
-        if item is not None
-    ]
+    fix_rounds = 0
+    disagreements: list[Mapping[str, object]] = []
     frozen_image = image_owned_snapshot()
 
     def enforce_testcase_ownership(
@@ -1738,13 +1692,13 @@ def write_smoke_candidate(
         "https://github.com/apache/kvrocks.git . && ./x.py build -j 4\n"
         "FROM ${BASE}\n"
         "RUN dnf install -y redis && dnf clean all\n"
-        "RUN groupadd --non-unique --gid 999 kvrocks && "
-        "useradd --non-unique --uid 999 --gid kvrocks kvrocks && "
+        "RUN groupadd -r kvrocks && "
+        "useradd -r -g kvrocks kvrocks && "
         "mkdir -p /var/lib/kvrocks && "
-        "chown -R 999:999 /var/lib/kvrocks\n"
+        "chown -R kvrocks:kvrocks /var/lib/kvrocks\n"
         "COPY --from=builder /src/kvrocks/build/kvrocks "
         "/usr/local/bin/kvrocks\n"
-        "USER 999\n"
+        "USER kvrocks\n"
         "EXPOSE 6666\n"
         "HEALTHCHECK CMD redis-cli -p 6666 PING | grep PONG\n"
         'ENTRYPOINT ["kvrocks", "--bind", "0.0.0.0"]\n'
@@ -1778,7 +1732,7 @@ def write_smoke_candidate(
         ': "${EXPECTED_VERSION:?}"\n'
         'kvrocks --version | grep -F "${EXPECTED_VERSION}"\n'
         "redis-cli -p 6666 PING | grep -F PONG\n"
-        'test "$(id -u)" = 999\n'
+        'test "$(id -u)" != 0\n'
     )
     for script in (helpers, shared):
         script.chmod(0o755)

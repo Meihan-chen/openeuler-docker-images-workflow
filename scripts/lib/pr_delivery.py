@@ -643,7 +643,6 @@ def compose_pull_request(bundle: CandidateBundle) -> PullRequestContent:
         raise PRDeliveryError("deterministic target gates did not pass")
     if gates.get("delivery_allowed") is not True:
         raise PRDeliveryError("deterministic delivery contract did not pass")
-    image_review = _qa_review_lines(bundle.root, "image-qa", "Image")
     testcase_review = _qa_review_lines(
         bundle.root,
         "testcase-qa",
@@ -708,7 +707,6 @@ def compose_pull_request(bundle: CandidateBundle) -> PullRequestContent:
             "",
             "## Adversarial review",
             "",
-            *image_review,
             *testcase_review,
             *fixer_process,
             "## Repository checks",
