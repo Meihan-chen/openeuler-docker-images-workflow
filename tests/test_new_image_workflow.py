@@ -10,9 +10,8 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_PATH = ROOT / ".github" / "workflows" / "new-image.yml"
 WATCH_PATH = ROOT / ".github" / "workflows" / "watch-issues.yml"
 ROUND_PATH = ROOT / ".github" / "workflows" / "phase1-round.yml"
-DECIDE_PATH = ROOT / ".github" / "workflows" / "phase1-decide.yml"
 ROUNDS = ("round1", "round2", "round3", "round4")
-DECISIONS = ("decide1", "decide2", "decide3", "decide4")
+ARCHITECTURE_JOBS = ("x86_64", "aarch64")
 ACTIONLINT_CONFIG = ROOT / ".github" / "actionlint.yaml"
 ACTIONS_DIR = ROOT / ".github" / "actions"
 PHASE1_ACTIONS = (
@@ -140,7 +139,7 @@ def test_existing_as_new_context_reaches_generation_and_every_fixer():
         prepare_by_name["Generate and review candidate content"]
     )
 
-    for name in DECISIONS:
+    for name in ROUNDS:
         call = jobs[name]["with"]
         assert "existing_as_new_probe" in call["canonical_app"]
         assert "inputs.app" in call["canonical_app"]
@@ -148,11 +147,11 @@ def test_existing_as_new_context_reaches_generation_and_every_fixer():
         assert "inputs.app" in call["target_alias"]
         assert "e2e-test" in call["target_alias"]
 
-    decide = _workflow(DECIDE_PATH)
-    call_inputs = _trigger(decide)["workflow_call"]["inputs"]
+    round_workflow = _workflow(ROUND_PATH)
+    call_inputs = _trigger(round_workflow)["workflow_call"]["inputs"]
     assert call_inputs["canonical_app"]["required"] is False
     assert call_inputs["target_alias"]["required"] is False
-    decide_steps = decide["jobs"]["decide"]["steps"]
+    decide_steps = round_workflow["jobs"]["decide"]["steps"]
     decide_by_name = {step["name"]: step for step in decide_steps}
     fixer_context = decide_by_name["Apply existing-as-new semantic context"]
     assert fixer_context["uses"] == context["uses"]
@@ -313,10 +312,10 @@ def test_scenario_one_runs_full_validation_chain_and_delivers_same_run():
     jobs = _workflow()["jobs"]
 
     assert "scenario_one" in jobs["prepare"]["if"]
-    # A converged output is not enough: the decision job must have completed
-    # successfully, including publishing its evidence.
+    # A converged output is not enough: the combined round must have completed
+    # successfully, including publishing its decision evidence.
     package_condition = jobs["package_candidate"]["if"]
-    for name in DECISIONS:
+    for name in ROUNDS:
         assert f"needs.{name}.result == 'success'" in package_condition
         assert f"needs.{name}.outputs.converged == 'true'" in package_condition
 
@@ -344,24 +343,23 @@ def test_scenario_one_runs_full_validation_chain_and_delivers_same_run():
     assert jobs["round1"]["with"]["operation"] == "${{ inputs.operation }}"
 
 
-def test_validation_rounds_use_functional_display_names():
+def test_validation_rounds_group_build_test_and_fix_jobs():
     jobs = _workflow()["jobs"]
 
     for index, job_id in enumerate(ROUNDS, start=1):
-        assert jobs[job_id]["name"] == f"Build & Test {index}"
-    for index, job_id in enumerate(DECISIONS, start=1):
-        assert jobs[job_id]["name"] == f"Evaluate & Fix {index}"
+        assert jobs[job_id]["name"] == f"Build & Test & Fix {index}"
 
     round_workflow = _workflow(ROUND_PATH)
-    assert round_workflow["name"] == "Phase 1 - Build and test candidate"
+    assert round_workflow["name"] == "Phase 1 - Build, test and fix candidate"
+    assert set(round_workflow["jobs"]) == {"x86_64", "aarch64", "decide"}
     assert round_workflow["jobs"]["x86_64"]["name"] == "x86_64"
     assert round_workflow["jobs"]["aarch64"]["name"] == "aarch64"
-
-    decide_workflow = _workflow(DECIDE_PATH)
-    assert decide_workflow["name"] == "Phase 1 - Evaluate and fix candidate"
-    assert decide_workflow["jobs"]["decide"]["name"] == (
+    decide = round_workflow["jobs"]["decide"]
+    assert decide["name"] == (
         "Evaluate results and fix if needed"
     )
+    assert decide["needs"] == ["x86_64", "aarch64"]
+    assert "always()" in decide["if"]
 
 
 def test_issue_trigger_reuses_scenario_one_and_finalizes_the_source_issue():
@@ -386,7 +384,7 @@ def test_issue_trigger_reuses_scenario_one_and_finalizes_the_source_issue():
     assert '${SOURCE_ISSUE#issue:}' in text
     assert "needs.deliver_fork_pr.outputs.pr_url" in text
     assert "GITCODE_TOKEN" in text
-    for name in DECISIONS:
+    for name in ROUNDS:
         assert f"needs.{name}.result == 'success'" in text
         assert f"needs.{name}.outputs.terminal_status" in text
     assert "needs-human-review" in text
@@ -406,7 +404,7 @@ def test_issue_trigger_reuses_scenario_one_and_finalizes_the_source_issue():
 
 
 def test_repair_budget_terminal_is_preserved_without_emitting_round_five():
-    workflow = _workflow(DECIDE_PATH)
+    workflow = _workflow(ROUND_PATH)
     call = _trigger(workflow)["workflow_call"]
     job = workflow["jobs"]["decide"]
     steps = {step["name"]: step for step in job["steps"]}
@@ -465,7 +463,7 @@ def test_repair_budget_terminal_is_preserved_without_emitting_round_five():
 
 
 def test_round_decision_artifact_is_strict_and_merge_safe():
-    workflow = _workflow(DECIDE_PATH)
+    workflow = _workflow(ROUND_PATH)
     steps = {
         step["name"]: step
         for step in workflow["jobs"]["decide"]["steps"]
@@ -568,14 +566,14 @@ def test_native_jobs_use_exact_self_hosted_labels_and_no_emulation_actions():
         "ARM64",
         "oe-image-arm64",
     ]
-    assert _workflow(DECIDE_PATH)["jobs"]["decide"]["runs-on"] == [
+    assert round_jobs["decide"]["runs-on"] == [
         "self-hosted",
         "Linux",
         "X64",
         "oe-image-x86",
     ]
 
-    for path in (WORKFLOW_PATH, ROUND_PATH, DECIDE_PATH):
+    for path in (WORKFLOW_PATH, ROUND_PATH):
         text = path.read_text()
         assert "docker/setup-qemu-action" not in text
         assert "docker/setup-buildx-action" not in text
@@ -584,35 +582,44 @@ def test_native_jobs_use_exact_self_hosted_labels_and_no_emulation_actions():
 
 def test_every_round_validates_one_candidate_on_both_architectures():
     jobs = _workflow()["jobs"]
+    round_workflow = _workflow(ROUND_PATH)
 
     assert jobs["round1"]["needs"] == ["prepare", "seed_resume"]
     for index, name in enumerate(ROUNDS):
-        assert jobs[name]["uses"] == "./.github/workflows/phase1-round.yml"
-        assert jobs[name]["with"]["round"] == str(index + 1)
-    for index, name in enumerate(DECISIONS):
-        decision = jobs[name]
-        assert decision["uses"] == "./.github/workflows/phase1-decide.yml"
-        assert decision["needs"] == ROUNDS[index]
-        assert decision["with"]["round"] == str(index + 1)
+        round_call = jobs[name]
+        assert round_call["uses"] == "./.github/workflows/phase1-round.yml"
+        assert round_call["with"]["round"] == str(index + 1)
         # pipeline_smoke converges deterministically; giving it a repair
         # budget would burn model calls the Fixer cannot possibly help with,
         # because the smoke image is built from a synthetic context.
-        assert decision["with"]["max_rounds"] == (
+        assert round_call["with"]["max_rounds"] == (
             "${{ inputs.operation == 'pipeline_smoke' && '0' || '3' }}"
         )
         # GitHub expressions have no arithmetic, so the next round is explicit.
-        assert decision["with"]["next_round"] == str(index + 2)
+        assert round_call["with"]["next_round"] == str(index + 2)
+
+    decide = round_workflow["jobs"]["decide"]
+    assert decide["needs"] == ["x86_64", "aarch64"]
+    assert "always()" in decide["if"]
+    call_outputs = _trigger(round_workflow)["workflow_call"]["outputs"]
+    assert call_outputs["converged"]["value"] == (
+        "${{ jobs.decide.outputs.converged }}"
+    )
+    assert call_outputs["terminal_status"]["value"] == (
+        "${{ jobs.decide.outputs.terminal_status }}"
+    )
 
     # A later round exists only because the previous one did not converge.
     for index, name in enumerate(ROUNDS[1:]):
+        assert jobs[name]["needs"] == [ROUNDS[index], "seed_resume"]
         condition = jobs[name]["if"]
-        assert f"needs.{DECISIONS[index]}.result == 'success'" in condition
+        assert f"needs.{ROUNDS[index]}.result == 'success'" in condition
         assert (
-            f"needs.{DECISIONS[index]}.outputs.converged != 'true'"
+            f"needs.{ROUNDS[index]}.outputs.converged != 'true'"
             in condition
         )
         assert (
-            f"needs.{DECISIONS[index]}.outputs.terminal_status == ''"
+            f"needs.{ROUNDS[index]}.outputs.terminal_status == ''"
             in condition
         )
 
@@ -669,6 +676,47 @@ def test_resume_restarts_one_round_from_another_run_of_the_same_pipeline():
     assert '"mode":"%s"' in WORKFLOW_PATH.read_text()
 
 
+def test_resume_republishes_decisions_before_the_restarted_round():
+    steps = {
+        step["name"]: step
+        for step in _workflow()["jobs"]["seed_resume"]["steps"]
+    }
+    cases = (
+        (1, "inputs.resume_from_round != '1'"),
+        (
+            2,
+            "inputs.resume_from_round == '3' || inputs.resume_from_round == '4'",
+        ),
+        (3, "inputs.resume_from_round == '4'"),
+    )
+
+    for round_number, condition in cases:
+        download = steps[
+            f"Download source round {round_number} decision evidence"
+        ]
+        marker = steps[
+            f"Record missing source round {round_number} decision evidence"
+        ]
+        upload = steps[
+            f"Republish round {round_number} decision evidence under this run"
+        ]
+        assert condition in download["if"]
+        assert download["id"] == f"source_decision{round_number}"
+        assert download["continue-on-error"] is True
+        assert marker["if"] == download["if"]
+        assert f"steps.source_decision{round_number}.outcome" in marker["run"]
+        assert f"missing-source-decision-round{round_number}.json" in marker["run"]
+        assert "inputs.source_run_id" in marker["run"]
+        assert upload["if"] == download["if"]
+        assert download["with"]["name"] == (
+            f"phase1-decide{round_number}-${{{{ inputs.source_run_id }}}}"
+        )
+        assert download["with"]["run-id"] == "${{ inputs.source_run_id }}"
+        assert upload["with"]["name"] == (
+            f"phase1-decide{round_number}-${{{{ github.run_id }}}}"
+        )
+
+
 def test_artifact_producers_cover_each_package_input_mode():
     jobs = _workflow()["jobs"]
     prepare_text = _job_text(jobs["prepare"])
@@ -711,20 +759,17 @@ def test_round_artifact_producers_and_consumers_use_the_same_templates():
 
     round_uploads = artifact_names(ROUND_PATH, "upload-artifact")
     round_downloads = artifact_names(ROUND_PATH, "download-artifact")
-    decide_uploads = artifact_names(DECIDE_PATH, "upload-artifact")
-    decide_downloads = artifact_names(DECIDE_PATH, "download-artifact")
     main_uploads = artifact_names(WORKFLOW_PATH, "upload-artifact")
 
     assert {
         "phase1-round${{ inputs.round }}-x86_64-${{ github.run_id }}",
         "phase1-round${{ inputs.round }}-aarch64-${{ github.run_id }}",
-    }.issubset(round_uploads & decide_downloads)
+    }.issubset(round_uploads & round_downloads)
     current_patch = "phase1-patch${{ inputs.round }}-${{ github.run_id }}"
     assert current_patch in round_downloads
-    assert current_patch in decide_downloads
     assert (
         "phase1-patch${{ inputs.next_round }}-${{ github.run_id }}"
-        in decide_uploads
+        in round_uploads
     )
 
     jobs = _workflow()["jobs"]
@@ -735,7 +780,7 @@ def test_round_artifact_producers_and_consumers_use_the_same_templates():
     assert "phase1-patch1-${{ github.run_id }}" in prepare
     assert "phase1-patch${{ inputs.resume_from_round }}-${{" in seed
     assert "phase1-converged-${{" in package
-    assert "phase1-converged-${{ github.run_id }}" in decide_uploads
+    assert "phase1-converged-${{ github.run_id }}" in round_uploads
     assert "phase1-candidate-${{" in delivery
     assert (
         "phase1-${{ inputs.operation == 'pipeline_smoke' && 'smoke-' || '' }}"
@@ -830,7 +875,7 @@ def test_validate_only_jobs_have_no_gitcode_credential_or_write_command():
         assert "GITCODE_TOKEN" not in text
         assert "fork-deliver" not in text
         assert "issue-contract-test" not in text
-    for path in (ROUND_PATH, DECIDE_PATH):
+    for path in (ROUND_PATH,):
         text = path.read_text()
         assert "GITCODE_TOKEN" not in text
         assert "fork-deliver" not in text
@@ -848,29 +893,35 @@ def test_validate_only_jobs_have_no_gitcode_credential_or_write_command():
 
 def test_only_the_decision_stage_receives_a_model_key():
     jobs = _workflow()["jobs"]
+    round_workflow = _workflow(ROUND_PATH)
+    expected = (
+        "${{ inputs.operation != 'pipeline_smoke' && "
+        "secrets.DEEPSEEK_API_KEY || '' }}"
+    )
 
-    # Rounds only build and test, so handing them a key would widen the blast
-    # radius for nothing; secrets: inherit would do exactly that.
-    assert "secrets" not in jobs["round1"]
-    assert ROUND_PATH.read_text().count("DEEPSEEK_API_KEY") == 0
-    for name in DECISIONS:
+    for name in ROUNDS:
         key = jobs[name]["secrets"]["DEEPSEEK_API_KEY"]
-        assert "secrets.DEEPSEEK_API_KEY" in key
-        # The smoke path must reach the decision stage with no key at all.
-        assert "pipeline_smoke" in key
+        # Empty strings are falsy in GitHub expressions, so the safe form must
+        # test the non-smoke branch before selecting the secret.
+        assert key == expected
+    call = _trigger(round_workflow)["workflow_call"]
+    assert call["secrets"]["DEEPSEEK_API_KEY"]["required"] is False
+    for name in ARCHITECTURE_JOBS:
+        assert "DEEPSEEK_API_KEY" not in _job_text(round_workflow["jobs"][name])
+    assert "DEEPSEEK_API_KEY" in _job_text(round_workflow["jobs"]["decide"])
     assert "inherit" not in WORKFLOW_PATH.read_text()
 
 
 def test_the_smoke_path_can_never_reach_the_fixer():
     jobs = _workflow()["jobs"]
 
-    for name in DECISIONS:
+    for name in ROUNDS:
         assert "pipeline_smoke" in jobs[name]["with"]["max_rounds"]
         assert "'0'" in jobs[name]["with"]["max_rounds"]
     # A zero budget makes a smoke regression fail before it ever builds a
     # prompt, so pipeline_smoke cannot go green via a business terminal state.
-    decide_call = _trigger(_workflow(DECIDE_PATH))["workflow_call"]
-    assert decide_call["secrets"]["DEEPSEEK_API_KEY"]["required"] is False
+    round_call = _trigger(_workflow(ROUND_PATH))["workflow_call"]
+    assert round_call["secrets"]["DEEPSEEK_API_KEY"]["required"] is False
 
 
 def test_fork_pr_reuses_named_artifact_from_exact_validated_run():
@@ -972,7 +1023,7 @@ def test_each_architecture_hands_its_run_builder_back_exactly_once():
         assert "GITCODE_TOKEN" not in text
 
     assert workflow_text.count("phase1-native-release") == 2
-    for path in (WORKFLOW_PATH, ROUND_PATH, DECIDE_PATH):
+    for path in (WORKFLOW_PATH, ROUND_PATH):
         assert "docker buildx rm" not in path.read_text()
 
 
@@ -999,16 +1050,12 @@ def test_jobs_and_run_have_readable_display_names():
     assert "inputs.operation" in data["run-name"]
     assert "inputs.app" in data["run-name"]
     expected = {
-        "prepare": "Generate candidate on x86_64",
+        "prepare": "Generate candidate",
         "seed_resume": "Seed resumed round candidate",
-        "round1": "Build & Test 1",
-        "decide1": "Evaluate & Fix 1",
-        "round2": "Build & Test 2",
-        "decide2": "Evaluate & Fix 2",
-        "round3": "Build & Test 3",
-        "decide3": "Evaluate & Fix 3",
-        "round4": "Build & Test 4",
-        "decide4": "Evaluate & Fix 4",
+        "round1": "Build & Test & Fix 1",
+        "round2": "Build & Test & Fix 2",
+        "round3": "Build & Test & Fix 3",
+        "round4": "Build & Test & Fix 4",
         "package_candidate": "Verify and seal validated candidate",
         "release_x86_builders": "Release x86_64 run builders",
         "release_arm_builders": "Release aarch64 run builders",
@@ -1033,10 +1080,11 @@ def test_pipeline_smoke_reuses_candidate_chain_without_ai_or_gitcode_steps():
     assert "phase1-smoke-generate" in smoke_generate["run"]
     assert "DEEPSEEK_API_KEY" not in _job_text(smoke_generate)
 
-    # The smoke candidate always passes, so decide1 converges and rounds 2-4
+    # The smoke candidate always passes, so round1 converges and rounds 2-4
     # skip themselves; the same round jobs serve both paths.
     round_jobs = _workflow(ROUND_PATH)["jobs"]
-    for job in round_jobs.values():
+    for name in ARCHITECTURE_JOBS:
+        job = round_jobs[name]
         smoke_steps = [
             step
             for step in job["steps"]
@@ -1214,10 +1262,11 @@ def test_every_native_job_delegates_setup_and_keeps_checkout_in_the_job():
         assert setup["with"]["arch"] == arch
         assert setup["with"].get("preflight", "false") == str(preflight).lower()
 
-    for job in _workflow(ROUND_PATH)["jobs"].values():
-        setup = _delegated_setup_step(job)
+    round_jobs = _workflow(ROUND_PATH)["jobs"]
+    for name in ARCHITECTURE_JOBS:
+        setup = _delegated_setup_step(round_jobs[name])
         assert setup["with"]["preflight"] == "true"
-    decide_setup = _delegated_setup_step(_workflow(DECIDE_PATH)["jobs"]["decide"])
+    decide_setup = _delegated_setup_step(round_jobs["decide"])
     assert decide_setup["with"]["arch"] == "x86_64"
 
     for name in ("deliver_fork_pr", "issue_contract_test"):
@@ -1236,7 +1285,7 @@ def test_replay_action_always_pins_the_exact_validated_base_sha():
 
     replays = [
         step
-        for path in (WORKFLOW_PATH, ROUND_PATH, DECIDE_PATH)
+        for path in (WORKFLOW_PATH, ROUND_PATH)
         for job in _workflow(path)["jobs"].values()
         for step in job.get("steps", [])
         if step.get("uses") == "./.github/actions/phase1-replay"

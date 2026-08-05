@@ -78,7 +78,7 @@ env:
 
 jobs:
   prepare:
-    name: Generate candidate on x86_64
+    name: Generate candidate
     if: >-
       ${{ inputs.operation == 'pipeline_smoke' ||
           inputs.operation == 'validate_only' ||
@@ -366,8 +366,107 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      - name: Download source round 1 decision evidence
+        id: source_decision1
+        if: ${{ inputs.resume_from_round != '1' }}
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: phase1-decide1-${{ inputs.source_run_id }}
+          path: ${{ runner.temp }}/phase1-seed-decisions/round1
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.source_run_id }}
+
+      - name: Record missing source round 1 decision evidence
+        if: ${{ inputs.resume_from_round != '1' }}
+        run: |
+          if [ "${{ steps.source_decision1.outcome }}" != "success" ]; then
+            mkdir -p "${RUNNER_TEMP}/phase1-seed-decisions/round1"
+            printf \
+              '{"schema_version":1,"kind":"missing-source-decision","round":1,"source_run_id":"%s"}\n' \
+              "${{ inputs.source_run_id }}" \
+              > "${RUNNER_TEMP}/phase1-seed-decisions/round1/missing-source-decision-round1.json"
+          fi
+
+      - name: Republish round 1 decision evidence under this run
+        if: ${{ inputs.resume_from_round != '1' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: phase1-decide1-${{ github.run_id }}
+          path: ${{ runner.temp }}/phase1-seed-decisions/round1/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Download source round 2 decision evidence
+        id: source_decision2
+        if: >-
+          ${{ inputs.resume_from_round == '3' || inputs.resume_from_round == '4' }}
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: phase1-decide2-${{ inputs.source_run_id }}
+          path: ${{ runner.temp }}/phase1-seed-decisions/round2
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.source_run_id }}
+
+      - name: Record missing source round 2 decision evidence
+        if: >-
+          ${{ inputs.resume_from_round == '3' || inputs.resume_from_round == '4' }}
+        run: |
+          if [ "${{ steps.source_decision2.outcome }}" != "success" ]; then
+            mkdir -p "${RUNNER_TEMP}/phase1-seed-decisions/round2"
+            printf \
+              '{"schema_version":1,"kind":"missing-source-decision","round":2,"source_run_id":"%s"}\n' \
+              "${{ inputs.source_run_id }}" \
+              > "${RUNNER_TEMP}/phase1-seed-decisions/round2/missing-source-decision-round2.json"
+          fi
+
+      - name: Republish round 2 decision evidence under this run
+        if: >-
+          ${{ inputs.resume_from_round == '3' || inputs.resume_from_round == '4' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: phase1-decide2-${{ github.run_id }}
+          path: ${{ runner.temp }}/phase1-seed-decisions/round2/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Download source round 3 decision evidence
+        id: source_decision3
+        if: ${{ inputs.resume_from_round == '4' }}
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: phase1-decide3-${{ inputs.source_run_id }}
+          path: ${{ runner.temp }}/phase1-seed-decisions/round3
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.source_run_id }}
+
+      - name: Record missing source round 3 decision evidence
+        if: ${{ inputs.resume_from_round == '4' }}
+        run: |
+          if [ "${{ steps.source_decision3.outcome }}" != "success" ]; then
+            mkdir -p "${RUNNER_TEMP}/phase1-seed-decisions/round3"
+            printf \
+              '{"schema_version":1,"kind":"missing-source-decision","round":3,"source_run_id":"%s"}\n' \
+              "${{ inputs.source_run_id }}" \
+              > "${RUNNER_TEMP}/phase1-seed-decisions/round3/missing-source-decision-round3.json"
+          fi
+
+      - name: Republish round 3 decision evidence under this run
+        if: ${{ inputs.resume_from_round == '4' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: phase1-decide3-${{ github.run_id }}
+          path: ${{ runner.temp }}/phase1-seed-decisions/round3/
+          if-no-files-found: error
+          retention-days: 30
+
   round1:
-    name: Build & Test 1
+    name: Build & Test & Fix 1
     needs: [prepare, seed_resume]
     if: >-
       ${{ always() &&
@@ -378,14 +477,6 @@ jobs:
     with:
       round: "1"
       operation: ${{ inputs.operation }}
-
-  decide1:
-    name: Evaluate & Fix 1
-    needs: round1
-    if: ${{ always() && needs.round1.result != 'skipped' }}
-    uses: ./.github/workflows/phase1-decide.yml
-    with:
-      round: "1"
       max_rounds: ${{ inputs.operation == 'pipeline_smoke' && '0' || '3' }}
       next_round: "2"
       canonical_app: >-
@@ -395,31 +486,23 @@ jobs:
             format('{0}-e2e-test', inputs.app) || '' }}
     secrets:
       DEEPSEEK_API_KEY: >-
-        ${{ inputs.operation == 'pipeline_smoke' && ''
-        || secrets.DEEPSEEK_API_KEY }}
+        ${{ inputs.operation != 'pipeline_smoke' &&
+        secrets.DEEPSEEK_API_KEY || '' }}
 
   round2:
-    name: Build & Test 2
-    needs: [decide1, seed_resume]
+    name: Build & Test & Fix 2
+    needs: [round1, seed_resume]
     if: >-
       ${{ always() &&
-          ((needs.decide1.result == 'success' &&
-            needs.decide1.outputs.converged != 'true' &&
-            needs.decide1.outputs.terminal_status == '') ||
+          ((needs.round1.result == 'success' &&
+            needs.round1.outputs.converged != 'true' &&
+            needs.round1.outputs.terminal_status == '') ||
            (needs.seed_resume.result == 'success' &&
             inputs.resume_from_round == '2')) }}
     uses: ./.github/workflows/phase1-round.yml
     with:
       round: "2"
       operation: ${{ inputs.operation }}
-
-  decide2:
-    name: Evaluate & Fix 2
-    needs: round2
-    if: ${{ always() && needs.round2.result != 'skipped' }}
-    uses: ./.github/workflows/phase1-decide.yml
-    with:
-      round: "2"
       max_rounds: ${{ inputs.operation == 'pipeline_smoke' && '0' || '3' }}
       next_round: "3"
       canonical_app: >-
@@ -429,31 +512,23 @@ jobs:
             format('{0}-e2e-test', inputs.app) || '' }}
     secrets:
       DEEPSEEK_API_KEY: >-
-        ${{ inputs.operation == 'pipeline_smoke' && ''
-        || secrets.DEEPSEEK_API_KEY }}
+        ${{ inputs.operation != 'pipeline_smoke' &&
+        secrets.DEEPSEEK_API_KEY || '' }}
 
   round3:
-    name: Build & Test 3
-    needs: [decide2, seed_resume]
+    name: Build & Test & Fix 3
+    needs: [round2, seed_resume]
     if: >-
       ${{ always() &&
-          ((needs.decide2.result == 'success' &&
-            needs.decide2.outputs.converged != 'true' &&
-            needs.decide2.outputs.terminal_status == '') ||
+          ((needs.round2.result == 'success' &&
+            needs.round2.outputs.converged != 'true' &&
+            needs.round2.outputs.terminal_status == '') ||
            (needs.seed_resume.result == 'success' &&
             inputs.resume_from_round == '3')) }}
     uses: ./.github/workflows/phase1-round.yml
     with:
       round: "3"
       operation: ${{ inputs.operation }}
-
-  decide3:
-    name: Evaluate & Fix 3
-    needs: round3
-    if: ${{ always() && needs.round3.result != 'skipped' }}
-    uses: ./.github/workflows/phase1-decide.yml
-    with:
-      round: "3"
       max_rounds: ${{ inputs.operation == 'pipeline_smoke' && '0' || '3' }}
       next_round: "4"
       canonical_app: >-
@@ -463,31 +538,23 @@ jobs:
             format('{0}-e2e-test', inputs.app) || '' }}
     secrets:
       DEEPSEEK_API_KEY: >-
-        ${{ inputs.operation == 'pipeline_smoke' && ''
-        || secrets.DEEPSEEK_API_KEY }}
+        ${{ inputs.operation != 'pipeline_smoke' &&
+        secrets.DEEPSEEK_API_KEY || '' }}
 
   round4:
-    name: Build & Test 4
-    needs: [decide3, seed_resume]
+    name: Build & Test & Fix 4
+    needs: [round3, seed_resume]
     if: >-
       ${{ always() &&
-          ((needs.decide3.result == 'success' &&
-            needs.decide3.outputs.converged != 'true' &&
-            needs.decide3.outputs.terminal_status == '') ||
+          ((needs.round3.result == 'success' &&
+            needs.round3.outputs.converged != 'true' &&
+            needs.round3.outputs.terminal_status == '') ||
            (needs.seed_resume.result == 'success' &&
             inputs.resume_from_round == '4')) }}
     uses: ./.github/workflows/phase1-round.yml
     with:
       round: "4"
       operation: ${{ inputs.operation }}
-
-  decide4:
-    name: Evaluate & Fix 4
-    needs: round4
-    if: ${{ always() && needs.round4.result != 'skipped' }}
-    uses: ./.github/workflows/phase1-decide.yml
-    with:
-      round: "4"
       max_rounds: ${{ inputs.operation == 'pipeline_smoke' && '0' || '3' }}
       next_round: "5"
       canonical_app: >-
@@ -497,8 +564,8 @@ jobs:
             format('{0}-e2e-test', inputs.app) || '' }}
     secrets:
       DEEPSEEK_API_KEY: >-
-        ${{ inputs.operation == 'pipeline_smoke' && ''
-        || secrets.DEEPSEEK_API_KEY }}
+        ${{ inputs.operation != 'pipeline_smoke' &&
+        secrets.DEEPSEEK_API_KEY || '' }}
 
   package_candidate:
     name: Verify and seal validated candidate
@@ -506,17 +573,17 @@ jobs:
     # candidate is sealed from whichever round converged.
     if: >-
       ${{ always() &&
-          ((needs.decide1.result == 'success' &&
-            needs.decide1.outputs.converged == 'true') ||
-           (needs.decide2.result == 'success' &&
-            needs.decide2.outputs.converged == 'true') ||
-           (needs.decide3.result == 'success' &&
-            needs.decide3.outputs.converged == 'true') ||
-           (needs.decide4.result == 'success' &&
-            needs.decide4.outputs.converged == 'true') ||
+          ((needs.round1.result == 'success' &&
+            needs.round1.outputs.converged == 'true') ||
+           (needs.round2.result == 'success' &&
+            needs.round2.outputs.converged == 'true') ||
+           (needs.round3.result == 'success' &&
+            needs.round3.outputs.converged == 'true') ||
+           (needs.round4.result == 'success' &&
+            needs.round4.outputs.converged == 'true') ||
            inputs.operation == 'resume_package' ||
            inputs.operation == 'recover_package') }}
-    needs: [decide1, decide2, decide3, decide4]
+    needs: [round1, round2, round3, round4]
     runs-on: [self-hosted, Linux, X64, oe-image-x86]
     timeout-minutes: 60
     steps:
@@ -1149,13 +1216,9 @@ jobs:
       - prepare
       - seed_resume
       - round1
-      - decide1
       - round2
-      - decide2
       - round3
-      - decide3
       - round4
-      - decide4
       - package_candidate
       - release_x86_builders
       - release_arm_builders
@@ -1168,14 +1231,14 @@ jobs:
 
       - name: Download needs-human-review evidence
         if: >-
-          ${{ (needs.decide1.result == 'success' &&
-               needs.decide1.outputs.terminal_status == 'needs-human-review') ||
-              (needs.decide2.result == 'success' &&
-               needs.decide2.outputs.terminal_status == 'needs-human-review') ||
-              (needs.decide3.result == 'success' &&
-               needs.decide3.outputs.terminal_status == 'needs-human-review') ||
-              (needs.decide4.result == 'success' &&
-               needs.decide4.outputs.terminal_status == 'needs-human-review') }}
+          ${{ (needs.round1.result == 'success' &&
+               needs.round1.outputs.terminal_status == 'needs-human-review') ||
+              (needs.round2.result == 'success' &&
+               needs.round2.outputs.terminal_status == 'needs-human-review') ||
+              (needs.round3.result == 'success' &&
+               needs.round3.outputs.terminal_status == 'needs-human-review') ||
+              (needs.round4.result == 'success' &&
+               needs.round4.outputs.terminal_status == 'needs-human-review') }}
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: phase1-needs-human-${{ github.run_id }}
@@ -1188,17 +1251,17 @@ jobs:
           OUTCOME: >-
             ${{ needs.deliver_fork_pr.result == 'success' &&
                 'success' ||
-                ((needs.decide1.result == 'success' &&
-                  needs.decide1.outputs.terminal_status ==
+                ((needs.round1.result == 'success' &&
+                  needs.round1.outputs.terminal_status ==
                   'needs-human-review') ||
-                 (needs.decide2.result == 'success' &&
-                  needs.decide2.outputs.terminal_status ==
+                 (needs.round2.result == 'success' &&
+                  needs.round2.outputs.terminal_status ==
                   'needs-human-review') ||
-                 (needs.decide3.result == 'success' &&
-                  needs.decide3.outputs.terminal_status ==
+                 (needs.round3.result == 'success' &&
+                  needs.round3.outputs.terminal_status ==
                   'needs-human-review') ||
-                 (needs.decide4.result == 'success' &&
-                  needs.decide4.outputs.terminal_status ==
+                 (needs.round4.result == 'success' &&
+                  needs.round4.outputs.terminal_status ==
                   'needs-human-review')) && 'needs-human-review' || 'failure' }}
           RUN_URL: >-
             ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{
@@ -1207,17 +1270,13 @@ jobs:
           FAILURE_SUMMARY: >-
             prepare=${{ needs.prepare.result }},
             round1=${{ needs.round1.result }},
-            decide1=${{ needs.decide1.result }},
             round2=${{ needs.round2.result }},
-            decide2=${{ needs.decide2.result }},
             round3=${{ needs.round3.result }},
-            decide3=${{ needs.decide3.result }},
             round4=${{ needs.round4.result }},
-            decide4=${{ needs.decide4.result }},
-            terminal1=${{ needs.decide1.outputs.terminal_status }},
-            terminal2=${{ needs.decide2.outputs.terminal_status }},
-            terminal3=${{ needs.decide3.outputs.terminal_status }},
-            terminal4=${{ needs.decide4.outputs.terminal_status }},
+            terminal1=${{ needs.round1.outputs.terminal_status }},
+            terminal2=${{ needs.round2.outputs.terminal_status }},
+            terminal3=${{ needs.round3.outputs.terminal_status }},
+            terminal4=${{ needs.round4.outputs.terminal_status }},
             package=${{ needs.package_candidate.result }},
             delivery=${{ needs.deliver_fork_pr.result }}
         run: |
