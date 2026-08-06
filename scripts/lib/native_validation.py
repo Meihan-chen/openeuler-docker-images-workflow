@@ -63,6 +63,13 @@ _PROBE_ROOTS = ("/opt", "/home", "/srv", "/app", "/usr/local", "/var/log")
 _PROBE_NAMES = ("*.log", "*.out", "*.err", "*.stderr")
 _PROBE_MAX_FILES = "20"
 _PROBE_TAIL_LINES = "200"
+# A Bigdata image carries tens of thousands of jars under these roots, so the
+# walk is bounded three ways: it stays on one filesystem, it stops before the
+# depth application logs are ever nested at, and it only considers files this
+# run could have written. head then closes the pipe, which ends find early once
+# the quota is met.
+_PROBE_MAX_DEPTH = "6"
+_PROBE_MAX_AGE_MINUTES = "180"
 _E2E_CHECKS = (
     "native_build",
     "dgoss",
@@ -286,7 +293,9 @@ def _probe_script() -> str:
         "ps -ef 2>/dev/null || ps aux 2>/dev/null || echo '(ps unavailable)'\n"
         f"for root in {roots}; do\n"
         '  [ -d "$root" ] || continue\n'
-        f'  find "$root" -type f \\( {names} \\) 2>/dev/null\n'
+        f'  find "$root" -xdev -maxdepth {_PROBE_MAX_DEPTH} -type f'
+        f" \\( {names} \\)"
+        f" -mmin -{_PROBE_MAX_AGE_MINUTES} 2>/dev/null\n"
         "done"
         f" | head -n {_PROBE_MAX_FILES}"
         " | while IFS= read -r file; do\n"
@@ -361,14 +370,14 @@ def _container_evidence(
                 cwd=workspace,
                 artifact_root=artifact_root,
                 path=artifact_root / "diagnostics" / f"{name}.probe.log",
-                timeout=120,
+                timeout=60,
             )
         else:
             probed = _run(
                 runner,
                 probe_command,
                 cwd=workspace,
-                timeout=120,
+                timeout=60,
                 check=False,
             )
             probe_metadata = _capture_status(

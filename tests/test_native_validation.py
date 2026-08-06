@@ -847,6 +847,19 @@ def test_container_probe_searches_by_shape_not_by_application(tmp_path):
     assert "2>/dev/null" in script
 
 
+def test_container_probe_bounds_its_walk_on_a_bigdata_image():
+    """A Spark tree holds tens of thousands of files the probe must not walk."""
+    from scripts.lib.native_validation import _probe_script
+
+    script = _probe_script()
+
+    assert "-xdev" in script
+    assert "-maxdepth 6" in script
+    assert "-mmin -180" in script
+    # head closes the pipe, which ends find once the quota is met.
+    assert "head -n 20" in script
+
+
 def test_native_validation_failure_saves_complete_container_evidence_artifacts(
     tmp_path,
 ):
