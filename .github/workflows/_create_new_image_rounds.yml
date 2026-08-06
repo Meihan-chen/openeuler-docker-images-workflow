@@ -66,7 +66,7 @@ jobs:
       - name: Check out workflow source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
-      - name: Set up phase-one tooling
+      - name: Set up tooling
         id: tools
         uses: ./.github/actions/phase1-setup
         with:
@@ -142,7 +142,7 @@ jobs:
       - name: Check out workflow source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
-      - name: Set up phase-one tooling
+      - name: Set up tooling
         id: tools
         uses: ./.github/actions/phase1-setup
         with:
@@ -223,7 +223,7 @@ jobs:
       - name: Check out workflow source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
-      - name: Set up phase-one tooling
+      - name: Set up tooling
         id: tools
         uses: ./.github/actions/phase1-setup
         with:

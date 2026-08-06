@@ -7,10 +7,10 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
-WORKFLOW_PATH = ROOT / ".github" / "workflows" / "new-image.yml"
-WATCH_PATH = ROOT / ".github" / "workflows" / "watch-issues.yml"
-ROUND_PATH = ROOT / ".github" / "workflows" / "phase1-round.yml"
-ROUNDS = ("round1", "round2", "round3", "round4")
+WORKFLOW_PATH = ROOT / ".github" / "workflows" / "create_new_images.yml"
+WATCH_PATH = ROOT / ".github" / "workflows" / "monitor_new_image_issues.yml"
+ROUND_PATH = ROOT / ".github" / "workflows" / "_create_new_image_rounds.yml"
+ROUNDS = ("round-1", "round-2", "round-3", "round-4")
 ARCHITECTURE_JOBS = ("x86_64", "aarch64")
 ACTIONLINT_CONFIG = ROOT / ".github" / "actionlint.yaml"
 ACTIONS_DIR = ROOT / ".github" / "actions"
@@ -66,6 +66,7 @@ def test_phase1_is_manual_only_with_explicit_operations():
         "resume_package",
         "recover_package",
         "fork_pr",
+        "fork_pr_resume",
         "failure_issue_contract_test",
     ]
     assert "validated_run_id" in trigger["workflow_dispatch"]["inputs"]
@@ -110,15 +111,15 @@ def test_existing_as_new_probe_hides_reference_and_delivers_alias_pr():
         "Create generation patch"
     )
 
-    delivery = jobs["deliver_fork_pr"]
+    delivery = jobs["deliver-fork-pr"]
     delivery_text = _job_text(delivery)
     assert "inputs.operation == 'existing_as_new_probe'" in delivery["if"]
-    assert "needs.package_candidate.result == 'success'" in delivery["if"]
+    assert "needs.package-candidate.result == 'success'" in delivery["if"]
     assert "inputs.operation == 'existing_as_new_probe'" in delivery_text
     assert "github.run_id" in delivery_text
     assert "phase1-candidate-" in delivery_text
 
-    package_text = _job_text(jobs["package_candidate"])
+    package_text = _job_text(jobs["package-candidate"])
     assert "Existing-as-new test passed" in package_text
     assert "must not be merged" in package_text
 
@@ -320,23 +321,23 @@ def test_scenario_one_runs_full_validation_chain_and_delivers_same_run():
     assert "scenario_one" in jobs["prepare"]["if"]
     # A converged output is not enough: the combined round must have completed
     # successfully, including publishing its decision evidence.
-    package_condition = jobs["package_candidate"]["if"]
+    package_condition = jobs["package-candidate"]["if"]
     for name in ROUNDS:
         assert f"needs.{name}.result == 'success'" in package_condition
         assert f"needs.{name}.outputs.converged == 'true'" in package_condition
 
-    delivery = jobs["deliver_fork_pr"]
+    delivery = jobs["deliver-fork-pr"]
     delivery_text = _job_text(delivery)
     assert delivery["needs"] == [
-        "package_candidate",
-        "release_x86_builders",
-        "release_arm_builders",
+        "package-candidate",
+        "release-x86-builders",
+        "release-arm-builders",
     ]
     assert "always()" in delivery["if"]
     assert "inputs.operation == 'scenario_one'" in delivery["if"]
-    assert "needs.package_candidate.result == 'success'" in delivery["if"]
-    assert "needs.release_x86_builders.result" not in delivery["if"]
-    assert "needs.release_arm_builders.result" not in delivery["if"]
+    assert "needs.package-candidate.result == 'success'" in delivery["if"]
+    assert "needs.release-x86-builders.result" not in delivery["if"]
+    assert "needs.release-arm-builders.result" not in delivery["if"]
     assert "inputs.operation == 'fork_pr'" in delivery["if"]
     assert "github.run_id" in delivery_text
 
@@ -346,7 +347,7 @@ def test_scenario_one_runs_full_validation_chain_and_delivers_same_run():
         in prepare_steps["Generate candidate via agent"]["if"]
     )
     # Rounds are operation-agnostic: they validate whatever prepare staged.
-    assert jobs["round1"]["with"]["operation"] == "${{ inputs.operation }}"
+    assert jobs["round-1"]["with"]["operation"] == "${{ inputs.operation }}"
 
 
 def test_validation_rounds_group_build_test_and_fix_jobs():
@@ -375,20 +376,20 @@ def test_issue_trigger_reuses_scenario_one_and_finalizes_the_source_issue():
 
     assert "Issue number" in inputs["source_run_id"]["description"]
 
-    delivery = jobs["deliver_fork_pr"]
+    delivery = jobs["deliver-fork-pr"]
     assert delivery["outputs"]["pr_url"] == (
         "${{ steps.delivery.outputs.pr_url }}"
     )
 
-    finalizer = jobs["finalize_trigger_issue"]
+    finalizer = jobs["finalize-trigger-issue"]
     assert "always()" in finalizer["if"]
     assert "scenario_one" in finalizer["if"]
     assert "startsWith(inputs.source_run_id, 'issue:')" in finalizer["if"]
-    assert "deliver_fork_pr" in finalizer["needs"]
+    assert "deliver-fork-pr" in finalizer["needs"]
     text = _job_text(finalizer)
     assert "issue-finalize" in text
     assert '${SOURCE_ISSUE#issue:}' in text
-    assert "needs.deliver_fork_pr.outputs.pr_url" in text
+    assert "needs.deliver-fork-pr.outputs.pr_url" in text
     assert "GITCODE_TOKEN" in text
     for name in ROUNDS:
         assert f"needs.{name}.result == 'success'" in text
@@ -481,7 +482,7 @@ def test_round_decision_artifact_is_strict_and_merge_safe():
 
     package_steps = {
         step["name"]: step
-        for step in _workflow()["jobs"]["package_candidate"]["steps"]
+        for step in _workflow()["jobs"]["package-candidate"]["steps"]
     }
     download = package_steps["Download round decision evidence"]
     assert download["with"]["pattern"].lstrip().startswith("phase1-decide*")
@@ -545,11 +546,11 @@ def test_native_jobs_use_exact_self_hosted_labels_and_no_emulation_actions():
 
     for name in (
         "prepare",
-        "seed_resume",
-        "package_candidate",
-        "release_x86_builders",
-        "deliver_fork_pr",
-        "issue_contract_test",
+        "seed-resume",
+        "package-candidate",
+        "release-x86-builders",
+        "deliver-fork-pr",
+        "issue-contract-test",
     ):
         assert jobs[name]["runs-on"] == [
             "self-hosted",
@@ -557,7 +558,7 @@ def test_native_jobs_use_exact_self_hosted_labels_and_no_emulation_actions():
             "X64",
             "oe-image-x86",
         ]
-    assert jobs["release_arm_builders"]["runs-on"] == [
+    assert jobs["release-arm-builders"]["runs-on"] == [
         "self-hosted",
         "Linux",
         "ARM64",
@@ -595,10 +596,10 @@ def test_every_round_validates_one_candidate_on_both_architectures():
     jobs = _workflow()["jobs"]
     round_workflow = _workflow(ROUND_PATH)
 
-    assert jobs["round1"]["needs"] == ["prepare", "seed_resume"]
+    assert jobs["round-1"]["needs"] == ["prepare", "seed-resume"]
     for index, name in enumerate(ROUNDS):
         round_call = jobs[name]
-        assert round_call["uses"] == "./.github/workflows/phase1-round.yml"
+        assert round_call["uses"] == "./.github/workflows/_create_new_image_rounds.yml"
         assert round_call["with"]["round"] == str(index + 1)
         # pipeline_smoke converges deterministically; giving it a repair
         # budget would burn model calls the Fixer cannot possibly help with,
@@ -622,7 +623,7 @@ def test_every_round_validates_one_candidate_on_both_architectures():
 
     # A later round exists only because the previous one did not converge.
     for index, name in enumerate(ROUNDS[1:]):
-        assert jobs[name]["needs"] == [ROUNDS[index], "seed_resume"]
+        assert jobs[name]["needs"] == [ROUNDS[index], "seed-resume"]
         condition = jobs[name]["if"]
         assert f"needs.{ROUNDS[index]}.result == 'success'" in condition
         assert (
@@ -644,7 +645,7 @@ def test_every_round_validates_one_candidate_on_both_architectures():
 
 def test_resume_restarts_one_round_from_another_run_of_the_same_pipeline():
     jobs = _workflow()["jobs"]
-    seed = jobs["seed_resume"]
+    seed = jobs["seed-resume"]
     seed_text = _job_text(seed)
 
     assert seed["if"] == "${{ inputs.operation == 'resume_round' }}"
@@ -662,10 +663,10 @@ def test_resume_restarts_one_round_from_another_run_of_the_same_pipeline():
 
     for index, name in enumerate(ROUNDS):
         condition = jobs[name]["if"]
-        assert "needs.seed_resume.result == 'success'" in condition
+        assert "needs.seed-resume.result == 'success'" in condition
         assert f"inputs.resume_from_round == '{index + 1}'" in condition
 
-    package = jobs["package_candidate"]
+    package = jobs["package-candidate"]
     package_text = _job_text(package)
     immutable_upload = next(
         step
@@ -690,7 +691,7 @@ def test_resume_restarts_one_round_from_another_run_of_the_same_pipeline():
 def test_resume_republishes_decisions_before_the_restarted_round():
     steps = {
         step["name"]: step
-        for step in _workflow()["jobs"]["seed_resume"]["steps"]
+        for step in _workflow()["jobs"]["seed-resume"]["steps"]
     }
     cases = (
         (1, "inputs.resume_from_round != '1'"),
@@ -731,8 +732,8 @@ def test_resume_republishes_decisions_before_the_restarted_round():
 def test_artifact_producers_cover_each_package_input_mode():
     jobs = _workflow()["jobs"]
     prepare_text = _job_text(jobs["prepare"])
-    seed_text = _job_text(jobs["seed_resume"])
-    package_text = _job_text(jobs["package_candidate"])
+    seed_text = _job_text(jobs["seed-resume"])
+    package_text = _job_text(jobs["package-candidate"])
 
     # Fresh runs produce both inputs in this run.
     assert "phase1-generation-${{ github.run_id }}" in prepare_text
@@ -785,9 +786,9 @@ def test_round_artifact_producers_and_consumers_use_the_same_templates():
 
     jobs = _workflow()["jobs"]
     prepare = _job_text(jobs["prepare"])
-    seed = _job_text(jobs["seed_resume"])
-    package = _job_text(jobs["package_candidate"])
-    delivery = _job_text(jobs["deliver_fork_pr"])
+    seed = _job_text(jobs["seed-resume"])
+    package = _job_text(jobs["package-candidate"])
+    delivery = _job_text(jobs["deliver-fork-pr"])
     assert "phase1-patch1-${{ github.run_id }}" in prepare
     assert "phase1-patch${{ inputs.resume_from_round }}-${{" in seed
     assert "phase1-converged-${{" in package
@@ -804,7 +805,7 @@ def test_round_artifact_producers_and_consumers_use_the_same_templates():
 
 
 def test_candidate_verify_workflow_does_not_claim_to_check_current_base():
-    package = _workflow()["jobs"]["package_candidate"]
+    package = _workflow()["jobs"]["package-candidate"]
     seal = next(
         step
         for step in package["steps"]
@@ -820,7 +821,7 @@ def test_candidate_verify_workflow_does_not_claim_to_check_current_base():
 def test_sealed_candidate_preserves_both_junit_reports():
     seal = next(
         step
-        for step in _workflow()["jobs"]["package_candidate"]["steps"]
+        for step in _workflow()["jobs"]["package-candidate"]["steps"]
         if step.get("name") == "Seal immutable candidate bundle"
     )
 
@@ -832,7 +833,7 @@ def test_sealed_candidate_preserves_both_junit_reports():
 
 def test_recover_package_combines_generation_and_validation_runs():
     jobs = _workflow()["jobs"]
-    package = jobs["package_candidate"]
+    package = jobs["package-candidate"]
     text = _job_text(package)
 
     assert "recover_package" in package["if"]
@@ -852,7 +853,7 @@ def test_recover_package_combines_generation_and_validation_runs():
 
 
 def test_recover_package_only_accepts_confirmed_full_validation_lineage():
-    package = _job_text(_workflow()["jobs"]["package_candidate"])
+    package = _job_text(_workflow()["jobs"]["package-candidate"])
     workflow_text = WORKFLOW_PATH.read_text()
 
     assert "30478803960" in package
@@ -881,7 +882,7 @@ def test_recover_package_only_accepts_confirmed_full_validation_lineage():
 def test_validate_only_jobs_have_no_gitcode_credential_or_write_command():
     jobs = _workflow()["jobs"]
 
-    for name in ("prepare", "seed_resume", "package_candidate"):
+    for name in ("prepare", "seed-resume", "package-candidate"):
         text = _job_text(jobs[name])
         assert "GITCODE_TOKEN" not in text
         assert "fork-deliver" not in text
@@ -936,7 +937,7 @@ def test_the_smoke_path_can_never_reach_the_fixer():
 
 
 def test_fork_pr_reuses_named_artifact_from_exact_validated_run():
-    job = _workflow()["jobs"]["deliver_fork_pr"]
+    job = _workflow()["jobs"]["deliver-fork-pr"]
     text = _job_text(job)
 
     assert "inputs.operation == 'fork_pr'" in job["if"]
@@ -952,14 +953,34 @@ def test_fork_pr_reuses_named_artifact_from_exact_validated_run():
     assert "--token" not in text
 
 
+def test_fork_pr_resume_reuses_named_resume_artifact_without_revalidation():
+    workflow = _workflow()
+    trigger = _trigger(workflow)
+    operations = trigger["workflow_dispatch"]["inputs"]["operation"]["options"]
+    job = workflow["jobs"]["deliver-fork-pr"]
+    steps = {step["name"]: step for step in job["steps"]}
+
+    assert "fork_pr_resume" in operations
+    assert "inputs.operation == 'fork_pr_resume'" in job["if"]
+    assert "fork_pr_resume" in steps["Validate validated run ID"]["if"]
+
+    download = steps["Download resumed candidate"]
+    artifact_name = download["with"]["name"]
+    assert "inputs.operation == 'fork_pr_resume'" in download["if"]
+    assert artifact_name == (
+        "phase1-resume-candidate-${{ inputs.validated_run_id }}"
+    )
+    assert "inputs.validated_run_id" in download["with"]["run-id"]
+
+
 def test_issue_probe_is_isolated_and_explicit():
     jobs = _workflow()["jobs"]
-    issue = jobs["issue_contract_test"]
+    issue = jobs["issue-contract-test"]
 
     assert "failure_issue_contract_test" in issue["if"]
     assert "issue-contract-test" in _job_text(issue)
     assert "GITCODE_TOKEN" in _job_text(issue)
-    assert "GITCODE_TOKEN" in _job_text(jobs["deliver_fork_pr"])
+    assert "GITCODE_TOKEN" in _job_text(jobs["deliver-fork-pr"])
 
 
 def test_actions_are_commit_pinned_and_python_install_requires_hashes():
@@ -998,7 +1019,7 @@ def test_legacy_evidence_is_allowed_only_on_the_reviewed_recovery_path():
     workflow_text = WORKFLOW_PATH.read_text()
     aggregate = next(
         step
-        for step in _workflow()["jobs"]["package_candidate"]["steps"]
+        for step in _workflow()["jobs"]["package-candidate"]["steps"]
         if step.get("name") == "Aggregate dual-architecture result evidence"
     )["run"]
 
@@ -1019,8 +1040,8 @@ def test_each_architecture_hands_its_run_builder_back_exactly_once():
     # Validation keeps the builder alive for later rounds, so the run is only
     # leak-free if a release job runs even when validation failed.
     for name, architecture, runner_label in (
-        ("release_x86_builders", "x86_64", "oe-image-x86"),
-        ("release_arm_builders", "aarch64", "oe-image-arm64"),
+        ("release-x86-builders", "x86_64", "oe-image-x86"),
+        ("release-arm-builders", "aarch64", "oe-image-arm64"),
     ):
         job = jobs[name]
         text = _job_text(job)
@@ -1061,18 +1082,18 @@ def test_jobs_and_run_have_readable_display_names():
     assert "inputs.operation" in data["run-name"]
     assert "inputs.app" in data["run-name"]
     expected = {
-        "prepare": "Prepare round-1 candidate",
-        "seed_resume": "Seed resumed run artifacts",
-        "round1": "Round 1: validate and fix",
-        "round2": "Round 2: validate and fix",
-        "round3": "Round 3: validate and fix",
-        "round4": "Round 4: validate and fix",
-        "package_candidate": "Seal and publish final candidate",
-        "release_x86_builders": "Clean Environment (x86_64)",
-        "release_arm_builders": "Clean Environment (aarch64)",
-        "deliver_fork_pr": "Create fork PR from candidate",
-        "finalize_trigger_issue": "Finalize trigger Issue",
-        "issue_contract_test": "Test failure Issue lifecycle",
+        "prepare": "Prepare round 1 candidate",
+        "seed-resume": "Seed resumed run artifacts",
+        "round-1": "Round 1: validate and fix",
+        "round-2": "Round 2: validate and fix",
+        "round-3": "Round 3: validate and fix",
+        "round-4": "Round 4: validate and fix",
+        "package-candidate": "Seal and publish final candidate",
+        "release-x86-builders": "Clean Environment (x86_64)",
+        "release-arm-builders": "Clean Environment (aarch64)",
+        "deliver-fork-pr": "Create fork PR from candidate",
+        "finalize-trigger-issue": "Finalize trigger Issue",
+        "issue-contract-test": "Test failure Issue lifecycle",
     }
     assert {
         job_id: job["name"] for job_id, job in data["jobs"].items()
@@ -1083,7 +1104,7 @@ def test_jobs_and_run_have_readable_display_names():
 def test_pipeline_smoke_reuses_candidate_chain_without_ai_or_gitcode_steps():
     jobs = _workflow()["jobs"]
     assert "pipeline_smoke" in jobs["prepare"]["if"]
-    assert "converged == 'true'" in jobs["package_candidate"]["if"]
+    assert "converged == 'true'" in jobs["package-candidate"]["if"]
 
     prepare_steps = {step["name"]: step for step in jobs["prepare"]["steps"]}
     smoke_generate = prepare_steps["Create deterministic smoke candidate"]
@@ -1091,7 +1112,7 @@ def test_pipeline_smoke_reuses_candidate_chain_without_ai_or_gitcode_steps():
     assert "phase1-smoke-generate" in smoke_generate["run"]
     assert "DEEPSEEK_API_KEY" not in _job_text(smoke_generate)
 
-    # The smoke candidate always passes, so round1 converges and rounds 2-4
+    # The smoke candidate always passes, so round-1 converges and rounds 2-4
     # skip themselves; the same round jobs serve both paths.
     round_jobs = _workflow(ROUND_PATH)["jobs"]
     for name in ARCHITECTURE_JOBS:
@@ -1105,7 +1126,7 @@ def test_pipeline_smoke_reuses_candidate_chain_without_ai_or_gitcode_steps():
         assert "phase1-native-smoke" in smoke_steps[0]["run"]
         assert "pipeline_smoke" in smoke_steps[0]["if"]
 
-    package_text = _job_text(jobs["package_candidate"])
+    package_text = _job_text(jobs["package-candidate"])
     assert "phase1-smoke-candidate-" in package_text
     assert "not promotable" in package_text
 
@@ -1133,7 +1154,7 @@ def test_hadolint_is_advisory_without_a_project_rule_allowlist():
         step["name"]: step for step in jobs["prepare"]["steps"]
     }
     package_steps = {
-        step["name"]: step for step in jobs["package_candidate"]["steps"]
+        step["name"]: step for step in jobs["package-candidate"]["steps"]
     }
 
     smoke_lint = prepare_steps["Lint generated Dockerfile"]
@@ -1266,7 +1287,7 @@ def test_every_native_job_delegates_setup_and_keeps_checkout_in_the_job():
 
     for name, arch, preflight in (
         ("prepare", "x86_64", True),
-        ("package_candidate", "x86_64", False),
+        ("package-candidate", "x86_64", False),
     ):
         setup = _delegated_setup_step(jobs[name])
         assert setup["id"] == "tools"
@@ -1280,7 +1301,7 @@ def test_every_native_job_delegates_setup_and_keeps_checkout_in_the_job():
     decide_setup = _delegated_setup_step(round_jobs["decide"])
     assert decide_setup["with"]["arch"] == "x86_64"
 
-    for name in ("deliver_fork_pr", "issue_contract_test"):
+    for name in ("deliver-fork-pr", "issue-contract-test"):
         setup = _delegated_setup_step(jobs[name])
         assert "with" not in setup
 

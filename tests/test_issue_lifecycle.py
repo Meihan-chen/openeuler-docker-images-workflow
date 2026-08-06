@@ -684,7 +684,7 @@ def test_github_workflow_dispatch_uses_token_only_in_environment():
     dispatch_github_workflow(
         github_token="github-secret",
         github_repository="Meihan-chen/openeuler-docker-images-workflow",
-        workflow="new-image.yml",
+        workflow="create_new_images.yml",
         ref="main",
         inputs={"operation": "scenario_one", "source_run_id": "64"},
         run=run,
@@ -695,7 +695,7 @@ def test_github_workflow_dispatch_uses_token_only_in_environment():
         "gh",
         "workflow",
         "run",
-        "new-image.yml",
+        "create_new_images.yml",
         "--repo",
         "Meihan-chen/openeuler-docker-images-workflow",
         "--ref",

@@ -340,6 +340,48 @@ def test_phase1_decide_redacts_secret_from_error_evidence(
     assert "request rejected: REDACTED" in evidence
 
 
+def test_phase1_decide_derives_native_evidence_roots_from_report_paths(
+    tmp_path,
+    monkeypatch,
+):
+    from scripts.harness import flow
+
+    reports = {
+        "x86_64": _infra_native_report(),
+        "aarch64": _infra_native_report(),
+    }
+    report_dir, cli_args = _phase1_decide_args(tmp_path, reports)
+    args = flow._parser().parse_args(cli_args)
+    x86_root = tmp_path / "phase1-x86"
+    arm_root = tmp_path / "phase1-arm"
+    for architecture, root in (("x86_64", x86_root), ("aarch64", arm_root)):
+        root.mkdir()
+        (root / f"{architecture}.json").write_text(json.dumps(reports[architecture]))
+        (root / "diagnostics").mkdir()
+    args.x86_report = x86_root / "x86_64.json"
+    args.arm_report = arm_root / "aarch64.json"
+    captured = {}
+
+    def decide(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            converged=False,
+            round_number=1,
+            repair_attempts=0,
+            validated_patch_sha256="",
+            terminal_status="",
+        )
+
+    monkeypatch.setattr(flow, "decide_round", decide)
+    flow.cmd_phase1_decide(args)
+
+    assert captured["evidence_roots"] == {
+        "x86_64": (x86_root / "diagnostics").resolve(),
+        "aarch64": (arm_root / "diagnostics").resolve(),
+    }
+    assert (report_dir / "round-decision-1.json").is_file()
+
+
 def test_phase1_decide_preserves_error_when_evidence_write_fails(
     tmp_path,
     monkeypatch,

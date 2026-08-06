@@ -357,6 +357,49 @@ def _all_failures_are_infra(classification: Mapping[str, object]) -> bool:
     return classification.get("category") == "infra"
 
 
+def _resolve_full_evidence(
+    evidence_roots: Mapping[str, Path] | None,
+    *,
+    workspace: Path,
+) -> tuple[dict[str, object], tuple[Path, ...]]:
+    if not evidence_roots:
+        return {}, ()
+    review: dict[str, object] = {}
+    readable: list[Path] = []
+    for architecture in _ARCHITECTURES:
+        raw_root = evidence_roots.get(architecture)
+        if raw_root is None:
+            continue
+        root = Path(raw_root).resolve()
+        if not root.is_dir():
+            raise NativeRepairError(
+                f"native evidence directory does not exist: {root}"
+            )
+        if root == workspace or workspace in root.parents:
+            raise NativeRepairError(
+                "native evidence directories must remain outside the target workspace"
+            )
+        files: list[str] = []
+        for path in sorted(root.rglob("*")):
+            if path.is_symlink():
+                raise NativeRepairError(
+                    f"native evidence must not contain symlinks: {path}"
+                )
+            if path.is_file():
+                resolved = path.resolve()
+                if root not in resolved.parents:
+                    raise NativeRepairError(
+                        f"native evidence escaped its declared root: {path}"
+                    )
+                files.append(str(resolved))
+        review[architecture] = {
+            "root": str(root),
+            "files": files,
+        }
+        readable.append(root)
+    return review, tuple(readable)
+
+
 def decide_round(
     *,
     workspace: Path,
@@ -368,6 +411,7 @@ def decide_round(
     report_dir: Path,
     executable: Path,
     api_key: str,
+    evidence_roots: Mapping[str, Path] | None = None,
     agent_runner: Callable[..., AgentResult] = run_agent,
     target_validator: Callable[..., Mapping[str, object]] = (
         validate_generated_target
@@ -393,6 +437,10 @@ def decide_round(
         )
     report_dir.mkdir(parents=True, exist_ok=True)
     stage = f"round:{round_number}"
+    full_evidence, external_read_dirs = _resolve_full_evidence(
+        evidence_roots,
+        workspace=workspace,
+    )
 
     invalid_passed = [
         name
@@ -500,6 +548,8 @@ def decide_round(
             for name in _ARCHITECTURES
         },
     }
+    if full_evidence:
+        review["full_evidence"] = full_evidence
     for attempt in range(1, _GATE_REPAIR_ATTEMPTS + 1):
         log(stage, f"START fixer attempt={attempt}")
         fixed = agent_runner(
@@ -516,6 +566,7 @@ def decide_round(
             api_key=api_key,
             required_keys=("success", "changes"),
             timeout=3600,
+            external_read_dirs=external_read_dirs,
         )
         _write_fixer_report(
             directory=report_dir,

@@ -138,7 +138,7 @@ def test_issue_watch_handler_claims_and_dispatches_canonical_workflow(
             max_issues=1,
             github_repository="Meihan-chen/openeuler-docker-images-workflow",
             github_ref="main",
-            workflow="new-image.yml",
+            workflow="create_new_images.yml",
         )
     )
 
@@ -148,7 +148,7 @@ def test_issue_watch_handler_claims_and_dispatches_canonical_workflow(
     assert calls[1][1]["issue_number"] == 64
     dispatch = calls[2][1]
     assert dispatch["github_token"] == "github-secret"
-    assert dispatch["workflow"] == "new-image.yml"
+    assert dispatch["workflow"] == "create_new_images.yml"
     assert dispatch["inputs"] == {"operation": "scenario_one"}
     assert json.loads(capsys.readouterr().out) == {
         "dispatched": True,
@@ -203,7 +203,7 @@ def test_issue_watch_scan_mode_claims_up_to_max_issues(monkeypatch, capsys):
             max_issues=3,
             github_repository="Meihan-chen/openeuler-docker-images-workflow",
             github_ref="main",
-            workflow="new-image.yml",
+            workflow="create_new_images.yml",
         )
     )
 
@@ -238,7 +238,7 @@ def test_issue_watch_rejects_a_non_positive_max_issues(monkeypatch):
                 max_issues=0,
                 github_repository="Meihan-chen/openeuler-docker-images-workflow",
                 github_ref="main",
-                workflow="new-image.yml",
+                workflow="create_new_images.yml",
             )
         )
 

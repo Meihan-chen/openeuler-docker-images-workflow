@@ -33,9 +33,11 @@ env:
 
 jobs:
   check-env:
+    name: Check environment and run unit tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out workflow source
+        uses: actions/checkout@v4
       - name: Check prerequisites
         run: |
           echo "::group::Python version"
@@ -70,11 +72,14 @@ jobs:
         run: python3 -m pytest tests/ -v
 
   test-deterministic:
+    name: Run deterministic pipeline steps
     needs: check-env
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - run: pip install pyyaml
+      - name: Check out workflow source
+        uses: actions/checkout@v4
+      - name: Install Python dependencies
+        run: pip install pyyaml
 
       - name: Parse issue (simulated)
         run: |
@@ -112,13 +117,15 @@ jobs:
           OS_VERSION: ${{ inputs.os_version }}
 
   test-agent:
+    name: Run agent generation
     needs: test-deterministic
     runs-on: ubuntu-latest
     env:
       ANTHROPIC_BASE_URL: https://api.deepseek.com/anthropic
       ANTHROPIC_AUTH_TOKEN: ${{ secrets.DEEPSEEK_API_KEY }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out workflow source
+        uses: actions/checkout@v4
 
       - name: Install opencode
         run: curl -fsSL https://opencode.ai/install | bash
@@ -142,11 +149,13 @@ jobs:
           find . -name "meta.yml" -not -path './.git/*' 2>/dev/null | head -5
 
   test-build:
+    name: Build generated Dockerfile
     needs: test-agent
     runs-on: ubuntu-latest
     if: always() && !failure()
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out workflow source
+        uses: actions/checkout@v4
 
       - name: Build Dockerfile (if generated)
         run: |

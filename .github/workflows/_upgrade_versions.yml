@@ -1,7 +1,7 @@
 name: Verify
 
 # Reusable workflow: generate (adversarial pair) → build → test.
-# Called by version-update.yml and oe-upgrade.yml.
+# Called by upgrade_upstream_versions.yml and upgrade_openeuler_versions.yml.
 # On retry (retry=true): skips generation, only build+test — fixer changes are already applied.
 
 on:
@@ -28,11 +28,13 @@ env:
 
 jobs:
   generate:
+    name: Generate image candidate
     # Skip generation on retry — fixer changes are already in the repo
     if: ${{ !inputs.retry }}
     runs-on: [self-hosted, Linux, x64]
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out workflow source
+        uses: actions/checkout@v4
 
       - name: Install opencode
         run: npm install -g opencode-ai
@@ -62,6 +64,7 @@ jobs:
             */doc/
 
   build-and-test:
+    name: Build and test image
     needs: generate
     if: ${{ !inputs.retry || always() }}
     strategy:
@@ -74,8 +77,10 @@ jobs:
             platform: linux/arm64
     runs-on: ${{ matrix.arch.runner }}
     steps:
-      - uses: actions/checkout@v4
-      - if: ${{ !inputs.retry }}
+      - name: Check out workflow source
+        uses: actions/checkout@v4
+      - name: Download generated files
+        if: ${{ !inputs.retry }}
         uses: actions/download-artifact@v4
         with:
           name: generated-files-${{ inputs.app }}

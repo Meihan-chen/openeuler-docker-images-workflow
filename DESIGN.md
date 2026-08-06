@@ -703,10 +703,13 @@ QA 审查角度：攻击面覆盖 ✓、误报风险 ✓、关键功能验证 �
 openeuler-docker-images-workflow/
 ├── .github/
 │   ├── workflows/
-│   │   ├── new-image.yml              # 场景一：新镜像请求
-│   │   ├── version-update.yml         # 场景二：应用版本更新（anitya webhook 或 workflow_dispatch 触发）
-│   │   ├── oe-upgrade.yml             # 场景三：openEuler 大版本升级
-│   │   └── verify.yml                  # 本地验证（构建 + 测试 + 差分）
+│   │   ├── create_new_images.yml      # 场景一：新镜像请求（编排 4 轮收敛）
+│   │   ├── monitor_new_image_issues.yml # 场景一：扫描 GitCode issue 自动触发
+│   │   ├── _create_new_image_rounds.yml # 场景一：单轮验证-修复-决策组件
+│   │   ├── upgrade_upstream_versions.yml # 场景二：应用版本更新（anitya webhook 或 workflow_dispatch 触发）
+│   │   ├── upgrade_openeuler_versions.yml # 场景三：openEuler 大版本升级
+│   │   ├── _upgrade_versions.yml     # 场景二/三共享验证（生成 + 构建 + 测试）
+│   │   └── test-e2e.yml              # 开发自测（不创建真实 PR）
 │   └── agents/
 │       ├── image-creator.md           # Image Creator（生成者）
 │       ├── testcase-creator.md        # Testcase Creator（生成者）
@@ -740,3 +743,33 @@ openeuler-docker-images-workflow/
 ├── README.md
 └── REQUIREMENTS.md                     # openeuler-images-requirements.md
 ```
+
+## 12. 命名规范
+
+### 12.1 多轮（round）命名标准
+
+**语义**：round（轮）= 一次完整的验证尝试，编号从 1 开始；修复（fix）= 轮与轮之间的桥，
+`Fix failures (round N)` 表示修复第 N 轮验证发现的失败，产出第 N+1 轮的输入。
+
+| 场景 | 格式 | 示例 |
+|---|---|---|
+| 验证轮 job 显示名 | `Round N: <verb> <object>` | `Round 1: verify images` |
+| 合并型轮 job 显示名（验证+修复同轮） | `Round N: <verb> and <verb>` | `Round 1: validate and fix` |
+| 修复 job 显示名 | `Fix failures (round N)` | `Fix failures (round 1)` |
+| step 名 | round 一律小写，编号用空格分隔 | `Download round 1 decision evidence`（禁 `round-1`） |
+| step 名（无编号） | `<verb> round <noun>` | `Download round evidence`、`Emit next round candidate` |
+| job id（验证轮） | `round-{n}`，与显示名 `Round N:` 同构 | `round-1`、`round-3` |
+| job id（修复） | `fix-{n}`，编号 = 被修复的轮次 | `fix-1`（修复第 1 轮失败） |
+| job id（其他） | kebab-case，显示名动词短语转连字符 | `query`、`compose-pr`、`seed-resume` |
+
+**约束**：
+- 同一 workflow 内 job 显示名必须唯一（round 编号 + 动作组合），`Round N:` 前缀只用于验证轮，修复 job 不得复用该前缀。
+- **job id 与显示名同构**：验证轮 `round-{n}`、修复 `fix-{n}`（场景 2/3 的 `verify`/`fix-r1` 与场景 1 的 `round1` 均已统一到该标准），其他 job 用 kebab-case。`needs.round-1` / `needs.fix-1` 引用随 id 同步。
+- round 相关输入沿用 `round` / `next_round` / `max_rounds`；artifact 名保留 `phase1-` 前缀（跨 run 恢复契约，见 8.x resume/recover 机制）。以下内部标识属于跨 run 契约，**不随 job id 改名**：seed-decisions 目录（`phase1-seed-decisions/roundN`）、`phase1-decideN-` artifact、operation 值（`failure_issue_contract_test`）。
+
+### 12.2 workflow 与 job/step 命名风格
+
+- **workflow 文件名**：功能名 + 场景，`_` 前缀标记内部共享组件（workflow_call）。
+- **job 显示名**：完整职责描述，`Verb + object`。
+- **step 名**：`Verb + object`，架构一律放尾随括号：`Validate natively (x86_64)`。
+- **共享组件**：checkout 步骤统一 `Check out workflow source`；工具链准备统一 `Set up tooling`。
