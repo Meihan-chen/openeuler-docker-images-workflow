@@ -28,11 +28,38 @@ class AgentTimeoutError(AgentRuntimeError):
         self.elapsed = elapsed
 
 
+class AgentScratchOverLimitError(AgentRuntimeError):
+    """Raised when the scratch watchdog stopped the Agent over its cap.
+
+    Deliberately a sibling of AgentTimeoutError: a budget timeout can be an
+    advisory gap (QA) or a retry candidate, but an overfull scratch directory
+    is a hard resource failure that must never be retried.
+    """
+
+    def __init__(
+        self, *, role: str, elapsed: float, scratch_mb: int, limit_mb: int
+    ) -> None:
+        super().__init__(
+            f"OpenCode {role} stopped after {elapsed:.1f}s because scratch "
+            f"{scratch_mb}MB exceeded the {limit_mb}MB limit"
+        )
+        self.role = role
+        self.elapsed = elapsed
+        self.scratch_mb = scratch_mb
+        self.limit_mb = limit_mb
+
+
 MODEL = "deepseek/deepseek-v4-flash"
 _AGENT_HEARTBEAT_SECONDS = 60.0
 # Research downloads are the one Agent action that can quietly consume a whole
 # budget, so cap the scratch directory instead of trusting the prompt alone.
-_SCRATCH_LIMIT_MB = 6000
+# A Kylin image context needs ~3.3GB just for downloads (Run 31065008627 was
+# aborted at 3033MB), so the default keeps headroom over that; override with
+# OE_AGENT_SCRATCH_LIMIT_MB when a runner has tighter disk.
+_SCRATCH_LIMIT_MB = int(os.environ.get("OE_AGENT_SCRATCH_LIMIT_MB", "6000"))
+if _SCRATCH_LIMIT_MB < 1:
+    raise ValueError("OE_AGENT_SCRATCH_LIMIT_MB must be a positive integer")
+_SCRATCH_WARN_FRACTION = 0.8
 _MESSAGE_DETAIL_LIMIT = 4000
 _ACTION_DETAIL_LIMIT = 240
 _VISIBLE_ACTION_TOOLS = {
@@ -210,6 +237,13 @@ def _default_runner(
     def scratch_watchdog() -> str | None:
         scratch_mb[0] = _directory_size_mb(scratch)
         if scratch_mb[0] <= _SCRATCH_LIMIT_MB:
+            if scratch_mb[0] > _SCRATCH_LIMIT_MB * _SCRATCH_WARN_FRACTION:
+                log(
+                    f"agent:{role}",
+                    f"WARN scratch_high scratch={scratch_mb[0]}MB "
+                    f"limit={_SCRATCH_LIMIT_MB}MB "
+                    f"threshold={_SCRATCH_WARN_FRACTION:.0%}",
+                )
             return None
         log(
             f"agent:{role}",
@@ -565,12 +599,16 @@ def run_agent(
         f"prompt_chars={len(prompt)} workspace={workspace}",
     )
     result = runner(command, workspace, env, timeout)
-    if result.returncode == 124 and not _saw_any_activity(
-        str(result.stdout or "")
+    if (
+        result.returncode == 124
+        and not _saw_any_activity(str(result.stdout or ""))
+        and getattr(result, "abort_reason", "timeout") != "scratch_over_limit"
     ):
         # Nothing was ever attempted, so the provider hung rather than the
         # Agent overrunning its boundary. Failing here made the run repay the
-        # Creator calls that had already succeeded.
+        # Creator calls that had already succeeded. An overfull scratch
+        # directory is never retried: the workspace is already at its cap and
+        # the retry would be aborted again.
         log(
             f"agent:{role}",
             f"RETRY reason=no_output elapsed={time.monotonic() - started:.1f}s",
@@ -580,6 +618,19 @@ def run_agent(
     elapsed = time.monotonic() - started
     if result.returncode != 0:
         if result.returncode == 124:
+            if getattr(result, "abort_reason", "timeout") == "scratch_over_limit":
+                scratch_mb = _directory_size_mb(Path(env["OE_AGENT_SCRATCH"]))
+                log(
+                    f"agent:{role}",
+                    f"SCRATCH_OVER_LIMIT elapsed={elapsed:.1f}s "
+                    f"scratch={scratch_mb}MB limit={_SCRATCH_LIMIT_MB}MB",
+                )
+                raise AgentScratchOverLimitError(
+                    role=role,
+                    elapsed=elapsed,
+                    scratch_mb=scratch_mb,
+                    limit_mb=_SCRATCH_LIMIT_MB,
+                )
             log(f"agent:{role}", f"TIMEOUT elapsed={elapsed:.1f}s")
             raise AgentTimeoutError(role=role, elapsed=elapsed)
         log(
