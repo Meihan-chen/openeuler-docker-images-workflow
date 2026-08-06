@@ -54,6 +54,15 @@ _RUN_ID_RE = re.compile(r"^[1-9][0-9]*$")
 _LOG_HEAD_CHARS = 2000
 _LOG_TAIL_CHARS = 4000
 _CONTAINER_LOG_LINES = "200"
+# An entrypoint that reports "export properties error" and exits has told the
+# Fixer that something failed, not what. The reason is in a file the container
+# wrote and docker logs never saw, so probe for those files by shape rather
+# than by name: run 31106121623 spent 22 minutes rebuilding Kylin locally to
+# read a shell.stderr that was sitting inside the container the whole time.
+_PROBE_ROOTS = ("/opt", "/home", "/srv", "/app", "/usr/local", "/var/log")
+_PROBE_NAMES = ("*.log", "*.out", "*.err", "*.stderr")
+_PROBE_MAX_FILES = "20"
+_PROBE_TAIL_LINES = "200"
 _E2E_CHECKS = (
     "native_build",
     "dgoss",
@@ -264,6 +273,29 @@ def _run(
     return result
 
 
+def _probe_script() -> str:
+    """Shell that reports what is running and dumps the logs docker never saw.
+
+    Deliberately POSIX sh and best-effort throughout: a probe that fails on an
+    unusual image must still return the part it managed to collect.
+    """
+    names = " -o ".join(f"-name '{pattern}'" for pattern in _PROBE_NAMES)
+    roots = " ".join(_PROBE_ROOTS)
+    return (
+        "echo '### processes'\n"
+        "ps -ef 2>/dev/null || ps aux 2>/dev/null || echo '(ps unavailable)'\n"
+        f"for root in {roots}; do\n"
+        '  [ -d "$root" ] || continue\n'
+        f'  find "$root" -type f \\( {names} \\) 2>/dev/null\n'
+        "done"
+        f" | head -n {_PROBE_MAX_FILES}"
+        " | while IFS= read -r file; do\n"
+        '  echo "### $file"\n'
+        f'  tail -n {_PROBE_TAIL_LINES} "$file" 2>/dev/null\n'
+        "done\n"
+    )
+
+
 def _container_evidence(
     runner: CommandRunner,
     *,
@@ -322,10 +354,40 @@ def _container_evidence(
                 returncode=logs.returncode,
             )
             log_summary = _container_log_summary(_raw_output(logs))
+        probe_command = ["docker", "exec", name, "sh", "-c", _probe_script()]
+        if runner is _default_runner:
+            probe_metadata, probe_summary = _stream_command_evidence(
+                command=probe_command,
+                cwd=workspace,
+                artifact_root=artifact_root,
+                path=artifact_root / "diagnostics" / f"{name}.probe.log",
+                timeout=120,
+            )
+        else:
+            probed = _run(
+                runner,
+                probe_command,
+                cwd=workspace,
+                timeout=120,
+                check=False,
+            )
+            probe_metadata = _capture_status(
+                _write_full_evidence(
+                    artifact_root=artifact_root,
+                    diagnostics_dir=artifact_root / "diagnostics",
+                    name=name,
+                    suffix="probe.log",
+                    content=_raw_output(probed),
+                ),
+                returncode=probed.returncode,
+            )
+            probe_summary = _container_log_summary(_raw_output(probed))
         evidence[name] = {
             "state": _merged_output(inspected),
             "logs": log_summary,
             "full_logs": log_metadata,
+            "probe": probe_summary,
+            "full_probe": probe_metadata,
         }
     return evidence
 

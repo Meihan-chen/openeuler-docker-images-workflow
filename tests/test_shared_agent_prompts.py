@@ -306,8 +306,13 @@ def test_fixer_prompt_documents_the_payload_the_harness_actually_sends():
         "failure_details",
         "container_evidence",
         "stdout_head",
+        "probe",
+        "full_probe",
     ):
         assert field in fixer
+    # Rebuilding the runtime locally to read a log the container already holds
+    # is what cost run 31106121623 its whole scratch budget.
+    assert "不要为了复现" in fixer
     assert "逐项分类" in fixer
     assert "`failures` 是可选字段" in fixer
     assert "取决于失败类型" in fixer

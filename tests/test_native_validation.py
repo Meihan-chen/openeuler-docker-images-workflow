@@ -17,6 +17,8 @@ class DockerRunner:
         container_logs="",
         container_logs_returncode=0,
         container_state="exited 1 kvrocks refused to start",
+        container_probe="",
+        container_probe_returncode=0,
     ):
         self.fail_build = fail_build
         self.failure_text = failure_text
@@ -25,6 +27,8 @@ class DockerRunner:
         self.container_logs = container_logs
         self.container_logs_returncode = container_logs_returncode
         self.container_state = container_state
+        self.container_probe = container_probe
+        self.container_probe_returncode = container_probe_returncode
         self.builders = set()
         self.calls = []
 
@@ -53,6 +57,10 @@ class DockerRunner:
         ):
             return subprocess.CompletedProcess(
                 command, 1, "", self.failure_text
+            )
+        if command[:2] == ["docker", "exec"] and "### processes" in command[-1]:
+            return subprocess.CompletedProcess(
+                command, self.container_probe_returncode, self.container_probe, ""
             )
         if self.fail_shared_tests and command[:2] == ["docker", "exec"]:
             return subprocess.CompletedProcess(
@@ -756,6 +764,87 @@ def test_native_validation_failure_captures_container_state_before_cleanup(
         i for i, c in enumerate(ordered) if c.startswith("docker rm --force")
     )
     assert logs_at < removed_at
+
+
+def test_native_validation_failure_probes_inside_the_container(tmp_path):
+    """docker logs can carry the symptom while the cause stays in the image.
+
+    Run 31106121623 got two lines -- "export properties error" and a missing
+    kylin.out -- and the Fixer then spent 22 minutes rebuilding Kylin locally
+    to read a shell.stderr the container already held.
+    """
+    from scripts.lib.native_validation import (
+        NativeValidationError,
+        validate_native_image,
+    )
+
+    workspace = _workspace(tmp_path)
+    dgoss, goss = _tools(tmp_path)
+    report_path = tmp_path / "reports" / "x86_64.json"
+    runner = DockerRunner(
+        fail_dgoss=True,
+        failure_text="dgoss failed",
+        container_logs="export properties error\n",
+        container_probe=(
+            "### processes\n"
+            "UID  PID  CMD\n"
+            "### /home/kylin/apache-kylin-5.0.3-bin/logs/shell.stderr\n"
+            "java.lang.ClassNotFoundException: org.apache.commons.io.FileUtils\n"
+        ),
+    )
+
+    with pytest.raises(NativeValidationError):
+        validate_native_image(
+            workspace=workspace,
+            task=_task(),
+            architecture="x86_64",
+            run_id="123456",
+            dgoss=dgoss,
+            goss=goss,
+            report_path=report_path,
+            junit_path=tmp_path / "reports" / "x86_64.junit.xml",
+            runner=runner,
+            sleep=lambda _: None,
+        )
+
+    evidence = json.loads(report_path.read_text())["container_evidence"]
+    probes = "\n".join(str(entry["probe"]) for entry in evidence.values())
+    assert "shell.stderr" in probes
+    assert "ClassNotFoundException" in probes
+
+    runtime = next(name for name in evidence if name.endswith("runtime"))
+    saved = report_path.parent / evidence[runtime]["full_probe"]["path"]
+    assert saved.name == f"{runtime}.probe.log"
+    assert "ClassNotFoundException" in saved.read_text()
+    assert evidence[runtime]["full_probe"]["capture_status"] == "complete"
+
+    probe_at = next(
+        index
+        for index, call in enumerate(runner.calls)
+        if call["command"][:2] == ["docker", "exec"]
+        and "### processes" in call["command"][-1]
+    )
+    removed_at = next(
+        index
+        for index, call in enumerate(runner.calls)
+        if " ".join(call["command"]).startswith("docker rm --force")
+    )
+    assert probe_at < removed_at
+
+
+def test_container_probe_searches_by_shape_not_by_application(tmp_path):
+    """The probe cannot know an image's log layout, so it must not assume one."""
+    from scripts.lib.native_validation import _probe_script
+
+    script = _probe_script()
+
+    for root in ("/opt", "/home", "/var/log"):
+        assert root in script
+    for pattern in ("*.log", "*.stderr"):
+        assert pattern in script
+    assert "kylin" not in script.lower()
+    # Best-effort throughout: an unusual image still returns what it could.
+    assert "2>/dev/null" in script
 
 
 def test_native_validation_failure_saves_complete_container_evidence_artifacts(

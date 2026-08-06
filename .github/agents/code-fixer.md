@@ -41,7 +41,11 @@ Harness 在 `## Review report to resolve` 下附一个 JSON 对象，字段如�
 `stdout_head`、`stdout_tail`，测试契约失败包含 `findings`。`failed_stage`、`failure`
 和 `failure_details` 保留为第一项失败的兼容视图。报告还可能包含独立的
 `format_check`（上游格式检查的版本、类别和原始输出）及 `container_evidence`
-（容器 `state` 与 `logs`）。
+（容器 `state`、`logs` 与 `probe`）。
+`probe` 是在容器内部采集的:进程表,以及镜像自己写下、`docker logs` 看不到的日志
+文件(按 `*.log`/`*.out`/`*.err`/`*.stderr` 搜集,每个文件取尾部)。应用启动失败时
+`logs` 往往只有一句无信息量的结论,真正的堆栈在 `probe` 里——先读它,不要为了复现
+而在本地重建整套运行环境。完整文件见 `full_probe.path`。
 可修改文件清单在 `## Fixer whitelist` 一节，不在本 JSON 内。
 
 ## 诊断流程（内置 Analyst 能力）
