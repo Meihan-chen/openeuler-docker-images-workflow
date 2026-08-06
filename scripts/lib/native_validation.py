@@ -142,11 +142,44 @@ def _merged_output(result: subprocess.CompletedProcess) -> str:
     )
 
 
+def _raw_output(result: subprocess.CompletedProcess) -> str:
+    stdout = str(result.stdout or "")
+    stderr = str(result.stderr or "")
+    if stdout and stderr and not stdout.endswith("\n"):
+        return f"{stdout}\n{stderr}"
+    return stdout + stderr
+
+
 def _clip(text: str) -> tuple[str, str]:
     """Both ends of a failure log: the earliest error and the final error."""
     if len(text) <= _LOG_HEAD_CHARS + _LOG_TAIL_CHARS:
         return text, ""
     return text[:_LOG_HEAD_CHARS], text[-_LOG_TAIL_CHARS:]
+
+
+def _container_log_summary(text: str) -> str:
+    tail = "\n".join(text.splitlines()[-int(_CONTAINER_LOG_LINES) :])
+    head, end = _clip(tail)
+    return head if not end else f"{head}\n...\n{end}"
+
+
+def _write_full_evidence(
+    *,
+    artifact_root: Path,
+    diagnostics_dir: Path,
+    name: str,
+    suffix: str,
+    content: str,
+) -> dict[str, object]:
+    diagnostics_dir.mkdir(parents=True, exist_ok=True)
+    path = diagnostics_dir / f"{name}.{suffix}"
+    path.write_text(content)
+    payload = path.read_bytes()
+    return {
+        "path": path.relative_to(artifact_root).as_posix(),
+        "size_bytes": len(payload),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    }
 
 
 def _run(
@@ -181,6 +214,7 @@ def _container_evidence(
     *,
     workspace: Path,
     containers: Sequence[str],
+    artifact_root: Path,
 ) -> dict[str, object]:
     """Read what the containers themselves reported, before cleanup removes them.
 
@@ -205,18 +239,39 @@ def _container_evidence(
         )
         if inspected.returncode != 0:
             continue
-        logs = _run(
+        full_inspect = _run(
             runner,
-            ["docker", "logs", "--tail", _CONTAINER_LOG_LINES, name],
+            ["docker", "inspect", name],
             cwd=workspace,
             timeout=60,
             check=False,
         )
-        head, tail = _clip(_merged_output(logs))
+        logs = _run(
+            runner,
+            ["docker", "logs", "--timestamps", name],
+            cwd=workspace,
+            timeout=60,
+            check=False,
+        )
         evidence[name] = {
             "state": _merged_output(inspected),
-            "logs": head if not tail else f"{head}\n...\n{tail}",
+            "logs": _container_log_summary(_raw_output(logs)),
+            "full_logs": _write_full_evidence(
+                artifact_root=artifact_root,
+                diagnostics_dir=artifact_root / "diagnostics",
+                name=name,
+                suffix="docker.log",
+                content=_raw_output(logs),
+            ),
         }
+        if full_inspect.returncode == 0:
+            evidence[name]["full_inspect"] = _write_full_evidence(
+                artifact_root=artifact_root,
+                diagnostics_dir=artifact_root / "diagnostics",
+                name=name,
+                suffix="inspect.json",
+                content=_raw_output(full_inspect),
+            )
     return evidence
 
 
@@ -751,6 +806,7 @@ def validate_native_image(
                 runner,
                 workspace=workspace,
                 containers=(dgoss_container, container),
+                artifact_root=report_path.parent,
             )
     finally:
         # The builder outlives this call on purpose: repair rounds re-enter

@@ -1,3 +1,4 @@
+import hashlib
 import json
 import subprocess
 import xml.etree.ElementTree as ET
@@ -15,6 +16,7 @@ class DockerRunner:
         fail_shared_tests=False,
         container_logs="",
         container_state="exited 1 kvrocks refused to start",
+        container_inspect='[{"State":{"Status":"exited","ExitCode":1}}]\n',
     ):
         self.fail_build = fail_build
         self.failure_text = failure_text
@@ -22,6 +24,7 @@ class DockerRunner:
         self.fail_shared_tests = fail_shared_tests
         self.container_logs = container_logs
         self.container_state = container_state
+        self.container_inspect = container_inspect
         self.builders = set()
         self.calls = []
 
@@ -40,6 +43,10 @@ class DockerRunner:
                 command, 0, self.container_logs, ""
             )
         if command[:2] == ["docker", "inspect"]:
+            if "--format" not in command:
+                return subprocess.CompletedProcess(
+                    command, 0, self.container_inspect, ""
+                )
             return subprocess.CompletedProcess(
                 command, 0, f"{self.container_state}\n", ""
             )
@@ -753,6 +760,68 @@ def test_native_validation_failure_captures_container_state_before_cleanup(
         i for i, c in enumerate(ordered) if c.startswith("docker rm --force")
     )
     assert logs_at < removed_at
+
+
+def test_native_validation_failure_saves_complete_container_evidence_artifacts(
+    tmp_path,
+):
+    from scripts.lib.native_validation import (
+        NativeValidationError,
+        validate_native_image,
+    )
+
+    workspace = _workspace(tmp_path)
+    dgoss, goss = _tools(tmp_path)
+    report_path = tmp_path / "reports" / "x86_64.json"
+    container_logs = "".join(f"line-{index:03d}\n" for index in range(250))
+    container_inspect = '[{"State":{"Status":"exited","ExitCode":1}}]\n'
+    runner = DockerRunner(
+        fail_dgoss=True,
+        failure_text="dgoss failed",
+        container_logs=container_logs,
+        container_inspect=container_inspect,
+    )
+
+    with pytest.raises(NativeValidationError):
+        validate_native_image(
+            workspace=workspace,
+            task=_task(),
+            architecture="x86_64",
+            run_id="123456",
+            dgoss=dgoss,
+            goss=goss,
+            report_path=report_path,
+            junit_path=tmp_path / "reports" / "x86_64.junit.xml",
+            runner=runner,
+            sleep=lambda _: None,
+        )
+
+    report = json.loads(report_path.read_text())
+    runtime = "oe-e2e-123456-x86-64-runtime"
+    evidence = report["container_evidence"][runtime]
+    log_metadata = evidence["full_logs"]
+    log_path = report_path.parent / log_metadata["path"]
+    assert log_path.read_text() == container_logs
+    assert log_metadata["size_bytes"] == len(container_logs.encode())
+    assert log_metadata["sha256"] == hashlib.sha256(
+        container_logs.encode()
+    ).hexdigest()
+    assert "line-000" not in evidence["logs"]
+    assert "line-249" in evidence["logs"]
+
+    inspect_metadata = evidence["full_inspect"]
+    inspect_path = report_path.parent / inspect_metadata["path"]
+    assert inspect_path.read_text() == container_inspect
+    assert inspect_metadata["sha256"] == hashlib.sha256(
+        container_inspect.encode()
+    ).hexdigest()
+    docker_log_commands = [
+        call["command"]
+        for call in runner.calls
+        if call["command"][:2] == ["docker", "logs"]
+    ]
+    assert docker_log_commands
+    assert all("--tail" not in command for command in docker_log_commands)
 
 
 def test_native_pipeline_smoke_builds_and_runs_dgoss_without_ai(

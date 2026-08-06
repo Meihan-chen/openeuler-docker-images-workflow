@@ -38,6 +38,12 @@ def _executable(tmp_path):
     return path
 
 
+def test_default_scratch_limit_is_six_gibibytes():
+    from scripts.lib import agent_runtime
+
+    assert agent_runtime._SCRATCH_LIMIT_MB == 6000
+
+
 def test_default_agent_runner_streams_safe_progress(tmp_path, capsys):
     from scripts.lib.agent_runtime import run_agent
 
@@ -240,6 +246,56 @@ def test_write_agent_uses_pinned_model_and_scoped_permissions(tmp_path):
     assert config["permission"]["bash"] == "allow"
     assert config["permission"]["task"] == "deny"
     assert config["permission"]["external_directory"] == "deny"
+
+
+def test_fixer_can_read_only_declared_external_evidence_directories(tmp_path):
+    from scripts.lib.agent_runtime import run_agent
+
+    executable = _executable(tmp_path)
+    workspace = tmp_path / "target"
+    workspace.mkdir()
+    evidence_dirs = (
+        tmp_path / "phase1-x86" / "diagnostics",
+        tmp_path / "phase1-arm" / "diagnostics",
+    )
+    for directory in evidence_dirs:
+        directory.mkdir(parents=True)
+    event = {
+        "type": "text",
+        "part": {
+            "text": json.dumps(
+                {
+                    "success": True,
+                    "changes": [],
+                }
+            )
+        },
+    }
+    runner = RecordingRunner(_completed(stdout=json.dumps(event) + "\n"))
+
+    run_agent(
+        executable=executable,
+        role="fixer",
+        prompt="Inspect the declared native evidence when useful.",
+        workspace=workspace,
+        api_key="deepseek-secret",
+        required_keys=("success", "changes"),
+        runner=runner,
+        external_read_dirs=evidence_dirs,
+    )
+
+    config = json.loads(runner.calls[0]["env"]["OPENCODE_CONFIG_CONTENT"])
+    patterns = tuple(f"{directory.resolve()}/**" for directory in evidence_dirs)
+    assert list(config["permission"]["external_directory"].items()) == [
+        ("*", "deny"),
+        (patterns[0], "allow"),
+        (patterns[1], "allow"),
+    ]
+    assert list(config["permission"]["edit"].items()) == [
+        ("*", "allow"),
+        (patterns[0], "deny"),
+        (patterns[1], "deny"),
+    ]
 
 
 def test_qa_agent_is_read_only_and_parses_multiline_json_from_event(tmp_path):

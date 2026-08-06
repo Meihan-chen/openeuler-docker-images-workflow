@@ -32,7 +32,7 @@ MODEL = "deepseek/deepseek-v4-flash"
 _AGENT_HEARTBEAT_SECONDS = 60.0
 # Research downloads are the one Agent action that can quietly consume a whole
 # budget, so cap the scratch directory instead of trusting the prompt alone.
-_SCRATCH_LIMIT_MB = 3000
+_SCRATCH_LIMIT_MB = 6000
 _MESSAGE_DETAIL_LIMIT = 4000
 _ACTION_DETAIL_LIMIT = 240
 _VISIBLE_ACTION_TOOLS = {
@@ -458,15 +458,31 @@ def validate_agent_payload(
     _validate_contract(payload, required_keys)
 
 
-def _permission_config(role: str) -> str:
+def _permission_config(
+    role: str,
+    *,
+    external_read_dirs: Sequence[Path] = (),
+) -> str:
     writable = role in _WRITE_ROLES
+    external_patterns = tuple(f"{path.as_posix()}/**" for path in external_read_dirs)
+    edit_permission: object = "allow" if writable else "deny"
+    external_permission: object = "deny"
+    if external_patterns:
+        edit_permission = {
+            "*": "allow",
+            **{pattern: "deny" for pattern in external_patterns},
+        }
+        external_permission = {
+            "*": "deny",
+            **{pattern: "allow" for pattern in external_patterns},
+        }
     permission = {
         "read": "allow" if writable else "deny",
-        "edit": "allow" if writable else "deny",
+        "edit": edit_permission,
         "bash": "allow" if writable else "deny",
         "webfetch": "allow" if writable else "deny",
         "task": "deny",
-        "external_directory": "deny",
+        "external_directory": external_permission,
     }
     return json.dumps(
         {
@@ -474,7 +490,6 @@ def _permission_config(role: str) -> str:
             "permission": permission,
         },
         separators=(",", ":"),
-        sort_keys=True,
     )
 
 
@@ -488,6 +503,7 @@ def run_agent(
     required_keys: tuple[str, ...],
     runner: AgentRunner = _default_runner,
     timeout: int = 1800,
+    external_read_dirs: Sequence[Path] = (),
 ) -> AgentResult:
     executable = Path(executable)
     workspace = Path(workspace)
@@ -505,6 +521,20 @@ def run_agent(
         raise AgentRuntimeError("Agent prompt is required")
     if not required_keys:
         raise AgentRuntimeError("Agent JSON contract must require at least one key")
+    if external_read_dirs and role != "fixer":
+        raise AgentRuntimeError("external evidence directories are fixer-only")
+    normalized_external_dirs: list[Path] = []
+    for directory in external_read_dirs:
+        resolved = Path(directory).resolve()
+        if not resolved.is_dir():
+            raise AgentRuntimeError(
+                f"external evidence directory does not exist: {resolved}"
+            )
+        if resolved == workspace.resolve() or workspace.resolve() in resolved.parents:
+            raise AgentRuntimeError(
+                "external evidence directory must remain outside the Agent workspace"
+            )
+        normalized_external_dirs.append(resolved)
 
     command = [
         str(executable),
@@ -523,7 +553,10 @@ def run_agent(
         "DEEPSEEK_API_KEY": api_key,
         "OE_AGENT_ROLE": role,
         "OE_AGENT_SCRATCH": str(prepare_scratch(workspace)),
-        "OPENCODE_CONFIG_CONTENT": _permission_config(role),
+        "OPENCODE_CONFIG_CONTENT": _permission_config(
+            role,
+            external_read_dirs=tuple(normalized_external_dirs),
+        ),
     }
     started = time.monotonic()
     log(

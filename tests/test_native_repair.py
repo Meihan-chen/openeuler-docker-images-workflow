@@ -726,6 +726,68 @@ def test_one_failing_architecture_repairs_once_with_both_reports(tmp_path):
     assert "deepseek-secret" not in review
 
 
+def test_dual_architecture_fixer_gets_external_native_evidence_paths(tmp_path):
+    fixer = Fixer()
+    evidence_roots = {
+        "x86_64": tmp_path / "phase1-x86" / "diagnostics",
+        "aarch64": tmp_path / "phase1-arm" / "diagnostics",
+    }
+    for architecture, root in evidence_roots.items():
+        root.mkdir(parents=True)
+        (root / "runtime.docker.log").write_text(
+            f"{architecture} complete runtime log\n"
+        )
+
+    _decide(
+        tmp_path,
+        {
+            "x86_64": _report("x86_64", status="failed"),
+            "aarch64": _report("aarch64", status="failed"),
+        },
+        agent_runner=fixer,
+        evidence_roots=evidence_roots,
+    )
+
+    call = fixer.calls[0]
+    assert call["external_read_dirs"] == tuple(
+        root.resolve() for root in evidence_roots.values()
+    )
+    prompt = call["prompt"]
+    assert '"full_evidence"' in prompt
+    for architecture, root in evidence_roots.items():
+        assert architecture in prompt
+        assert str(root.resolve()) in prompt
+        assert str((root / "runtime.docker.log").resolve()) in prompt
+
+
+def test_dual_architecture_fixer_cannot_change_read_only_native_evidence(tmp_path):
+    from scripts.lib.agent_runtime import AgentResult
+    from scripts.lib.native_repair import NativeRepairError
+
+    evidence_root = tmp_path / "phase1-x86" / "diagnostics"
+    evidence_root.mkdir(parents=True)
+    log_path = evidence_root / "runtime.docker.log"
+    log_path.write_text("authoritative runtime log\n")
+
+    def mutating_fixer(**kwargs):
+        log_path.write_text("tampered\n")
+        return AgentResult(
+            role="fixer",
+            payload={"success": True, "changes": [], "summary": "fixed"},
+        )
+
+    with pytest.raises(NativeRepairError, match="read-only native evidence changed"):
+        _decide(
+            tmp_path,
+            {
+                "x86_64": _report("x86_64", status="failed"),
+                "aarch64": _report("aarch64"),
+            },
+            agent_runner=mutating_fixer,
+            evidence_roots={"x86_64": evidence_root},
+        )
+
+
 def test_dual_architecture_fixer_gets_one_hour_timeout(tmp_path):
     fixer = Fixer()
 

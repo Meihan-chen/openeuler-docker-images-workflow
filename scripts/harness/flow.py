@@ -481,6 +481,14 @@ def cmd_phase1_decide(args: argparse.Namespace) -> None:
             "x86_64": json.loads(args.x86_report.read_text()),
             "aarch64": json.loads(args.arm_report.read_text()),
         }
+        evidence_roots = {
+            architecture: diagnostics.resolve()
+            for architecture, report_path in (
+                ("x86_64", args.x86_report),
+                ("aarch64", args.arm_report),
+            )
+            if (diagnostics := report_path.resolve().parent / "diagnostics").is_dir()
+        }
         decision = decide_round(
             workspace=args.workspace,
             task=_load_task(args.task_spec),
@@ -491,6 +499,7 @@ def cmd_phase1_decide(args: argparse.Namespace) -> None:
             report_dir=args.report_dir,
             executable=args.opencode,
             api_key=api_key,
+            evidence_roots=evidence_roots,
         )
     except Exception as error:
         error_message = _redact_secret(str(error), api_key)
