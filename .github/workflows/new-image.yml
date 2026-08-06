@@ -78,7 +78,7 @@ env:
 
 jobs:
   prepare:
-    name: Generate candidate
+    name: Prepare round-1 candidate
     if: >-
       ${{ inputs.operation == 'pipeline_smoke' ||
           inputs.operation == 'validate_only' ||
@@ -94,7 +94,7 @@ jobs:
       - name: Check out workflow source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
-      - name: Set up native x86 runner
+      - name: Set up native runner (x86_64)
         id: tools
         uses: ./.github/actions/phase1-setup
         with:
@@ -124,7 +124,7 @@ jobs:
             --source-url "${SOURCE_URL}" \
             --output "${RUNNER_TEMP}/phase1-prepare/task-spec.json"
 
-      - name: Clone current target master
+      - name: Clone target repository
         run: |
           "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
             target-clone \
@@ -133,7 +133,7 @@ jobs:
             --destination "${RUNNER_TEMP}/phase1-target" \
             --branch master
 
-      - name: Record immutable target base
+      - name: Record target base commit
         id: base
         run: |
           base_sha="$(git -C "${RUNNER_TEMP}/phase1-target" rev-parse HEAD)"
@@ -141,7 +141,7 @@ jobs:
             > "${RUNNER_TEMP}/phase1-prepare/base-sha.txt"
           printf 'sha=%s\n' "${base_sha}" >> "${GITHUB_OUTPUT}"
 
-      - name: Hide existing application from the probe
+      - name: Hide existing app for probe
         if: ${{ inputs.operation == 'existing_as_new_probe' }}
         env:
           SOURCE_APP: ${{ inputs.app }}
@@ -175,14 +175,14 @@ jobs:
             exit 2
           fi
 
-      - name: Apply existing-as-new semantic context
+      - name: Apply existing-as-new context
         if: ${{ inputs.operation == 'existing_as_new_probe' }}
         uses: ./.github/actions/phase1-existing-as-new-context
         with:
           canonical-app: ${{ inputs.app }}
           target-alias: ${{ inputs.app }}-e2e-test
 
-      - name: Generate and review candidate content
+      - name: Generate candidate via agent
         if: >-
           ${{ inputs.operation == 'validate_only' ||
               inputs.operation == 'existing_as_new_probe' ||
@@ -200,7 +200,7 @@ jobs:
             --opencode "${{ steps.tools.outputs.opencode_path }}" \
             --hadolint "${{ steps.tools.outputs.hadolint_path }}"
 
-      - name: Restore existing application after the probe
+      - name: Restore existing app after probe
         if: >-
           ${{ always() &&
               inputs.operation == 'existing_as_new_probe' }}
@@ -285,7 +285,7 @@ jobs:
           output-dir: ${{ runner.temp }}/phase1-prepare
           tolerate-missing: "true"
 
-      - name: Stage the round 1 candidate
+      - name: Stage round-1 candidate
         run: |
           mkdir -p "${RUNNER_TEMP}/phase1-patch1"
           cp "${RUNNER_TEMP}/phase1-prepare/task-spec.json" \
@@ -293,7 +293,7 @@ jobs:
             "${RUNNER_TEMP}/phase1-prepare/changes.patch" \
             "${RUNNER_TEMP}/phase1-patch1/"
 
-      - name: Upload the round 1 candidate
+      - name: Upload round-1 candidate
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: phase1-patch1-${{ github.run_id }}
@@ -311,12 +311,12 @@ jobs:
           retention-days: 30
 
   seed_resume:
-    name: Seed resumed round candidate
+    name: Seed resumed run artifacts
     if: ${{ inputs.operation == 'resume_round' }}
     runs-on: [self-hosted, Linux, X64, oe-image-x86]
     timeout-minutes: 15
     steps:
-      - name: Require the resume inputs
+      - name: Validate resume inputs
         env:
           SOURCE_RUN_ID: ${{ inputs.source_run_id }}
           RESUME_ROUND: ${{ inputs.resume_from_round }}
@@ -329,7 +329,7 @@ jobs:
             *) echo "resume_from_round must be 1, 2, 3 or 4" >&2; exit 2 ;;
           esac
 
-      - name: Download the source round candidate
+      - name: Download source round candidate
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: >-
@@ -340,7 +340,7 @@ jobs:
           repository: ${{ github.repository }}
           run-id: ${{ inputs.source_run_id }}
 
-      - name: Download the source generation evidence
+      - name: Download source generation evidence
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: phase1-generation-${{ inputs.source_run_id }}
@@ -349,7 +349,7 @@ jobs:
           repository: ${{ github.repository }}
           run-id: ${{ inputs.source_run_id }}
 
-      - name: Republish the round candidate under this run
+      - name: Republish candidate for this run
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: >-
@@ -358,7 +358,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Republish the generation evidence under this run
+      - name: Republish generation evidence for this run
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: phase1-generation-${{ github.run_id }}
@@ -366,7 +366,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Download source round 1 decision evidence
+      - name: Download round 1 decision evidence
         id: source_decision1
         if: ${{ inputs.resume_from_round != '1' }}
         continue-on-error: true
@@ -378,7 +378,7 @@ jobs:
           repository: ${{ github.repository }}
           run-id: ${{ inputs.source_run_id }}
 
-      - name: Record missing source round 1 decision evidence
+      - name: Record missing round 1 decision
         if: ${{ inputs.resume_from_round != '1' }}
         run: |
           if [ "${{ steps.source_decision1.outcome }}" != "success" ]; then
@@ -389,7 +389,7 @@ jobs:
               > "${RUNNER_TEMP}/phase1-seed-decisions/round1/missing-source-decision-round1.json"
           fi
 
-      - name: Republish round 1 decision evidence under this run
+      - name: Republish round 1 decision evidence
         if: ${{ inputs.resume_from_round != '1' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -398,7 +398,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Download source round 2 decision evidence
+      - name: Download round 2 decision evidence
         id: source_decision2
         if: >-
           ${{ inputs.resume_from_round == '3' || inputs.resume_from_round == '4' }}
@@ -411,7 +411,7 @@ jobs:
           repository: ${{ github.repository }}
           run-id: ${{ inputs.source_run_id }}
 
-      - name: Record missing source round 2 decision evidence
+      - name: Record missing round 2 decision
         if: >-
           ${{ inputs.resume_from_round == '3' || inputs.resume_from_round == '4' }}
         run: |
@@ -423,7 +423,7 @@ jobs:
               > "${RUNNER_TEMP}/phase1-seed-decisions/round2/missing-source-decision-round2.json"
           fi
 
-      - name: Republish round 2 decision evidence under this run
+      - name: Republish round 2 decision evidence
         if: >-
           ${{ inputs.resume_from_round == '3' || inputs.resume_from_round == '4' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -433,7 +433,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Download source round 3 decision evidence
+      - name: Download round 3 decision evidence
         id: source_decision3
         if: ${{ inputs.resume_from_round == '4' }}
         continue-on-error: true
@@ -445,7 +445,7 @@ jobs:
           repository: ${{ github.repository }}
           run-id: ${{ inputs.source_run_id }}
 
-      - name: Record missing source round 3 decision evidence
+      - name: Record missing round 3 decision
         if: ${{ inputs.resume_from_round == '4' }}
         run: |
           if [ "${{ steps.source_decision3.outcome }}" != "success" ]; then
@@ -456,7 +456,7 @@ jobs:
               > "${RUNNER_TEMP}/phase1-seed-decisions/round3/missing-source-decision-round3.json"
           fi
 
-      - name: Republish round 3 decision evidence under this run
+      - name: Republish round 3 decision evidence
         if: ${{ inputs.resume_from_round == '4' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -466,7 +466,7 @@ jobs:
           retention-days: 30
 
   round1:
-    name: Build & Test & Fix 1
+    name: "Round 1: validate and fix"
     needs: [prepare, seed_resume]
     if: >-
       ${{ always() &&
@@ -490,7 +490,7 @@ jobs:
         secrets.DEEPSEEK_API_KEY || '' }}
 
   round2:
-    name: Build & Test & Fix 2
+    name: "Round 2: validate and fix"
     needs: [round1, seed_resume]
     if: >-
       ${{ always() &&
@@ -516,7 +516,7 @@ jobs:
         secrets.DEEPSEEK_API_KEY || '' }}
 
   round3:
-    name: Build & Test & Fix 3
+    name: "Round 3: validate and fix"
     needs: [round2, seed_resume]
     if: >-
       ${{ always() &&
@@ -542,7 +542,7 @@ jobs:
         secrets.DEEPSEEK_API_KEY || '' }}
 
   round4:
-    name: Build & Test & Fix 4
+    name: "Round 4: validate and fix"
     needs: [round3, seed_resume]
     if: >-
       ${{ always() &&
@@ -568,7 +568,7 @@ jobs:
         secrets.DEEPSEEK_API_KEY || '' }}
 
   package_candidate:
-    name: Verify and seal validated candidate
+    name: Seal and publish final candidate
     # A round that passed on both architectures is itself the proof, so the
     # candidate is sealed from whichever round converged.
     if: >-
@@ -587,7 +587,7 @@ jobs:
     runs-on: [self-hosted, Linux, X64, oe-image-x86]
     timeout-minutes: 60
     steps:
-      - name: Require the source run ID
+      - name: Validate source run ID
         if: >-
           ${{ inputs.operation == 'resume_package' ||
               inputs.operation == 'recover_package' }}
@@ -598,7 +598,7 @@ jobs:
             ''|*[!0-9]*|0) echo "source_run_id must be a positive integer" >&2; exit 2 ;;
           esac
 
-      - name: Require the generation run ID
+      - name: Validate generation run ID
         if: ${{ inputs.operation == 'recover_package' }}
         env:
           GENERATION_RUN_ID: ${{ inputs.generation_run_id }}
@@ -609,7 +609,7 @@ jobs:
 
       # TODO(test-recovery-cleanup): remove this one-time historical lineage
       # allowlist after the phase-one GitCode PR has been created.
-      - name: Confirm the reviewed historical lineage
+      - name: Confirm reviewed lineage
         if: ${{ inputs.operation == 'recover_package' }}
         env:
           GENERATION_RUN_ID: ${{ inputs.generation_run_id }}
@@ -648,7 +648,7 @@ jobs:
             inputs.operation == 'resume_package' &&
             inputs.source_run_id || github.run_id }}
 
-      - name: Download x86 repair evidence
+      - name: Download repair evidence (x86_64)
         if: ${{ inputs.operation == 'recover_package' }}
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
@@ -665,7 +665,7 @@ jobs:
             inputs.operation == 'recover_package') &&
             inputs.source_run_id || github.run_id }}
 
-      - name: Download ARM final patch and evidence
+      - name: Download final patch and evidence (aarch64)
         if: ${{ inputs.operation == 'recover_package' }}
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
@@ -682,7 +682,7 @@ jobs:
             inputs.operation == 'recover_package') &&
             inputs.source_run_id || github.run_id }}
 
-      - name: Download final x86 evidence
+      - name: Download final evidence (x86_64)
         if: ${{ inputs.operation == 'recover_package' }}
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
@@ -699,7 +699,7 @@ jobs:
             inputs.operation == 'recover_package') &&
             inputs.source_run_id || github.run_id }}
 
-      - name: Download the converged round
+      - name: Download converged round candidate
         if: ${{ inputs.operation != 'recover_package' }}
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
@@ -728,7 +728,7 @@ jobs:
             ${{ inputs.operation == 'resume_package' &&
             inputs.source_run_id || github.run_id }}
 
-      - name: Lay the converged round out as sealing input
+      - name: Prepare sealing input layout
         if: ${{ inputs.operation != 'recover_package' }}
         run: |
           mkdir -p "${RUNNER_TEMP}/arm/arm-repair-agents" \
@@ -748,7 +748,7 @@ jobs:
               "${RUNNER_TEMP}/x86/x86-repair-agents/"
           fi
 
-      - name: Verify recovered artifact identity
+      - name: Verify artifact identity matches
         if: ${{ inputs.operation == 'recover_package' }}
         run: |
           cmp "${RUNNER_TEMP}/generation/task-spec.json" \
@@ -802,7 +802,7 @@ jobs:
           workspace: ${{ runner.temp }}/phase1-target
           base-sha-output: ${{ runner.temp }}/package-base-sha.txt
 
-      - name: Replay recovered patch on current target master
+      - name: Replay recovered patch on target master
         if: ${{ inputs.operation == 'recover_package' }}
         run: |
           clone_result="$(
@@ -987,7 +987,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Publish dry-run handoff
+      - name: Publish validate-only handoff
         if: ${{ inputs.operation == 'validate_only' }}
         run: |
           {
@@ -999,7 +999,7 @@ jobs:
             printf -- '- No GitCode branch, PR, or Issue was written.\n'
           } >> "${GITHUB_STEP_SUMMARY}"
 
-      - name: Publish existing-as-new test handoff
+      - name: Publish existing-as-new handoff
         if: ${{ inputs.operation == 'existing_as_new_probe' }}
         env:
           SOURCE_APP: ${{ inputs.app }}
@@ -1015,7 +1015,7 @@ jobs:
             printf -- '- This diagnostic PR must not be merged.\n'
           } >> "${GITHUB_STEP_SUMMARY}"
 
-      - name: Publish pipeline smoke result
+      - name: Publish pipeline smoke handoff
         if: ${{ inputs.operation == 'pipeline_smoke' }}
         run: |
           {
@@ -1026,7 +1026,7 @@ jobs:
             printf -- '- No AI or GitCode write API was used.\n'
           } >> "${GITHUB_STEP_SUMMARY}"
 
-      - name: Publish resumed diagnostic result
+      - name: Publish resume diagnostic handoff
         if: >-
           ${{ inputs.operation == 'resume_package' ||
               inputs.operation == 'resume_round' }}
@@ -1039,7 +1039,7 @@ jobs:
             printf -- '- Run a fresh validate_only before fork_pr.\n'
           } >> "${GITHUB_STEP_SUMMARY}"
 
-      - name: Publish recovered candidate handoff
+      - name: Publish recover handoff
         if: ${{ inputs.operation == 'recover_package' }}
         run: |
           {
@@ -1053,7 +1053,7 @@ jobs:
           } >> "${GITHUB_STEP_SUMMARY}"
 
   release_x86_builders:
-    name: Release x86_64 run builders
+    name: Clean Environment (x86_64)
     # The builder now outlives each validation so repair rounds keep their
     # layer cache, so the run has to hand it back explicitly.
     # resume_round can start at round 2, 3 or 4, so gating on round 1 alone
@@ -1071,10 +1071,10 @@ jobs:
       - name: Check out workflow source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
-      - name: Provision phase-one tooling
+      - name: Set up phase-one tooling
         uses: ./.github/actions/phase1-setup
 
-      - name: Release this run's x86_64 builders
+      - name: Clean Environment (x86_64)
         run: |
           "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
             phase1-native-release \
@@ -1083,7 +1083,7 @@ jobs:
             --run-id "${{ github.run_id }}"
 
   release_arm_builders:
-    name: Release aarch64 run builders
+    name: Clean Environment (aarch64)
     if: >-
       ${{ always() &&
           (needs.round1.result != 'skipped' ||
@@ -1097,10 +1097,10 @@ jobs:
       - name: Check out workflow source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
-      - name: Provision phase-one tooling
+      - name: Set up phase-one tooling
         uses: ./.github/actions/phase1-setup
 
-      - name: Release this run's aarch64 builders
+      - name: Clean Environment (aarch64)
         run: |
           "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
             phase1-native-release \
@@ -1109,7 +1109,7 @@ jobs:
             --run-id "${{ github.run_id }}"
 
   deliver_fork_pr:
-    name: Promote validated candidate to fork PR
+    name: Create fork PR from candidate
     if: >-
       ${{ always() &&
           (inputs.operation == 'fork_pr' ||
@@ -1127,7 +1127,7 @@ jobs:
     outputs:
       pr_url: ${{ steps.delivery.outputs.pr_url }}
     steps:
-      - name: Require the validated run ID
+      - name: Validate validated run ID
         if: ${{ inputs.operation == 'fork_pr' }}
         env:
           VALIDATED_RUN_ID: ${{ inputs.validated_run_id }}
@@ -1139,10 +1139,10 @@ jobs:
       - name: Check out workflow source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
-      - name: Set up phase-one Python environment
+      - name: Set up phase-one tooling
         uses: ./.github/actions/phase1-setup
 
-      - name: Download exact validated candidate
+      - name: Download validated candidate
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: >-
@@ -1207,7 +1207,7 @@ jobs:
           PY
 
   finalize_trigger_issue:
-    name: Update source Issue
+    name: Finalize trigger Issue
     if: >-
       ${{ always() &&
           inputs.operation == 'scenario_one' &&
@@ -1291,7 +1291,7 @@ jobs:
             --failure-evidence-dir "${RUNNER_TEMP}/needs-human"
 
   issue_contract_test:
-    name: Exercise failure Issue lifecycle
+    name: Test failure Issue lifecycle
     if: ${{ inputs.operation == 'failure_issue_contract_test' }}
     runs-on: [self-hosted, Linux, X64, oe-image-x86]
     timeout-minutes: 15
@@ -1299,10 +1299,10 @@ jobs:
       - name: Check out workflow source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
-      - name: Set up phase-one Python environment
+      - name: Set up phase-one tooling
         uses: ./.github/actions/phase1-setup
 
-      - name: Normalize controlled probe TaskSpec
+      - name: Normalize TaskSpec
         env:
           APP: ${{ inputs.app }}
           VERSION: ${{ inputs.version }}

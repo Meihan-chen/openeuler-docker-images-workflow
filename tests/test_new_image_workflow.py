@@ -90,9 +90,9 @@ def test_existing_as_new_probe_hides_reference_and_delivers_alias_pr():
     assert "existing_as_new_probe" in normalize["run"]
     assert '${APP}-e2e-test' in normalize["run"]
 
-    hide = by_name["Hide existing application from the probe"]
-    restore = by_name["Restore existing application after the probe"]
-    generate = by_name["Generate and review candidate content"]
+    hide = by_name["Hide existing app for probe"]
+    restore = by_name["Restore existing app after probe"]
+    generate = by_name["Generate candidate via agent"]
     assert "existing_as_new_probe" in hide["if"]
     assert "update-index --skip-worktree" in hide["run"]
     assert "phase1-hidden-reference" in hide["run"]
@@ -127,7 +127,7 @@ def test_existing_as_new_context_reaches_generation_and_every_fixer():
     jobs = _workflow()["jobs"]
     prepare_steps = jobs["prepare"]["steps"]
     prepare_by_name = {step["name"]: step for step in prepare_steps}
-    context = prepare_by_name["Apply existing-as-new semantic context"]
+    context = prepare_by_name["Apply existing-as-new context"]
 
     assert context["uses"] == (
         "./.github/actions/phase1-existing-as-new-context"
@@ -136,7 +136,7 @@ def test_existing_as_new_context_reaches_generation_and_every_fixer():
     assert context["with"]["canonical-app"] == "${{ inputs.app }}"
     assert context["with"]["target-alias"] == "${{ inputs.app }}-e2e-test"
     assert prepare_steps.index(context) < prepare_steps.index(
-        prepare_by_name["Generate and review candidate content"]
+        prepare_by_name["Generate candidate via agent"]
     )
 
     for name in ROUNDS:
@@ -153,7 +153,7 @@ def test_existing_as_new_context_reaches_generation_and_every_fixer():
     assert call_inputs["target_alias"]["required"] is False
     decide_steps = round_workflow["jobs"]["decide"]["steps"]
     decide_by_name = {step["name"]: step for step in decide_steps}
-    fixer_context = decide_by_name["Apply existing-as-new semantic context"]
+    fixer_context = decide_by_name["Apply existing-as-new context"]
     assert fixer_context["uses"] == context["uses"]
     assert "inputs.canonical_app != ''" in fixer_context["if"]
     assert fixer_context["with"]["canonical-app"] == (
@@ -260,7 +260,7 @@ def test_existing_as_new_probe_shell_restores_reference_without_diff(tmp_path):
     }
 
     hidden = subprocess.run(
-        ["bash", "-c", steps["Hide existing application from the probe"]["run"]],
+        ["bash", "-c", steps["Hide existing app for probe"]["run"]],
         env=env,
         capture_output=True,
         text=True,
@@ -294,7 +294,7 @@ def test_existing_as_new_probe_shell_restores_reference_without_diff(tmp_path):
         [
             "bash",
             "-c",
-            steps["Restore existing application after the probe"]["run"],
+            steps["Restore existing app after probe"]["run"],
         ],
         env=env,
         capture_output=True,
@@ -343,7 +343,7 @@ def test_scenario_one_runs_full_validation_chain_and_delivers_same_run():
     prepare_steps = {step["name"]: step for step in jobs["prepare"]["steps"]}
     assert (
         "scenario_one"
-        in prepare_steps["Generate and review candidate content"]["if"]
+        in prepare_steps["Generate candidate via agent"]["if"]
     )
     # Rounds are operation-agnostic: they validate whatever prepare staged.
     assert jobs["round1"]["with"]["operation"] == "${{ inputs.operation }}"
@@ -353,16 +353,16 @@ def test_validation_rounds_group_build_test_and_fix_jobs():
     jobs = _workflow()["jobs"]
 
     for index, job_id in enumerate(ROUNDS, start=1):
-        assert jobs[job_id]["name"] == f"Build & Test & Fix {index}"
+        assert jobs[job_id]["name"] == f"Round {index}: validate and fix"
 
     round_workflow = _workflow(ROUND_PATH)
     assert round_workflow["name"] == "Phase 1 - Build, test and fix candidate"
     assert set(round_workflow["jobs"]) == {"x86_64", "aarch64", "decide"}
-    assert round_workflow["jobs"]["x86_64"]["name"] == "x86_64"
-    assert round_workflow["jobs"]["aarch64"]["name"] == "aarch64"
+    assert round_workflow["jobs"]["x86_64"]["name"] == "Validate (x86_64)"
+    assert round_workflow["jobs"]["aarch64"]["name"] == "Validate (aarch64)"
     decide = round_workflow["jobs"]["decide"]
     assert decide["name"] == (
-        "Evaluate results and fix if needed"
+        "Decide round outcome"
     )
     assert decide["needs"] == ["x86_64", "aarch64"]
     assert "always()" in decide["if"]
@@ -703,13 +703,13 @@ def test_resume_republishes_decisions_before_the_restarted_round():
 
     for round_number, condition in cases:
         download = steps[
-            f"Download source round {round_number} decision evidence"
+            f"Download round {round_number} decision evidence"
         ]
         marker = steps[
-            f"Record missing source round {round_number} decision evidence"
+            f"Record missing round {round_number} decision"
         ]
         upload = steps[
-            f"Republish round {round_number} decision evidence under this run"
+            f"Republish round {round_number} decision evidence"
         ]
         assert condition in download["if"]
         assert download["id"] == f"source_decision{round_number}"
@@ -1061,18 +1061,18 @@ def test_jobs_and_run_have_readable_display_names():
     assert "inputs.operation" in data["run-name"]
     assert "inputs.app" in data["run-name"]
     expected = {
-        "prepare": "Generate candidate",
-        "seed_resume": "Seed resumed round candidate",
-        "round1": "Build & Test & Fix 1",
-        "round2": "Build & Test & Fix 2",
-        "round3": "Build & Test & Fix 3",
-        "round4": "Build & Test & Fix 4",
-        "package_candidate": "Verify and seal validated candidate",
-        "release_x86_builders": "Release x86_64 run builders",
-        "release_arm_builders": "Release aarch64 run builders",
-        "deliver_fork_pr": "Promote validated candidate to fork PR",
-        "finalize_trigger_issue": "Update source Issue",
-        "issue_contract_test": "Exercise failure Issue lifecycle",
+        "prepare": "Prepare round-1 candidate",
+        "seed_resume": "Seed resumed run artifacts",
+        "round1": "Round 1: validate and fix",
+        "round2": "Round 2: validate and fix",
+        "round3": "Round 3: validate and fix",
+        "round4": "Round 4: validate and fix",
+        "package_candidate": "Seal and publish final candidate",
+        "release_x86_builders": "Clean Environment (x86_64)",
+        "release_arm_builders": "Clean Environment (aarch64)",
+        "deliver_fork_pr": "Create fork PR from candidate",
+        "finalize_trigger_issue": "Finalize trigger Issue",
+        "issue_contract_test": "Test failure Issue lifecycle",
     }
     assert {
         job_id: job["name"] for job_id, job in data["jobs"].items()
@@ -1157,7 +1157,7 @@ def test_validate_only_lints_before_agent_qa_inside_generation():
         for step in _workflow()["jobs"]["prepare"]["steps"]
     }
 
-    generate = prepare_steps["Generate and review candidate content"]
+    generate = prepare_steps["Generate candidate via agent"]
     assert "--hadolint" in generate["run"]
     assert "steps.tools.outputs.hadolint_path" in generate["run"]
 
@@ -1171,11 +1171,11 @@ def test_a_failed_round_still_publishes_the_evidence_the_decision_needs():
 
     for name, architecture in (("x86_64", "x86_64"), ("aarch64", "aarch64")):
         steps = {step.get("name"): step for step in round_jobs[name]["steps"]}
-        validate = steps[f"Validate natively on {architecture}"]
+        validate = steps[f"Validate natively ({architecture})"]
         # The decision stage rules on the round, so a failed build must not
         # fail the job before its report is uploaded.
         assert validate["continue-on-error"] is True
-        upload = steps[f"Upload {architecture} round evidence"]
+        upload = steps[f"Upload round evidence ({architecture})"]
         assert "always()" in upload["if"]
         assert upload["with"]["name"] == (
             "phase1-round${{ inputs.round }}-"
@@ -1196,8 +1196,8 @@ def test_round_replay_turns_only_exhausted_clone_disconnects_into_infra_evidence
             "${{ runner.temp }}/phase1-round"
         )
 
-        validate = steps[f"Validate natively on {architecture}"]
-        smoke = steps[f"Run native pipeline smoke on {architecture}"]
+        validate = steps[f"Validate natively ({architecture})"]
+        smoke = steps[f"Run native pipeline smoke ({architecture})"]
         assert "steps.replay.outputs.replayed == 'true'" in validate["if"]
         assert "steps.replay.outputs.replayed == 'true'" in smoke["if"]
 

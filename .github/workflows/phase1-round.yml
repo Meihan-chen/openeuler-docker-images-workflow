@@ -59,14 +59,14 @@ env:
 
 jobs:
   x86_64:
-    name: x86_64
+    name: Validate (x86_64)
     runs-on: [self-hosted, Linux, X64, oe-image-x86]
     timeout-minutes: 180
     steps:
       - name: Check out workflow source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
-      - name: Provision phase-one tooling
+      - name: Set up phase-one tooling
         id: tools
         uses: ./.github/actions/phase1-setup
         with:
@@ -88,7 +88,7 @@ jobs:
           architecture: x86_64
           evidence-dir: ${{ runner.temp }}/phase1-round
 
-      - name: Validate natively on x86_64
+      - name: Validate natively (x86_64)
         if: >-
           ${{ steps.replay.outputs.replayed == 'true' &&
               inputs.operation != 'pipeline_smoke' }}
@@ -106,7 +106,7 @@ jobs:
             --report "${RUNNER_TEMP}/phase1-round/x86_64.json" \
             --junit "${RUNNER_TEMP}/phase1-round/x86_64.junit.xml"
 
-      - name: Run native pipeline smoke on x86_64
+      - name: Run native pipeline smoke (x86_64)
         if: >-
           ${{ steps.replay.outputs.replayed == 'true' &&
               inputs.operation == 'pipeline_smoke' }}
@@ -125,7 +125,7 @@ jobs:
             --junit "${RUNNER_TEMP}/phase1-round/x86_64.junit.xml" \
             --repair-report-dir "${RUNNER_TEMP}/phase1-round/smoke-agents"
 
-      - name: Upload x86_64 round evidence
+      - name: Upload round evidence (x86_64)
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -135,14 +135,14 @@ jobs:
           retention-days: 30
 
   aarch64:
-    name: aarch64
+    name: Validate (aarch64)
     runs-on: [self-hosted, Linux, ARM64, oe-image-arm64]
     timeout-minutes: 180
     steps:
       - name: Check out workflow source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
-      - name: Provision phase-one tooling
+      - name: Set up phase-one tooling
         id: tools
         uses: ./.github/actions/phase1-setup
         with:
@@ -164,7 +164,7 @@ jobs:
           architecture: aarch64
           evidence-dir: ${{ runner.temp }}/phase1-round
 
-      - name: Validate natively on aarch64
+      - name: Validate natively (aarch64)
         if: >-
           ${{ steps.replay.outputs.replayed == 'true' &&
               inputs.operation != 'pipeline_smoke' }}
@@ -182,7 +182,7 @@ jobs:
             --report "${RUNNER_TEMP}/phase1-round/aarch64.json" \
             --junit "${RUNNER_TEMP}/phase1-round/aarch64.junit.xml"
 
-      - name: Run native pipeline smoke on aarch64
+      - name: Run native pipeline smoke (aarch64)
         if: >-
           ${{ steps.replay.outputs.replayed == 'true' &&
               inputs.operation == 'pipeline_smoke' }}
@@ -201,7 +201,7 @@ jobs:
             --junit "${RUNNER_TEMP}/phase1-round/aarch64.junit.xml" \
             --repair-report-dir "${RUNNER_TEMP}/phase1-round/smoke-agents"
 
-      - name: Upload aarch64 round evidence
+      - name: Upload round evidence (aarch64)
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -211,7 +211,7 @@ jobs:
           retention-days: 30
 
   decide:
-    name: Evaluate results and fix if needed
+    name: Decide round outcome
     needs: [x86_64, aarch64]
     if: ${{ always() }}
     runs-on: [self-hosted, Linux, X64, oe-image-x86]
@@ -223,13 +223,13 @@ jobs:
       - name: Check out workflow source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
-      - name: Provision phase-one tooling
+      - name: Set up phase-one tooling
         id: tools
         uses: ./.github/actions/phase1-setup
         with:
           arch: x86_64
 
-      - name: Apply existing-as-new semantic context
+      - name: Apply existing-as-new context
         if: ${{ inputs.canonical_app != '' }}
         uses: ./.github/actions/phase1-existing-as-new-context
         with:
@@ -242,13 +242,13 @@ jobs:
           name: phase1-patch${{ inputs.round }}-${{ github.run_id }}
           path: ${{ runner.temp }}/phase1-input
 
-      - name: Download x86_64 round evidence
+      - name: Download round evidence (x86_64)
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: phase1-round${{ inputs.round }}-x86_64-${{ github.run_id }}
           path: ${{ runner.temp }}/phase1-x86
 
-      - name: Download aarch64 round evidence
+      - name: Download round evidence (aarch64)
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: phase1-round${{ inputs.round }}-aarch64-${{ github.run_id }}

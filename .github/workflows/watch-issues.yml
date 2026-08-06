@@ -32,7 +32,7 @@ jobs:
       - name: Check out workflow source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
-      - name: Require the phase-one Issue allowlist
+      - name: Validate Issue allowlist
         if: github.event_name == 'workflow_dispatch'
         env:
           ISSUE_NUMBER: >-
