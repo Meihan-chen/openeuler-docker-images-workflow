@@ -726,6 +726,21 @@ def test_one_failing_architecture_repairs_once_with_both_reports(tmp_path):
     assert "deepseek-secret" not in review
 
 
+def test_dual_architecture_fixer_gets_one_hour_timeout(tmp_path):
+    fixer = Fixer()
+
+    _decide(
+        tmp_path,
+        {
+            "x86_64": _report("x86_64"),
+            "aarch64": _report("aarch64", status="failed"),
+        },
+        agent_runner=fixer,
+    )
+
+    assert fixer.calls[0]["timeout"] == 3600
+
+
 def test_fixer_receives_a_classification_for_every_native_check_failure(
     tmp_path,
 ):

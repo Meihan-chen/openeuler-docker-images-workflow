@@ -515,6 +515,7 @@ def decide_round(
             workspace=workspace,
             api_key=api_key,
             required_keys=("success", "changes"),
+            timeout=3600,
         )
         _write_fixer_report(
             directory=report_dir,
