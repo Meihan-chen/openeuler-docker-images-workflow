@@ -57,7 +57,7 @@ def test_preflight_reports_all_missing_capabilities(tmp_path):
         architecture="x86_64",
         cpu_count=2,
         memory_available_bytes=4 * GIB,
-        disk_free_bytes=10 * GIB,
+        disk_free_bytes=5 * GIB,
         docker_server_version="",
         buildx_version="",
         tools={},
@@ -70,7 +70,7 @@ def test_preflight_reports_all_missing_capabilities(tmp_path):
     for expected in (
         "at least 4 CPUs",
         "at least 8 GiB",
-        "at least 15 GiB",
+        "at least 10 GiB",
         "Docker daemon",
         "Buildx",
         "dgoss",

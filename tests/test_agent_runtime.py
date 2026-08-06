@@ -1,6 +1,7 @@
 import json
 import re
 import subprocess
+from types import SimpleNamespace
 
 import pytest
 
@@ -38,10 +39,63 @@ def _executable(tmp_path):
     return path
 
 
-def test_default_scratch_limit_is_six_gibibytes():
+def test_scratch_budget_leaves_the_build_its_reserved_disk(tmp_path, monkeypatch):
+    """The cap is derived from free disk, not from a guessed constant."""
+    from scripts.lib import agent_runtime, toolchain
+
+    reserve_mb = toolchain.MIN_DISK_FREE // (1024 * 1024)
+    monkeypatch.setattr(
+        agent_runtime.shutil,
+        "disk_usage",
+        lambda path: SimpleNamespace(free=(reserve_mb + 500) * 1024 * 1024),
+    )
+
+    # Scratch may claim the 500MB above the reserve, plus the 200MB it already
+    # holds, because deleting it would hand those blocks back.
+    assert agent_runtime._scratch_budget_mb(tmp_path, 200) == 700
+
+
+def test_scratch_budget_never_goes_negative(tmp_path, monkeypatch):
+    """Below the reserve there is nothing left to grant, but no nonsense either."""
     from scripts.lib import agent_runtime
 
-    assert agent_runtime._SCRATCH_LIMIT_MB == 6000
+    monkeypatch.setattr(
+        agent_runtime.shutil,
+        "disk_usage",
+        lambda path: SimpleNamespace(free=0),
+    )
+
+    assert agent_runtime._scratch_budget_mb(tmp_path, 0) == 0
+
+
+def test_scratch_budget_stays_under_the_configured_ceiling(tmp_path, monkeypatch):
+    """A huge disk still cannot let one Agent run unbounded."""
+    from scripts.lib import agent_runtime
+
+    monkeypatch.setattr(agent_runtime, "_SCRATCH_CEILING_MB", 50)
+    monkeypatch.setattr(
+        agent_runtime.shutil,
+        "disk_usage",
+        lambda path: SimpleNamespace(free=10 * 1024 * 1024 * 1024 * 1024),
+    )
+
+    assert agent_runtime._scratch_budget_mb(tmp_path, 0) == 50
+
+
+def test_scratch_size_counts_blocks_held_not_length_claimed(tmp_path):
+    """A sparse file must not be charged for blocks it never wrote.
+
+    Run 31106121623 recorded a 6GB jump in one watchdog interval because
+    st_size counts a preallocated file at its nominal length.
+    """
+    from scripts.lib import agent_runtime
+
+    sparse = tmp_path / "sparse.db"
+    with sparse.open("wb") as handle:
+        handle.truncate(512 * 1024 * 1024)
+
+    assert sparse.stat().st_size == 512 * 1024 * 1024
+    assert agent_runtime._directory_size_mb(tmp_path) < 64
 
 
 def test_default_agent_runner_streams_safe_progress(tmp_path, capsys):
@@ -1202,7 +1256,7 @@ def test_scratch_growth_past_the_limit_stops_the_agent(
     """
     from scripts.lib import agent_runtime, progress
 
-    monkeypatch.setattr(agent_runtime, "_SCRATCH_LIMIT_MB", 1)
+    monkeypatch.setattr(agent_runtime, "_SCRATCH_CEILING_MB", 1)
     monkeypatch.setattr(progress, "_WATCHDOG_INTERVAL_SECONDS", 0.05)
     monkeypatch.setattr(progress, "_KILL_GRACE_SECONDS", 0.5)
     executable = tmp_path / "opencode"
@@ -1236,8 +1290,8 @@ def test_scratch_growth_past_the_limit_stops_the_agent(
     assert "SCRATCH_OVER_LIMIT" in output
 
 
-def test_scratch_limit_is_configurable_via_environment(monkeypatch):
-    """A tighter runner can shrink the cap without a code change."""
+def test_scratch_limit_is_configurable_via_environment(tmp_path, monkeypatch):
+    """A tighter Runner can lower the ceiling without a code change."""
     import importlib
 
     from scripts.lib import agent_runtime
@@ -1245,11 +1299,17 @@ def test_scratch_limit_is_configurable_via_environment(monkeypatch):
     monkeypatch.setenv("OE_AGENT_SCRATCH_LIMIT_MB", "123")
     try:
         importlib.reload(agent_runtime)
-        assert agent_runtime._SCRATCH_LIMIT_MB == 123
+        assert agent_runtime._SCRATCH_CEILING_MB == 123
+        # The ceiling wins whenever it is the tighter of the two bounds.
+        monkeypatch.setattr(
+            agent_runtime.shutil,
+            "disk_usage",
+            lambda path: SimpleNamespace(free=10 * 1024 * 1024 * 1024 * 1024),
+        )
+        assert agent_runtime._scratch_budget_mb(tmp_path, 0) == 123
     finally:
         monkeypatch.delenv("OE_AGENT_SCRATCH_LIMIT_MB")
         importlib.reload(agent_runtime)
-    assert agent_runtime._SCRATCH_LIMIT_MB >= 6000
 
 
 def test_scratch_overrun_never_retries_the_agent(tmp_path):
@@ -1289,7 +1349,7 @@ def test_scratch_warning_is_logged_before_the_limit(
     """Approaching the cap logs WARN scratch_high before any abort."""
     from scripts.lib import agent_runtime, progress
 
-    monkeypatch.setattr(agent_runtime, "_SCRATCH_LIMIT_MB", 10)
+    monkeypatch.setattr(agent_runtime, "_SCRATCH_CEILING_MB", 10)
     monkeypatch.setattr(progress, "_WATCHDOG_INTERVAL_SECONDS", 0.05)
     monkeypatch.setattr(progress, "_KILL_GRACE_SECONDS", 0.5)
     executable = tmp_path / "opencode"

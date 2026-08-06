@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -13,6 +14,7 @@ from pathlib import Path
 from typing import Callable, Iterator, Mapping, Sequence
 
 from scripts.lib.progress import log, run_streaming
+from scripts.lib.toolchain import MIN_DISK_FREE
 
 
 class AgentRuntimeError(RuntimeError):
@@ -53,11 +55,19 @@ MODEL = "deepseek/deepseek-v4-flash"
 _AGENT_HEARTBEAT_SECONDS = 60.0
 # Research downloads are the one Agent action that can quietly consume a whole
 # budget, so cap the scratch directory instead of trusting the prompt alone.
-# A Kylin image context needs ~3.3GB just for downloads (Run 31065008627 was
-# aborted at 3033MB), so the default keeps headroom over that; override with
-# OE_AGENT_SCRATCH_LIMIT_MB when a runner has tighter disk.
-_SCRATCH_LIMIT_MB = int(os.environ.get("OE_AGENT_SCRATCH_LIMIT_MB", "6000"))
-if _SCRATCH_LIMIT_MB < 1:
+#
+# The cap is derived, not guessed: the Agent may grow scratch until free disk
+# would fall to the floor a native build needs (toolchain.MIN_DISK_FREE), which
+# is the only quantity that actually matters on a self-hosted Runner. A fixed
+# constant could not serve both a small C++ project and a Bigdata image whose
+# working set is multi-GB by nature, and raising it after every abort (3000 ->
+# 6000 -> ...) was guessing at a number that can be computed. Run 31106121623
+# was killed at 8226MB while 63% of its time budget was still unspent.
+#
+# OE_AGENT_SCRATCH_LIMIT_MB remains only as a ceiling, so a Runner with a very
+# large disk still cannot let one Agent run unbounded.
+_SCRATCH_CEILING_MB = int(os.environ.get("OE_AGENT_SCRATCH_LIMIT_MB", "20000"))
+if _SCRATCH_CEILING_MB < 1:
     raise ValueError("OE_AGENT_SCRATCH_LIMIT_MB must be a positive integer")
 _SCRATCH_WARN_FRACTION = 0.8
 _MESSAGE_DETAIL_LIMIT = 4000
@@ -236,19 +246,20 @@ def _default_runner(
 
     def scratch_watchdog() -> str | None:
         scratch_mb[0] = _directory_size_mb(scratch)
-        if scratch_mb[0] <= _SCRATCH_LIMIT_MB:
-            if scratch_mb[0] > _SCRATCH_LIMIT_MB * _SCRATCH_WARN_FRACTION:
+        budget = _scratch_budget_mb(scratch, scratch_mb[0])
+        if scratch_mb[0] <= budget:
+            if scratch_mb[0] > budget * _SCRATCH_WARN_FRACTION:
                 log(
                     f"agent:{role}",
                     f"WARN scratch_high scratch={scratch_mb[0]}MB "
-                    f"limit={_SCRATCH_LIMIT_MB}MB "
+                    f"limit={budget}MB "
                     f"threshold={_SCRATCH_WARN_FRACTION:.0%}",
                 )
             return None
         log(
             f"agent:{role}",
             f"ABORT reason=scratch_over_limit "
-            f"scratch={scratch_mb[0]}MB limit={_SCRATCH_LIMIT_MB}MB",
+            f"scratch={scratch_mb[0]}MB limit={budget}MB",
         )
         return "scratch_over_limit"
 
@@ -284,6 +295,13 @@ def _default_runner(
 
 
 def _directory_size_mb(path: Path) -> int:
+    """Disk actually occupied, not the size the files claim.
+
+    st_size counts a sparse or preallocated file at its nominal length, which a
+    JVM heap or an embedded database can inflate by gigabytes it never wrote.
+    Charging the Agent for blocks it does not hold is how run 31106121623
+    recorded a 6GB jump in a single watchdog interval.
+    """
     total = 0
     stack = [path]
     while stack:
@@ -297,10 +315,28 @@ def _directory_size_mb(path: Path) -> int:
                 if entry.is_dir(follow_symlinks=False):
                     stack.append(Path(entry.path))
                 elif entry.is_file(follow_symlinks=False):
-                    total += entry.stat(follow_symlinks=False).st_size
+                    stat = entry.stat(follow_symlinks=False)
+                    blocks = getattr(stat, "st_blocks", None)
+                    total += stat.st_size if blocks is None else blocks * 512
             except OSError:
                 continue
     return total // (1024 * 1024)
+
+
+def _scratch_budget_mb(path: Path, scratch_mb: int) -> int:
+    """How far scratch may grow before it eats the build's reserved disk.
+
+    Measured live rather than once at startup: image layers and the BuildKit
+    cache grow under the Agent's feet, so the headroom a job began with is not
+    the headroom it still has.
+    """
+    try:
+        free_mb = shutil.disk_usage(path).free // (1024 * 1024)
+    except OSError:
+        return _SCRATCH_CEILING_MB
+    # Deleting scratch would return its own blocks, so they count as headroom.
+    budget = free_mb + scratch_mb - MIN_DISK_FREE // (1024 * 1024)
+    return max(0, min(budget, _SCRATCH_CEILING_MB))
 
 
 def prepare_scratch(workspace: Path) -> Path:
@@ -619,17 +655,19 @@ def run_agent(
     if result.returncode != 0:
         if result.returncode == 124:
             if getattr(result, "abort_reason", "timeout") == "scratch_over_limit":
-                scratch_mb = _directory_size_mb(Path(env["OE_AGENT_SCRATCH"]))
+                scratch_path = Path(env["OE_AGENT_SCRATCH"])
+                scratch_mb = _directory_size_mb(scratch_path)
+                budget_mb = _scratch_budget_mb(scratch_path, scratch_mb)
                 log(
                     f"agent:{role}",
                     f"SCRATCH_OVER_LIMIT elapsed={elapsed:.1f}s "
-                    f"scratch={scratch_mb}MB limit={_SCRATCH_LIMIT_MB}MB",
+                    f"scratch={scratch_mb}MB limit={budget_mb}MB",
                 )
                 raise AgentScratchOverLimitError(
                     role=role,
                     elapsed=elapsed,
                     scratch_mb=scratch_mb,
-                    limit_mb=_SCRATCH_LIMIT_MB,
+                    limit_mb=budget_mb,
                 )
             log(f"agent:{role}", f"TIMEOUT elapsed={elapsed:.1f}s")
             raise AgentTimeoutError(role=role, elapsed=elapsed)

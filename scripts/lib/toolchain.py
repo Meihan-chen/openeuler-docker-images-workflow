@@ -25,7 +25,10 @@ class PreflightError(ValueError):
 GIB = 1024**3
 MIN_CPU_COUNT = 4
 MIN_MEMORY_AVAILABLE = 8 * GIB
-MIN_DISK_FREE = 15 * GIB
+# The floor a native build needs for image layers and the BuildKit cache. It
+# doubles as the reserve the Agent scratch watchdog refuses to eat into, so
+# lowering it hands that headroom to the Agent rather than to the build.
+MIN_DISK_FREE = 10 * GIB
 REQUIRED_TOOLS = ("dgoss", "goss", "hadolint", "jq", "opencode")
 
 
@@ -179,7 +182,9 @@ def evaluate_preflight(
     if snapshot.memory_available_bytes < MIN_MEMORY_AVAILABLE:
         failures.append("Runner requires at least 8 GiB available memory")
     if snapshot.disk_free_bytes < MIN_DISK_FREE:
-        failures.append("Runner requires at least 15 GiB free disk")
+        failures.append(
+            f"Runner requires at least {MIN_DISK_FREE // GIB} GiB free disk"
+        )
     if not snapshot.docker_server_version.strip():
         failures.append("Docker daemon is unavailable")
     if not snapshot.buildx_version.strip():
