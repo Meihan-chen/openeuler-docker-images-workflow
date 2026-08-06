@@ -66,6 +66,7 @@ def test_phase1_is_manual_only_with_explicit_operations():
         "resume_package",
         "recover_package",
         "fork_pr",
+        "fork_pr_resume",
         "failure_issue_contract_test",
     ]
     assert "validated_run_id" in trigger["workflow_dispatch"]["inputs"]
@@ -945,6 +946,26 @@ def test_fork_pr_reuses_named_artifact_from_exact_validated_run():
     assert "github.run_attempt" in text
     assert "GITCODE_TOKEN" in text
     assert "--token" not in text
+
+
+def test_fork_pr_resume_reuses_named_resume_artifact_without_revalidation():
+    workflow = _workflow()
+    trigger = _trigger(workflow)
+    operations = trigger["workflow_dispatch"]["inputs"]["operation"]["options"]
+    job = workflow["jobs"]["deliver_fork_pr"]
+    steps = {step["name"]: step for step in job["steps"]}
+
+    assert "fork_pr_resume" in operations
+    assert "inputs.operation == 'fork_pr_resume'" in job["if"]
+    assert "fork_pr_resume" in steps["Require the validated run ID"]["if"]
+
+    download = steps["Download exact resumed candidate"]
+    artifact_name = download["with"]["name"]
+    assert "inputs.operation == 'fork_pr_resume'" in download["if"]
+    assert artifact_name == (
+        "phase1-resume-candidate-${{ inputs.validated_run_id }}"
+    )
+    assert "inputs.validated_run_id" in download["with"]["run-id"]
 
 
 def test_issue_probe_is_isolated_and_explicit():

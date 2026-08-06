@@ -20,6 +20,7 @@ on:
           - resume_package
           - recover_package
           - fork_pr
+          - fork_pr_resume
           - failure_issue_contract_test
       source_run_id:
         description: "Resume Run ID, or Issue number as issue:<number>"
@@ -35,7 +36,7 @@ on:
         required: false
         type: string
       validated_run_id:
-        description: "Successful validate_only run ID required by fork_pr"
+        description: "Candidate run ID required by fork_pr operations"
         required: false
         type: string
       app:
@@ -1113,6 +1114,7 @@ jobs:
     if: >-
       ${{ always() &&
           (inputs.operation == 'fork_pr' ||
+           inputs.operation == 'fork_pr_resume' ||
            ((inputs.operation == 'scenario_one' ||
              inputs.operation == 'existing_as_new_probe') &&
             needs.package_candidate.result == 'success')) }}
@@ -1128,7 +1130,9 @@ jobs:
       pr_url: ${{ steps.delivery.outputs.pr_url }}
     steps:
       - name: Require the validated run ID
-        if: ${{ inputs.operation == 'fork_pr' }}
+        if: >-
+          ${{ inputs.operation == 'fork_pr' ||
+              inputs.operation == 'fork_pr_resume' }}
         env:
           VALIDATED_RUN_ID: ${{ inputs.validated_run_id }}
         run: |
@@ -1143,6 +1147,7 @@ jobs:
         uses: ./.github/actions/phase1-setup
 
       - name: Download exact validated candidate
+        if: ${{ inputs.operation != 'fork_pr_resume' }}
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: >-
@@ -1157,6 +1162,16 @@ jobs:
             ${{ (inputs.operation == 'scenario_one' ||
                 inputs.operation == 'existing_as_new_probe') &&
             github.run_id || inputs.validated_run_id }}
+
+      - name: Download exact resumed candidate
+        if: ${{ inputs.operation == 'fork_pr_resume' }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: phase1-resume-candidate-${{ inputs.validated_run_id }}
+          path: ${{ runner.temp }}/candidate
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.validated_run_id }}
 
       - name: Promote candidate and create fork PR
         id: delivery
