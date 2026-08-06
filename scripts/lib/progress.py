@@ -27,6 +27,13 @@ def run_streaming(
     emit: Callable[[str], None] | None = None,
     watchdog: Callable[[], str | None] | None = None,
 ) -> subprocess.CompletedProcess:
+    """Run command capturing output; returns the process result.
+
+    A budget timeout stops the process with returncode 124. When a watchdog
+    returns a non-empty string the process is stopped for that reason; the
+    reason is carried on the result as ``result.abort_reason`` (the budget
+    timer always reports ``"timeout"``).
+    """
     process = subprocess.Popen(
         list(command),
         cwd=cwd,
@@ -42,6 +49,7 @@ def run_streaming(
     )
     process_group = process.pid
     timed_out = [False]
+    abort_reason: list[str | None] = [None]
     escalation: list[threading.Timer | None] = [None]
     finished = threading.Event()
     stopping = threading.Event()
@@ -55,13 +63,14 @@ def run_streaming(
             if process.poll() is None:
                 process.send_signal(number)
 
-    def stop() -> None:
+    def stop(reason: str = "timeout") -> None:
         # The budget timer and the watchdog can fire together; escalating twice
         # would leave a live timer able to signal a recycled process id.
         if stopping.is_set():
             return
         stopping.set()
         timed_out[0] = True
+        abort_reason[0] = reason
         signal_group(signal.SIGTERM)
         escalation[0] = threading.Timer(
             _KILL_GRACE_SECONDS,
@@ -71,8 +80,11 @@ def run_streaming(
 
     def watch() -> None:
         while not finished.wait(_WATCHDOG_INTERVAL_SECONDS):
-            if watchdog is not None and watchdog() is not None:
-                stop()
+            if watchdog is None:
+                continue
+            reason = watchdog()
+            if reason is not None:
+                stop(reason=reason)
                 return
 
     timer = threading.Timer(timeout, stop)
@@ -107,9 +119,13 @@ def run_streaming(
             escalation[0].cancel()
     if timed_out[0]:
         returncode = 124
-    return subprocess.CompletedProcess(
+    result = subprocess.CompletedProcess(
         args=list(command),
         returncode=returncode,
         stdout="".join(output),
         stderr="",
     )
+    result.abort_reason = abort_reason[0] or (
+        "timeout" if timed_out[0] else None
+    )
+    return result

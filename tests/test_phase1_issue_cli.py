@@ -135,6 +135,7 @@ def test_issue_watch_handler_claims_and_dispatches_canonical_workflow(
         argparse.Namespace(
             target_repo="openeuler/openeuler-docker-images",
             issue_number=64,
+            max_issues=1,
             github_repository="Meihan-chen/openeuler-docker-images-workflow",
             github_ref="main",
             workflow="new-image.yml",
@@ -144,15 +145,102 @@ def test_issue_watch_handler_claims_and_dispatches_canonical_workflow(
     assert calls[0] == ("client", {"token": "gitcode-secret"})
     assert calls[1][0] == "claim"
     assert calls[1][1]["client"] is client
+    assert calls[1][1]["issue_number"] == 64
     dispatch = calls[2][1]
     assert dispatch["github_token"] == "github-secret"
     assert dispatch["workflow"] == "new-image.yml"
     assert dispatch["inputs"] == {"operation": "scenario_one"}
     assert json.loads(capsys.readouterr().out) == {
         "dispatched": True,
-        "issue_number": 64,
-        "issue_url": "https://gitcode.com/issues/64",
+        "issues": [
+            {"issue_number": 64, "issue_url": "https://gitcode.com/issues/64"}
+        ],
     }
+
+
+def test_issue_watch_scan_mode_claims_up_to_max_issues(monkeypatch, capsys):
+    from scripts.harness import flow
+
+    calls = []
+    client = object()
+    claims = iter(
+        [
+            SimpleNamespace(
+                number=63, url="https://gitcode.com/issues/63"
+            ),
+            SimpleNamespace(
+                number=64, url="https://gitcode.com/issues/64"
+            ),
+            None,
+        ]
+    )
+    monkeypatch.setenv("GITCODE_TOKEN", "gitcode-secret")
+    monkeypatch.setenv("GITHUB_TOKEN", "github-secret")
+    monkeypatch.setattr(
+        flow,
+        "GitCodeClient",
+        lambda **kwargs: client,
+    )
+    monkeypatch.setattr(
+        flow,
+        "dispatch_github_workflow",
+        lambda **kwargs: calls.append(("dispatch", kwargs)),
+    )
+
+    def claim(**kwargs):
+        calls.append(("claim", kwargs))
+        result = next(claims)
+        if result is not None:
+            kwargs["dispatch"]({"operation": "scenario_one"})
+        return result
+
+    monkeypatch.setattr(flow, "claim_new_image_issue", claim)
+
+    flow._issue_watch(
+        argparse.Namespace(
+            target_repo="openeuler/openeuler-docker-images",
+            issue_number=None,
+            max_issues=3,
+            github_repository="Meihan-chen/openeuler-docker-images-workflow",
+            github_ref="main",
+            workflow="new-image.yml",
+        )
+    )
+
+    assert [call[0] for call in calls] == [
+        "claim",
+        "dispatch",
+        "claim",
+        "dispatch",
+        "claim",
+    ]
+    assert json.loads(capsys.readouterr().out) == {
+        "dispatched": True,
+        "issues": [
+            {"issue_number": 63, "issue_url": "https://gitcode.com/issues/63"},
+            {"issue_number": 64, "issue_url": "https://gitcode.com/issues/64"},
+        ],
+    }
+
+
+def test_issue_watch_rejects_a_non_positive_max_issues(monkeypatch):
+    from scripts.harness import flow
+    from scripts.lib.issue_lifecycle import IssueLifecycleError
+
+    monkeypatch.setenv("GITCODE_TOKEN", "gitcode-secret")
+    monkeypatch.setenv("GITHUB_TOKEN", "github-secret")
+
+    with pytest.raises(IssueLifecycleError, match="--max-issues"):
+        flow._issue_watch(
+            argparse.Namespace(
+                target_repo="openeuler/openeuler-docker-images",
+                issue_number=None,
+                max_issues=0,
+                github_repository="Meihan-chen/openeuler-docker-images-workflow",
+                github_ref="main",
+                workflow="new-image.yml",
+            )
+        )
 
 
 def test_issue_finalize_handler_updates_the_exact_source_issue(
@@ -212,6 +300,8 @@ def test_issue_trigger_commands_exist_on_the_shared_flow_cli():
             "openeuler/openeuler-docker-images",
             "--issue-number",
             "64",
+            "--max-issues",
+            "3",
             "--github-repository",
             "Meihan-chen/openeuler-docker-images-workflow",
             "--github-ref",
@@ -233,6 +323,7 @@ def test_issue_trigger_commands_exist_on_the_shared_flow_cli():
     )
 
     assert watch.handler is flow._issue_watch
+    assert watch.max_issues == 3
     assert finalize.handler is flow._issue_finalize
 
 
@@ -252,3 +343,4 @@ def test_issue_watch_number_filter_is_optional_for_production_selection():
     )
 
     assert watch.issue_number is None
+    assert watch.max_issues == 1

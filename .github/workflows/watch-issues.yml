@@ -1,14 +1,19 @@
 name: Watch GitCode new-image Issues
 
 on:
-  # schedule:
-  #   - cron: "*/5 * * * *"
+  schedule:
+    - cron: "*/5 * * * *"
   workflow_dispatch:
     inputs:
       issue_number:
         description: "Exact GitCode Issue number; defaults to repository variable"
         required: false
         type: string
+      max_issues:
+        description: "Maximum new Issues claimed in one scan run"
+        required: false
+        type: string
+        default: "3"
 
 permissions:
   actions: write
@@ -20,10 +25,7 @@ concurrency:
 
 jobs:
   watch:
-    name: Claim one new image request
-    if: >-
-      ${{ inputs.issue_number != '' ||
-          vars.PHASE1_TEST_ISSUE_NUMBER != '' }}
+    name: Claim new image requests
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -31,6 +33,7 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
       - name: Require the phase-one Issue allowlist
+        if: github.event_name == 'workflow_dispatch'
         env:
           ISSUE_NUMBER: >-
             ${{ inputs.issue_number || vars.PHASE1_TEST_ISSUE_NUMBER }}
@@ -42,16 +45,28 @@ jobs:
               ;;
           esac
 
-      - name: Claim Issue and dispatch scenario one
+      - name: Claim Issues and dispatch scenario one
         env:
           GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
           GITHUB_TOKEN: ${{ github.token }}
           ISSUE_NUMBER: >-
             ${{ inputs.issue_number || vars.PHASE1_TEST_ISSUE_NUMBER }}
+          MAX_ISSUES: ${{ inputs.max_issues || '3' }}
         run: |
-          python3 scripts/harness/flow.py \
-            issue-watch \
-            --target-repo openeuler/openeuler-docker-images \
-            --issue-number "${ISSUE_NUMBER}" \
-            --github-repository "${GITHUB_REPOSITORY}" \
+          case "${MAX_ISSUES}" in
+            ''|*[!0-9]*|0)
+              echo "max_issues must be a positive integer" >&2
+              exit 2
+              ;;
+          esac
+          args=(
+            --target-repo openeuler/openeuler-docker-images
+            --github-repository "${GITHUB_REPOSITORY}"
             --github-ref "${GITHUB_REF_NAME}"
+            --max-issues "${MAX_ISSUES}"
+          )
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] &&
+             [ -n "${ISSUE_NUMBER}" ]; then
+            args+=(--issue-number "${ISSUE_NUMBER}")
+          fi
+          python3 scripts/harness/flow.py issue-watch "${args[@]}"

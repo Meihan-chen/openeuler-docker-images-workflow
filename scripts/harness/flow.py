@@ -39,6 +39,7 @@ from scripts.lib.gitcode_client import (
     GitCodeClientError,
 )
 from scripts.lib.issue_lifecycle import (
+    ClaimedIssue,
     IssueLifecycleError,
     claim_new_image_issue,
     dispatch_github_workflow,
@@ -250,18 +251,31 @@ def _issue_watch(args: argparse.Namespace) -> None:
             }
         )
 
-    claimed = claim_new_image_issue(
-        client=GitCodeClient(token=gitcode_token),
-        target_repo=args.target_repo,
-        issue_number=args.issue_number,
-        dispatch=dispatch,
-        parse_task=parse_task,
-    )
+    if args.issue_number is None and args.max_issues < 1:
+        raise IssueLifecycleError("--max-issues must be a positive integer")
+    limit = args.max_issues if args.issue_number is None else 1
+    claimed: list[ClaimedIssue] = []
+    for _ in range(limit):
+        # Each pass re-lists open issues so an accepted one is skipped and the
+        # next new request is claimed; a failure stops the round and leaves
+        # the backlog to the next poll.
+        result = claim_new_image_issue(
+            client=GitCodeClient(token=gitcode_token),
+            target_repo=args.target_repo,
+            issue_number=args.issue_number,
+            dispatch=dispatch,
+            parse_task=parse_task,
+        )
+        if result is None:
+            break
+        claimed.append(result)
     _print_json(
         {
-            "dispatched": claimed is not None,
-            "issue_number": claimed.number if claimed else args.issue_number,
-            "issue_url": claimed.url if claimed else "",
+            "dispatched": bool(claimed),
+            "issues": [
+                {"issue_number": item.number, "issue_url": item.url}
+                for item in claimed
+            ],
         }
     )
 
@@ -643,11 +657,21 @@ def _add_delivery_commands(commands: argparse._SubParsersAction) -> None:
     issue_watch = commands.add_parser(
         "issue-watch",
         description=(
-            "Claim one new GitCode image request and dispatch scenario_one."
+            "Claim new GitCode image requests and dispatch scenario_one; "
+            "without --issue-number, scans for new requests up to --max-issues."
         ),
     )
     issue_watch.add_argument("--target-repo", required=True)
     issue_watch.add_argument("--issue-number", type=int)
+    issue_watch.add_argument(
+        "--max-issues",
+        type=int,
+        default=1,
+        help=(
+            "Maximum new Issues claimed per scan run; ignored when "
+            "--issue-number is set (default: 1)"
+        ),
+    )
     issue_watch.add_argument("--github-repository", required=True)
     issue_watch.add_argument("--github-ref", required=True)
     issue_watch.add_argument("--workflow", default="new-image.yml")

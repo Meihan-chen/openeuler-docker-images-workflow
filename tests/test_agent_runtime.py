@@ -1158,7 +1158,10 @@ def test_scratch_growth_past_the_limit_stops_the_agent(
     workspace = tmp_path / "target"
     workspace.mkdir()
 
-    with pytest.raises(agent_runtime.AgentTimeoutError):
+    with pytest.raises(
+        agent_runtime.AgentScratchOverLimitError,
+        match="exceeded the 1MB limit",
+    ):
         agent_runtime.run_agent(
             executable=executable,
             role="image_creator",
@@ -1172,6 +1175,97 @@ def test_scratch_growth_past_the_limit_stops_the_agent(
     output = capsys.readouterr().out
     assert "ABORT reason=scratch_over_limit" in output
     assert "limit=1MB" in output
+    assert "SCRATCH_OVER_LIMIT" in output
+
+
+def test_scratch_limit_default_keeps_headroom_for_download_heavy_contexts():
+    """The default must clear the Kylin 3033MB abort (Run 31065008627)."""
+    from scripts.lib import agent_runtime
+
+    assert agent_runtime._SCRATCH_LIMIT_MB >= 6000
+
+
+def test_scratch_limit_is_configurable_via_environment(monkeypatch):
+    """A tighter runner can shrink the cap without a code change."""
+    import importlib
+
+    from scripts.lib import agent_runtime
+
+    monkeypatch.setenv("OE_AGENT_SCRATCH_LIMIT_MB", "123")
+    try:
+        importlib.reload(agent_runtime)
+        assert agent_runtime._SCRATCH_LIMIT_MB == 123
+    finally:
+        monkeypatch.delenv("OE_AGENT_SCRATCH_LIMIT_MB")
+        importlib.reload(agent_runtime)
+    assert agent_runtime._SCRATCH_LIMIT_MB >= 6000
+
+
+def test_scratch_overrun_never_retries_the_agent(tmp_path):
+    """A full scratch directory would trip the same watchdog on retry.
+
+    Run 31065008627 repaid an image_creator by retrying on a 124 the watchdog
+    caused; an overfull workspace cannot get better on the second attempt.
+    """
+    from scripts.lib import agent_runtime
+
+    executable = _executable(tmp_path)
+    workspace = tmp_path / "target"
+    workspace.mkdir()
+    runner = SequenceRunner([_completed(returncode=124, stdout="")])
+    runner.results[0].abort_reason = "scratch_over_limit"
+
+    with pytest.raises(agent_runtime.AgentScratchOverLimitError):
+        agent_runtime.run_agent(
+            executable=executable,
+            role="image_creator",
+            prompt="Create the image files.",
+            workspace=workspace,
+            api_key="deepseek-secret",
+            required_keys=("success", "files_created"),
+            runner=runner,
+            timeout=30,
+        )
+
+    assert len(runner.calls) == 1
+
+
+def test_scratch_warning_is_logged_before_the_limit(tmp_path, capsys, monkeypatch):
+    """Approaching the cap logs WARN scratch_high before any abort."""
+    from scripts.lib import agent_runtime, progress
+
+    monkeypatch.setattr(agent_runtime, "_SCRATCH_LIMIT_MB", 10)
+    monkeypatch.setattr(progress, "_WATCHDOG_INTERVAL_SECONDS", 0.05)
+    monkeypatch.setattr(progress, "_KILL_GRACE_SECONDS", 0.5)
+    executable = tmp_path / "opencode"
+    executable.write_text(
+        "#!/bin/sh\n"
+        'dd if=/dev/zero of="${OE_AGENT_SCRATCH}/blob" '
+        "bs=1048576 count=9 2>/dev/null\n"
+        "sleep 0.5\n"
+        'echo \'{"type": "text", "part": {"text": '
+        '"{\\"success\\": true, \\"files_created\\": [\\"meta.yml\\"]}"}}'
+        "'\n"
+    )
+    executable.chmod(0o755)
+    workspace = tmp_path / "target"
+    workspace.mkdir()
+
+    result = agent_runtime.run_agent(
+        executable=executable,
+        role="image_creator",
+        prompt="Create the image files.",
+        workspace=workspace,
+        api_key="deepseek-secret",
+        required_keys=("success", "files_created"),
+        timeout=30,
+    )
+
+    assert result.payload["success"] is True
+    output = capsys.readouterr().out
+    assert "WARN scratch_high" in output
+    assert "limit=10MB" in output
+    assert "ABORT reason=scratch_over_limit" not in output
 
 
 def test_unconfirmed_facts_are_accepted_only_as_a_list(tmp_path):
