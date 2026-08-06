@@ -60,6 +60,21 @@ _E2E_CHECKS = (
     "shared_tests",
 )
 _SMOKE_CHECKS = _E2E_CHECKS
+_KEEP_RUNTIME_ENV = "OE_KEEP_RUNTIME"
+_KEEP_RUNTIME_VALUES = {"1", "true", "yes"}
+
+
+def _keep_runtime() -> bool:
+    """Leave this run's image, container and builder on the Runner.
+
+    Reading a failure from the evidence bundle only goes so far: some defects
+    are only visible from a shell inside the container the checks actually ran
+    in, which the default cleanup removes before the job ends. Opt-in because
+    every retained image and builder cache stays on the Runner's disk until it
+    is removed by hand.
+    """
+    value = os.environ.get(_KEEP_RUNTIME_ENV, "").strip().lower()
+    return value in _KEEP_RUNTIME_VALUES
 
 
 def _default_runner(
@@ -498,6 +513,20 @@ def release_run_builders(
         )
     if not _RUN_ID_RE.fullmatch(run_id):
         raise NativeValidationError("run_id must be a positive integer")
+    if _keep_runtime():
+        # Removing the builder would drop the BuildKit cache that makes a
+        # manual rebuild of the retained image cheap, which is the whole point
+        # of keeping the image around.
+        log(
+            f"native:{architecture}",
+            f"WARN {_KEEP_RUNTIME_ENV} is set: keeping this run's builders",
+        )
+        return {
+            "status": "skipped",
+            "architecture": architecture,
+            "run_id": run_id,
+            "released_builders": [],
+        }
     listed = _run(
         runner,
         ["docker", "buildx", "ls", "--format", "{{.Name}}"],
@@ -872,19 +901,26 @@ def validate_native_image(
         # The builder outlives this call on purpose: repair rounds re-enter
         # validation and must keep the cached builder stage. It is released
         # once per run by release_run_builders.
-        cleanup_commands = (
-            ["docker", "rm", "--force", dgoss_container],
-            ["docker", "rm", "--force", container],
-            ["docker", "image", "rm", "--force", image],
-        )
-        for command in cleanup_commands:
-            _run(
-                runner,
-                command,
-                cwd=workspace,
-                timeout=300,
-                check=False,
+        if _keep_runtime():
+            log(
+                stage,
+                f"WARN {_KEEP_RUNTIME_ENV} is set: keeping {container} "
+                f"and {image} on this Runner",
             )
+        else:
+            cleanup_commands = (
+                ["docker", "rm", "--force", dgoss_container],
+                ["docker", "rm", "--force", container],
+                ["docker", "image", "rm", "--force", image],
+            )
+            for command in cleanup_commands:
+                _run(
+                    runner,
+                    command,
+                    cwd=workspace,
+                    timeout=300,
+                    check=False,
+                )
 
     format_failure = _format_failure(format_check)
     first_failure = failures[0] if failures else None
@@ -1099,20 +1135,27 @@ def validate_native_smoke(
             checks[current_check] = False
     finally:
         # Released once per run by release_run_builders, like the e2e builder.
-        cleanup = [
-            ["docker", "rm", "--force", name] for name in containers
-        ] + [
-            ["docker", "image", "rm", "--force", image]
-            for image in images.values()
-        ]
-        for command in cleanup:
-            _run(
-                runner,
-                command,
-                cwd=workspace,
-                timeout=300,
-                check=False,
+        if _keep_runtime():
+            log(
+                f"native:{architecture}",
+                f"WARN {_KEEP_RUNTIME_ENV} is set: keeping "
+                f"{', '.join(containers)} on this Runner",
             )
+        else:
+            cleanup = [
+                ["docker", "rm", "--force", name] for name in containers
+            ] + [
+                ["docker", "image", "rm", "--force", image]
+                for image in images.values()
+            ]
+            for command in cleanup:
+                _run(
+                    runner,
+                    command,
+                    cwd=workspace,
+                    timeout=300,
+                    check=False,
+                )
 
     format_failure = _format_failure(format_check)
     overall_failure = failure or format_failure

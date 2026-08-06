@@ -56,6 +56,10 @@ permissions:
 env:
   PYTHONUNBUFFERED: "1"
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  # Debugging switch: keep this run's image, container and builder on the
+  # Runner instead of cleaning them up. See new-image.yml for why it is a
+  # repository variable rather than a workflow input.
+  OE_KEEP_RUNTIME: ${{ vars.OE_KEEP_RUNTIME }}
 
 jobs:
   x86_64:

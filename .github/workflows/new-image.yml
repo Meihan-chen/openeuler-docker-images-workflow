@@ -72,6 +72,11 @@ permissions:
 env:
   PYTHONUNBUFFERED: "1"
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  # workflow_dispatch already carries the maximum of 10 inputs, so the
+  # debugging switch that keeps this run's image, container and builder on the
+  # Runner is a repository variable. Unset it once the investigation is done:
+  # every retained run costs disk the preflight later refuses to run without.
+  OE_KEEP_RUNTIME: ${{ vars.OE_KEEP_RUNTIME }}
 
 # TODO(production-duplicate-pr-guard): test fork_pr intentionally skips
 # duplicate PR handling. Before production rollout, remove this test-only

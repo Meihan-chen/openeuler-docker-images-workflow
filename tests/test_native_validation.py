@@ -1117,6 +1117,97 @@ def test_report_records_the_candidate_content_that_was_validated(tmp_path):
     assert before != after
 
 
+def test_keeping_the_runtime_leaves_the_image_and_container_for_a_shell(
+    tmp_path,
+    monkeypatch,
+):
+    from scripts.lib.native_validation import validate_native_image
+
+    monkeypatch.setenv("OE_KEEP_RUNTIME", "1")
+    workspace = _workspace(tmp_path)
+    dgoss, goss = _tools(tmp_path)
+    runner = DockerRunner()
+
+    report = validate_native_image(
+        workspace=workspace,
+        task=_task(),
+        architecture="x86_64",
+        run_id="123456",
+        dgoss=dgoss,
+        goss=goss,
+        report_path=tmp_path / "reports" / "x86_64.json",
+        junit_path=tmp_path / "reports" / "x86_64.junit.xml",
+        runner=runner,
+        sleep=lambda _: None,
+    )
+
+    assert report["status"] == "passed"
+    flattened = "\n".join(
+        " ".join(call["command"]) for call in runner.calls
+    )
+    assert "docker rm --force" not in flattened
+    assert "docker image rm" not in flattened
+    # The detached service container is what a later docker exec attaches to.
+    assert "--detach --name oe-e2e-123456-x86-64-runtime" in flattened
+
+
+def test_keeping_the_runtime_survives_a_failed_check(tmp_path, monkeypatch):
+    from scripts.lib.native_validation import (
+        NativeValidationError,
+        validate_native_image,
+    )
+
+    monkeypatch.setenv("OE_KEEP_RUNTIME", "true")
+    workspace = _workspace(tmp_path)
+    dgoss, goss = _tools(tmp_path)
+    runner = DockerRunner(fail_shared_tests=True)
+
+    with pytest.raises(NativeValidationError):
+        validate_native_image(
+            workspace=workspace,
+            task=_task(),
+            architecture="x86_64",
+            run_id="123456",
+            dgoss=dgoss,
+            goss=goss,
+            report_path=tmp_path / "reports" / "x86_64.json",
+            junit_path=tmp_path / "reports" / "x86_64.junit.xml",
+            runner=runner,
+            sleep=lambda _: None,
+        )
+
+    flattened = "\n".join(
+        " ".join(call["command"]) for call in runner.calls
+    )
+    assert "docker rm --force" not in flattened
+    assert "docker image rm" not in flattened
+    # Evidence capture still has to run against the containers it kept.
+    assert "docker logs" in flattened
+
+
+def test_release_run_builders_keeps_the_cache_behind_a_retained_image(
+    tmp_path,
+    monkeypatch,
+):
+    from scripts.lib.native_validation import release_run_builders
+
+    monkeypatch.setenv("OE_KEEP_RUNTIME", "1")
+    runner = DockerRunner()
+    runner.builders.add("oe-e2e-123456-aarch64-builder")
+
+    report = release_run_builders(
+        run_id="123456",
+        architecture="aarch64",
+        workspace=tmp_path,
+        runner=runner,
+    )
+
+    assert report["status"] == "skipped"
+    assert report["released_builders"] == []
+    assert runner.builders == {"oe-e2e-123456-aarch64-builder"}
+    assert runner.calls == []
+
+
 def test_release_run_builders_frees_exactly_this_run_on_one_architecture(
     tmp_path,
 ):
