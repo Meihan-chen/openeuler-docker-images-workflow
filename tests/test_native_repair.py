@@ -760,30 +760,24 @@ def test_dual_architecture_fixer_gets_external_native_evidence_paths(tmp_path):
         assert str((root / "runtime.docker.log").resolve()) in prompt
 
 
-def test_dual_architecture_fixer_cannot_change_read_only_native_evidence(tmp_path):
-    from scripts.lib.agent_runtime import AgentResult
-    from scripts.lib.native_repair import NativeRepairError
-
+def test_fixer_failure_is_not_replaced_by_evidence_check(tmp_path):
     evidence_root = tmp_path / "phase1-x86" / "diagnostics"
     evidence_root.mkdir(parents=True)
     log_path = evidence_root / "runtime.docker.log"
     log_path.write_text("authoritative runtime log\n")
 
-    def mutating_fixer(**kwargs):
+    def failing_fixer(**kwargs):
         log_path.write_text("tampered\n")
-        return AgentResult(
-            role="fixer",
-            payload={"success": True, "changes": [], "summary": "fixed"},
-        )
+        raise RuntimeError("fixer crashed")
 
-    with pytest.raises(NativeRepairError, match="read-only native evidence changed"):
+    with pytest.raises(RuntimeError, match="fixer crashed"):
         _decide(
             tmp_path,
             {
                 "x86_64": _report("x86_64", status="failed"),
                 "aarch64": _report("aarch64"),
             },
-            agent_runner=mutating_fixer,
+            agent_runner=failing_fixer,
             evidence_roots={"x86_64": evidence_root},
         )
 

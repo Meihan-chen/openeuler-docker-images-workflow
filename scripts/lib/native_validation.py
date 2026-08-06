@@ -10,6 +10,7 @@ import re
 import subprocess
 import time
 import xml.etree.ElementTree as ET
+from collections import deque
 from datetime import datetime, timezone
 from importlib import metadata
 from pathlib import Path
@@ -173,13 +174,67 @@ def _write_full_evidence(
 ) -> dict[str, object]:
     diagnostics_dir.mkdir(parents=True, exist_ok=True)
     path = diagnostics_dir / f"{name}.{suffix}"
-    path.write_text(content)
-    payload = path.read_bytes()
+    path.write_bytes(content.encode())
+    return _file_metadata(path, artifact_root=artifact_root)
+
+
+def _file_metadata(path: Path, *, artifact_root: Path) -> dict[str, object]:
     return {
         "path": path.relative_to(artifact_root).as_posix(),
-        "size_bytes": len(payload),
-        "sha256": hashlib.sha256(payload).hexdigest(),
+        "size_bytes": path.stat().st_size,
     }
+
+
+def _capture_status(
+    metadata: dict[str, object],
+    *,
+    returncode: int,
+) -> dict[str, object]:
+    metadata["capture_status"] = {0: "complete", 124: "timeout"}.get(
+        returncode,
+        "failed",
+    )
+    return metadata
+
+
+def _file_log_summary(path: Path) -> str:
+    lines: deque[str] = deque(maxlen=int(_CONTAINER_LOG_LINES))
+    with path.open(errors="replace") as stream:
+        for line in stream:
+            line = line.rstrip("\r\n")
+            if len(line) > _LOG_HEAD_CHARS + _LOG_TAIL_CHARS:
+                line = line[:_LOG_HEAD_CHARS] + line[-_LOG_TAIL_CHARS:]
+            lines.append(line)
+    return _container_log_summary("\n".join(lines))
+
+
+def _stream_command_evidence(
+    *,
+    command: Sequence[str],
+    cwd: Path,
+    artifact_root: Path,
+    path: Path,
+    timeout: int,
+) -> tuple[dict[str, object], str]:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with path.open("wb") as output:
+            result = subprocess.run(
+                list(command),
+                cwd=cwd,
+                stdout=output,
+                stderr=subprocess.STDOUT,
+                timeout=timeout,
+                check=False,
+            )
+        returncode = result.returncode
+    except subprocess.TimeoutExpired:
+        returncode = 124
+    metadata = _capture_status(
+        _file_metadata(path, artifact_root=artifact_root),
+        returncode=returncode,
+    )
+    return metadata, _file_log_summary(path)
 
 
 def _run(
@@ -239,39 +294,39 @@ def _container_evidence(
         )
         if inspected.returncode != 0:
             continue
-        full_inspect = _run(
-            runner,
-            ["docker", "inspect", name],
-            cwd=workspace,
-            timeout=60,
-            check=False,
-        )
-        logs = _run(
-            runner,
-            ["docker", "logs", "--timestamps", name],
-            cwd=workspace,
-            timeout=60,
-            check=False,
-        )
+        log_command = ["docker", "logs", "--timestamps", name]
+        if runner is _default_runner:
+            log_metadata, log_summary = _stream_command_evidence(
+                command=log_command,
+                cwd=workspace,
+                artifact_root=artifact_root,
+                path=artifact_root / "diagnostics" / f"{name}.docker.log",
+                timeout=60,
+            )
+        else:
+            logs = _run(
+                runner,
+                log_command,
+                cwd=workspace,
+                timeout=60,
+                check=False,
+            )
+            log_metadata = _capture_status(
+                _write_full_evidence(
+                    artifact_root=artifact_root,
+                    diagnostics_dir=artifact_root / "diagnostics",
+                    name=name,
+                    suffix="docker.log",
+                    content=_raw_output(logs),
+                ),
+                returncode=logs.returncode,
+            )
+            log_summary = _container_log_summary(_raw_output(logs))
         evidence[name] = {
             "state": _merged_output(inspected),
-            "logs": _container_log_summary(_raw_output(logs)),
-            "full_logs": _write_full_evidence(
-                artifact_root=artifact_root,
-                diagnostics_dir=artifact_root / "diagnostics",
-                name=name,
-                suffix="docker.log",
-                content=_raw_output(logs),
-            ),
+            "logs": log_summary,
+            "full_logs": log_metadata,
         }
-        if full_inspect.returncode == 0:
-            evidence[name]["full_inspect"] = _write_full_evidence(
-                artifact_root=artifact_root,
-                diagnostics_dir=artifact_root / "diagnostics",
-                name=name,
-                suffix="inspect.json",
-                content=_raw_output(full_inspect),
-            )
     return evidence
 
 
@@ -802,12 +857,17 @@ def validate_native_image(
                 )
         if failures:
             # Must run before the finally block force-removes the containers.
-            container_evidence = _container_evidence(
-                runner,
-                workspace=workspace,
-                containers=(dgoss_container, container),
-                artifact_root=report_path.parent,
-            )
+            try:
+                container_evidence = _container_evidence(
+                    runner,
+                    workspace=workspace,
+                    containers=(dgoss_container, container),
+                    artifact_root=report_path.parent,
+                )
+            except Exception as error:
+                capture_error = str(error) or error.__class__.__name__
+                container_evidence = {"capture_error": capture_error}
+                log(stage, f"WARN container evidence: {capture_error}")
     finally:
         # The builder outlives this call on purpose: repair rounds re-enter
         # validation and must keep the cached builder stage. It is released

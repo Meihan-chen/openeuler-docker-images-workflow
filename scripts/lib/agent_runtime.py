@@ -470,7 +470,7 @@ def _permission_config(
     if external_patterns:
         edit_permission = {
             "*": "allow",
-            **{pattern: "deny" for pattern in external_patterns},
+            "../**": "deny",
         }
         external_permission = {
             "*": "deny",

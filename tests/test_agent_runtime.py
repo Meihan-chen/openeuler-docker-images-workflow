@@ -291,10 +291,12 @@ def test_fixer_can_read_only_declared_external_evidence_directories(tmp_path):
         (patterns[0], "allow"),
         (patterns[1], "allow"),
     ]
+    # OpenCode evaluates edit/write paths relative to the Agent worktree, so
+    # absolute evidence paths cannot enforce this boundary.  Reject every
+    # parent-relative target after the workspace-wide allow rule instead.
     assert list(config["permission"]["edit"].items()) == [
         ("*", "allow"),
-        (patterns[0], "deny"),
-        (patterns[1], "deny"),
+        ("../**", "deny"),
     ]
 
 

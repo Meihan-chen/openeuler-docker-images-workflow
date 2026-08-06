@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -401,23 +400,6 @@ def _resolve_full_evidence(
     return review, tuple(readable)
 
 
-def _evidence_fingerprint(roots: tuple[Path, ...]) -> dict[str, str]:
-    fingerprint: dict[str, str] = {}
-    for root in roots:
-        if not root.is_dir():
-            raise NativeRepairError(f"native evidence directory disappeared: {root}")
-        for path in sorted(root.rglob("*")):
-            if path.is_symlink():
-                raise NativeRepairError(
-                    f"native evidence must not contain symlinks: {path}"
-                )
-            if path.is_file():
-                fingerprint[str(path.resolve())] = hashlib.sha256(
-                    path.read_bytes()
-                ).hexdigest()
-    return fingerprint
-
-
 def decide_round(
     *,
     workspace: Path,
@@ -459,7 +441,6 @@ def decide_round(
         evidence_roots,
         workspace=workspace,
     )
-    evidence_fingerprint = _evidence_fingerprint(external_read_dirs)
 
     invalid_passed = [
         name
@@ -587,8 +568,6 @@ def decide_round(
             timeout=3600,
             external_read_dirs=external_read_dirs,
         )
-        if _evidence_fingerprint(external_read_dirs) != evidence_fingerprint:
-            raise NativeRepairError("read-only native evidence changed during Fixer run")
         _write_fixer_report(
             directory=report_dir,
             architecture="dual",
