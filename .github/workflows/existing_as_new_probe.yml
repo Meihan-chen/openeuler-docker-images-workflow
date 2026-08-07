@@ -1,0 +1,63 @@
+name: Existing-as-new probe
+run-name: >-
+  existing_as_new_probe / ${{ inputs.app }} ${{ inputs.version }} /
+  ${{ inputs.os_version }}
+
+# Capability calibration, not production. It runs the same spine as
+# scenario_one against an application the target repository already ships:
+# the canonical directory is hidden from the agent, the candidate is built
+# under a `<app>-e2e-test` alias, and the resulting fork PR is diagnostic and
+# must never be merged.
+#
+# It lives outside create_new_images.yml so the operator-facing dropdown holds
+# production operations only, while still sharing one gate implementation.
+
+on:
+  workflow_dispatch:
+    inputs:
+      app:
+        description: "Canonical application already present in the target repo"
+        required: true
+        type: string
+        default: kvrocks
+      version:
+        description: "Application version"
+        required: true
+        type: string
+        default: 2.16.0
+      os_version:
+        description: "openEuler version"
+        required: true
+        type: string
+        default: 24.03-lts-sp4
+      domain:
+        description: "Target repository domain"
+        required: true
+        type: string
+        default: Database
+      source_url:
+        description: "Pinned upstream release URL"
+        required: true
+        type: string
+        default: https://github.com/apache/kvrocks/tree/v2.16.0
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  probe:
+    name: Existing-as-new probe pipeline
+    uses: ./.github/workflows/_create_new_image_pipeline.yml
+    with:
+      operation: existing_as_new_probe
+      app: ${{ inputs.app }}
+      version: ${{ inputs.version }}
+      os_version: ${{ inputs.os_version }}
+      domain: ${{ inputs.domain }}
+      source_url: ${{ inputs.source_url }}
+      # The single switch for probe behaviour in the shared spine.
+      target_alias: ${{ inputs.app }}-e2e-test
+    secrets:
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}

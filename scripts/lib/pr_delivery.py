@@ -14,10 +14,8 @@ from typing import Any, Callable, Iterator, Mapping, Sequence
 
 from scripts.lib.candidate_bundle import (
     CandidateBundle,
-    CandidateBundleError,
     junit_pass_rate,
     promote_candidate,
-    recovery_provenance,
 )
 from scripts.lib.git_workspace import TargetWorkspace
 from scripts.lib.gitcode_client import DeliveryConfig, GitCodeClient
@@ -594,23 +592,9 @@ def _patch_changes(bundle: CandidateBundle) -> tuple[tuple[str, str], ...]:
     return tuple(changes)
 
 
-def _recovery_provenance(
-    bundle: CandidateBundle,
-) -> Mapping[str, object] | None:
-    try:
-        return recovery_provenance(
-            bundle.root,
-            validated_run_id=bundle.manifest.validated_run_id,
-            base_sha=bundle.manifest.base_sha,
-        )
-    except CandidateBundleError as error:
-        raise PRDeliveryError(str(error)) from error
-
-
 def compose_pull_request(bundle: CandidateBundle) -> PullRequestContent:
     task = bundle.task
     changes = _patch_changes(bundle)
-    recovery = _recovery_provenance(bundle)
     rows = []
     for architecture in ("x86_64", "aarch64"):
         report = _load_json(
@@ -620,10 +604,7 @@ def compose_pull_request(bundle: CandidateBundle) -> PullRequestContent:
         if report.get("status") != "passed":
             raise PRDeliveryError(f"{architecture} evidence did not pass")
         checks = report.get("checks")
-        if not native_checks_pass(
-            checks,
-            allow_legacy=recovery is not None,
-        ):
+        if not native_checks_pass(checks):
             raise PRDeliveryError(f"{architecture} checks are incomplete")
         rows.append(
             "| "
@@ -666,24 +647,10 @@ def compose_pull_request(bundle: CandidateBundle) -> PullRequestContent:
         hadolint_violations,
         True,
     )
-    recovery_lines: tuple[str, ...] = ()
     candidate_origin = (
         f"- Promoted from validated run "
         f"`{bundle.manifest.validated_run_id}`."
     )
-    if recovery is not None:
-        candidate_origin = (
-            f"- Packaged in recovery run: `{recovery['packaging_run_id']}`."
-        )
-        recovery_lines = (
-            f"- Generation evidence run: "
-            f"`{recovery.get('generation_run_id')}`.",
-            f"- Native validation evidence run: "
-            f"`{recovery.get('validation_run_id')}`.",
-            f"- Recovery packaging run: "
-            f"`{recovery.get('packaging_run_id')}`.",
-            "- Non-overlapping target-base advance: verified.",
-        )
     title = (
         f"[New Image] Add {task.app} {task.version} "
         f"for openEuler {task.os_version}"
@@ -716,7 +683,6 @@ def compose_pull_request(bundle: CandidateBundle) -> PullRequestContent:
             *rows,
             "",
             candidate_origin,
-            *recovery_lines,
             f"- Deterministic target contract: {gates.get('status')}",
             *hadolint_lines,
             "",

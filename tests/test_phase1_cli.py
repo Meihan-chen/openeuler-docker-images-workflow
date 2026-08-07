@@ -589,73 +589,6 @@ def test_target_workspace_commands_clone_create_and_replay_patch(tmp_path):
     assert (replay / "Database" / "new-file").read_text() == "candidate\n"
 
 
-def test_target_workspace_command_replays_disjoint_recovered_patch(tmp_path):
-    upstream = _upstream(tmp_path)
-    validated_base = _git(upstream, "rev-parse", "HEAD")
-    generated = tmp_path / "generated"
-    patch = tmp_path / "generation.patch"
-    _run(
-        "target-clone",
-        "--source",
-        str(upstream),
-        "--destination",
-        str(generated),
-        "--branch",
-        "master",
-    )
-    (generated / "Database").mkdir()
-    (generated / "Database" / "candidate").write_text("candidate\n")
-    _run(
-        "target-create-patch",
-        "--workspace",
-        str(generated),
-        "--branch",
-        "master",
-        "--base-sha",
-        validated_base,
-        "--output",
-        str(patch),
-    )
-    (upstream / "Security").mkdir()
-    (upstream / "Security" / "scan.md").write_text("scan\n")
-    _git(upstream, "add", "Security/scan.md")
-    _git(upstream, "commit", "-m", "unrelated update")
-    replay = tmp_path / "replay"
-    cloned = _run(
-        "target-clone",
-        "--source",
-        str(upstream),
-        "--destination",
-        str(replay),
-        "--branch",
-        "master",
-    )
-    current_base = json.loads(cloned.stdout)["base_sha"]
-    evidence = tmp_path / "recovery.json"
-
-    applied = _run(
-        "target-apply-recovered-patch",
-        "--workspace",
-        str(replay),
-        "--branch",
-        "master",
-        "--current-base-sha",
-        current_base,
-        "--validated-base-sha",
-        validated_base,
-        "--patch",
-        str(patch),
-        "--output",
-        str(evidence),
-    )
-
-    assert applied.returncode == 0, applied.stderr
-    payload = json.loads(evidence.read_text())
-    assert payload["status"] == "passed"
-    assert payload["upstream_changed_paths"] == ["Security/scan.md"]
-    assert payload["candidate_changed_paths"] == ["Database/candidate"]
-
-
 def test_pipeline_stage_commands_are_exposed():
     for command in (
         "fork-deliver",
@@ -688,7 +621,6 @@ def test_flow_is_the_only_phase_one_entry():
         "target-clone",
         "target-create-patch",
         "target-apply-patch",
-        "target-apply-recovered-patch",
         "fork-deliver",
         "issue-contract-test",
         "phase1-generate",

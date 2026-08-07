@@ -167,6 +167,17 @@ def _fork_deliver(args: argparse.Namespace) -> None:
     token = os.environ.get("GITCODE_TOKEN", "")
     if not token:
         raise ForkPRPipelineError("GITCODE_TOKEN is required")
+    # TODO(production-delivery): this is the single reason no entry can deliver
+    # in production. The config below is hard-coded to the test pair, and
+    # deliver_validated_candidate refuses anything else, so scenario_one is a
+    # production orchestration entry with test-mode delivery. The production
+    # pair (environment=production, delivery_mode=direct_branch_pr, defined in
+    # scripts/lib/gitcode_client.DeliveryConfig) is unreachable from any
+    # workflow, and test fork_pr deliberately skips the duplicate PR guard.
+    # Rollout order: lift these five values into CLI arguments, re-enable the
+    # duplicate PR guard, then relax the mode check in
+    # pr_delivery.deliver_validated_candidate.
+    # Left as-is on purpose while phase-one testing continues.
     config = DeliveryConfig.from_mapping(
         {
             "environment": "test",
@@ -359,21 +370,6 @@ def _target_apply_patch(args: argparse.Namespace) -> None:
             "patch": str(args.patch),
         }
     )
-
-
-def _target_apply_recovered_patch(args: argparse.Namespace) -> None:
-    workspace = TargetWorkspace.open_existing(
-        args.workspace,
-        branch=args.branch,
-        base_sha=args.current_base_sha,
-    )
-    evidence = workspace.apply_recovered_patch(
-        args.patch,
-        validated_base_sha=args.validated_base_sha,
-    )
-    payload = evidence.to_dict()
-    _write_json(args.output, payload)
-    _print_json(payload)
 
 
 def cmd_phase1_generate(args: argparse.Namespace) -> None:
@@ -618,15 +614,6 @@ def _add_candidate_commands(commands: argparse._SubParsersAction) -> None:
     apply_patch.add_argument("--base-sha", required=True)
     apply_patch.add_argument("--patch", required=True, type=Path)
     apply_patch.set_defaults(handler=_target_apply_patch)
-
-    recover_patch = commands.add_parser("target-apply-recovered-patch")
-    recover_patch.add_argument("--workspace", required=True, type=Path)
-    recover_patch.add_argument("--branch", required=True)
-    recover_patch.add_argument("--current-base-sha", required=True)
-    recover_patch.add_argument("--validated-base-sha", required=True)
-    recover_patch.add_argument("--patch", required=True, type=Path)
-    recover_patch.add_argument("--output", required=True, type=Path)
-    recover_patch.set_defaults(handler=_target_apply_recovered_patch)
 
 
 def _add_delivery_commands(commands: argparse._SubParsersAction) -> None:

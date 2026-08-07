@@ -7,7 +7,6 @@ import json
 import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Mapping
 
 from scripts.lib.git_workspace import TargetWorkspace
 from scripts.lib.task_spec import TaskSpec, TaskSpecError
@@ -38,19 +37,6 @@ _REQUIRED_REPORTS = {
     "gates": "reports/gates.json",
     "generation gates": "reports/generation-gates.json",
     "x86_64": "reports/x86_64.json",
-}
-_RECOVERY_FIELDS = {
-    "schema_version",
-    "mode",
-    "status",
-    "generation_run_id",
-    "validation_run_id",
-    "packaging_run_id",
-    "validated_base_sha",
-    "current_base_sha",
-    "upstream_changed_paths",
-    "candidate_changed_paths",
-    "promotable",
 }
 
 
@@ -100,62 +86,7 @@ def junit_pass_rate(path: Path, architecture: str) -> float:
         ) from exc
 
 
-def recovery_provenance(
-    root: Path,
-    *,
-    validated_run_id: str,
-    base_sha: str,
-) -> Mapping[str, object] | None:
-    path = root / "reports" / "recovery-provenance.json"
-    if not path.is_file():
-        return None
-    try:
-        recovery = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError) as error:
-        raise CandidateBundleError("recovery provenance is invalid") from error
-    if not isinstance(recovery, dict) or set(recovery) != _RECOVERY_FIELDS:
-        raise CandidateBundleError("recovery provenance has an invalid schema")
-    if (
-        recovery.get("schema_version") != 1
-        or recovery.get("mode") != "recover_package"
-        or recovery.get("status") != "passed"
-        or recovery.get("promotable") is not True
-    ):
-        raise CandidateBundleError("recovery provenance is not promotable")
-    for field in (
-        "generation_run_id",
-        "validation_run_id",
-        "packaging_run_id",
-    ):
-        if not _RUN_ID_RE.fullmatch(str(recovery.get(field, ""))):
-            raise CandidateBundleError(
-                f"recovery provenance {field} is invalid"
-            )
-    if recovery.get("packaging_run_id") != validated_run_id:
-        raise CandidateBundleError(
-            "recovery packaging run does not match candidate manifest"
-        )
-    if recovery.get("current_base_sha") != base_sha:
-        raise CandidateBundleError(
-            "recovery current base does not match candidate manifest"
-        )
-    if not _SHA_RE.fullmatch(str(recovery.get("validated_base_sha", ""))):
-        raise CandidateBundleError("recovery validated base SHA is invalid")
-    upstream = recovery.get("upstream_changed_paths")
-    candidate = recovery.get("candidate_changed_paths")
-    if (
-        not isinstance(upstream, list)
-        or not isinstance(candidate, list)
-        or not candidate
-        or any(not isinstance(item, str) or not item for item in upstream)
-        or any(not isinstance(item, str) or not item for item in candidate)
-        or set(upstream) & set(candidate)
-    ):
-        raise CandidateBundleError("recovery provenance paths are invalid")
-    return recovery
-
-
-def _validate_reports(root: Path, *, allow_legacy: bool) -> None:
+def _validate_reports(root: Path) -> None:
     for name, relative in _REQUIRED_REPORTS.items():
         path = root / relative
         if not path.is_file():
@@ -166,20 +97,13 @@ def _validate_reports(root: Path, *, allow_legacy: bool) -> None:
             raise CandidateBundleError(f"{name} validation report is invalid") from exc
         if not isinstance(report, dict) or report.get("status") != "passed":
             raise CandidateBundleError(f"{name} validation did not pass")
-        legacy_generation_gate = (
-            allow_legacy
-            and name == "generation gates"
-            and "delivery_allowed" not in report
-        )
         if (
             name in {"gates", "generation gates"}
             and report.get("delivery_allowed") is not True
-            and not legacy_generation_gate
         ):
             raise CandidateBundleError(f"{name} delivery contract did not pass")
         if name in {"x86_64", "aarch64"} and not native_checks_pass(
-            report.get("checks"),
-            allow_legacy=allow_legacy,
+            report.get("checks")
         ):
             raise CandidateBundleError(f"{name} validation checks are incomplete")
         if name in {"x86_64", "aarch64"} and junit_pass_rate(
@@ -220,12 +144,7 @@ class CandidateBundle:
             raise CandidateBundleError("validated_run_id must be a positive integer")
 
         (root / "task-spec.json").write_text(task.to_json() + "\n")
-        allow_legacy = recovery_provenance(
-            root,
-            validated_run_id=validated_run_id,
-            base_sha=base_sha,
-        ) is not None
-        _validate_reports(root, allow_legacy=allow_legacy)
+        _validate_reports(root)
 
         payload = _payload_files(root)
         missing = sorted(set(_REQUIRED_PAYLOAD) - set(payload))
@@ -279,12 +198,7 @@ class CandidateBundle:
         if _content_digest(manifest.files) != manifest.content_sha256:
             raise CandidateBundleError("candidate content checksum is invalid")
 
-        allow_legacy = recovery_provenance(
-            root,
-            validated_run_id=manifest.validated_run_id,
-            base_sha=manifest.base_sha,
-        ) is not None
-        _validate_reports(root, allow_legacy=allow_legacy)
+        _validate_reports(root)
         try:
             task = TaskSpec.from_json((root / "task-spec.json").read_text())
         except (OSError, json.JSONDecodeError, TaskSpecError) as exc:

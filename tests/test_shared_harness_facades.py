@@ -71,8 +71,9 @@ def test_lib_layer_never_imports_cli_facades():
 
 
 def test_agent_execution_is_exposed_through_flow_orchestrator():
+    # Every job lives in the shared spine; the entries only pass inputs.
     workflow = (
-        ROOT / ".github" / "workflows" / "create_new_images.yml"
+        ROOT / ".github" / "workflows" / "_create_new_image_pipeline.yml"
     ).read_text()
 
     assert "scripts/harness/flow.py" in workflow
@@ -113,8 +114,8 @@ def test_legacy_harness_also_uses_only_the_app_shared_test_entrypoint(
 
 def test_workflow_uses_existing_validation_and_artifact_clis():
     workflows = ROOT / ".github" / "workflows"
-    workflow = (workflows / "create_new_images.yml").read_text()
-    # Native validation moved into the reusable round called by create_new_images.yml.
+    workflow = (workflows / "_create_new_image_pipeline.yml").read_text()
+    # Native validation moved into the reusable round the pipeline calls.
     rounds = (workflows / "_create_new_image_rounds.yml").read_text()
     flow = (ROOT / "scripts" / "harness" / "flow.py").read_text()
 
@@ -122,6 +123,8 @@ def test_workflow_uses_existing_validation_and_artifact_clis():
     assert "scripts/utils/artifacts.py" in workflow
     assert "phase1-native-validate" in rounds
     assert "./.github/workflows/_create_new_image_rounds.yml" in workflow
+    entry = (workflows / "create_new_images.yml").read_text()
+    assert "./.github/workflows/_create_new_image_pipeline.yml" in entry
     assert 'add_parser("target-validate")' not in flow
     assert 'add_parser("results-aggregate")' not in flow
     assert 'add_parser("native-validate")' not in flow

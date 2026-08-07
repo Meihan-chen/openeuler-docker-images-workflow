@@ -108,15 +108,6 @@ def main() -> None:
     aggregate.add_argument("--run-id", required=True)
     aggregate.add_argument("--run-url", required=True)
     aggregate.add_argument("--report-dir", required=True, type=Path)
-    aggregate.add_argument(
-        "--allow-legacy-evidence",
-        action="store_true",
-        help=(
-            "Accept reports predating the validated-candidate digest. Only "
-            "for the reviewed one-time recovery whose report bytes the "
-            "workflow already pins by SHA256."
-        ),
-    )
 
     args = parser.parse_args()
 
@@ -137,7 +128,6 @@ def main() -> None:
             run_id=args.run_id,
             run_url=args.run_url,
             report_dir=args.report_dir,
-            allow_legacy_evidence=args.allow_legacy_evidence,
         )
         print(json.dumps(report, ensure_ascii=False, sort_keys=True))
     else:

@@ -7,7 +7,14 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
-WORKFLOW_PATH = ROOT / ".github" / "workflows" / "create_new_images.yml"
+# The operator-facing entries own dispatch inputs only; every job lives in
+# the shared spine, so job-structure assertions read the pipeline.
+ENTRY_PATH = ROOT / ".github" / "workflows" / "create_new_images.yml"
+PROBE_ENTRY_PATH = ROOT / ".github" / "workflows" / "existing_as_new_probe.yml"
+ISSUE_TEST_PATH = ROOT / ".github" / "workflows" / "issue_contract_test.yml"
+WORKFLOW_PATH = (
+    ROOT / ".github" / "workflows" / "_create_new_image_pipeline.yml"
+)
 WATCH_PATH = ROOT / ".github" / "workflows" / "monitor_new_image_issues.yml"
 ROUND_PATH = ROOT / ".github" / "workflows" / "_create_new_image_rounds.yml"
 ROUNDS = ("round-1", "round-2", "round-3", "round-4")
@@ -47,33 +54,68 @@ def _trigger(data):
 
 
 def _job_text(job):
-    return yaml.safe_dump(job, sort_keys=True)
+    # Unwrapped: line folding would split the phrases these tests match on.
+    return yaml.safe_dump(job, sort_keys=True, width=10**6)
 
 
 def test_phase1_is_manual_only_with_explicit_operations():
-    trigger = _trigger(_workflow())
+    trigger = _trigger(_workflow(ENTRY_PATH))
 
     assert set(trigger) == {"workflow_dispatch"}
     operation = trigger["workflow_dispatch"]["inputs"]["operation"]
     assert operation["type"] == "choice"
     assert operation["default"] == "pipeline_smoke"
+    # Diagnostic operations live on their own entries, so the production
+    # dropdown only offers what an operator should reach for.
     assert operation["options"] == [
         "pipeline_smoke",
         "validate_only",
-        "existing_as_new_probe",
         "scenario_one",
-        "resume_round",
-        "resume_package",
-        "recover_package",
+        "resume",
         "fork_pr",
-        "fork_pr_resume",
-        "failure_issue_contract_test",
     ]
-    assert "validated_run_id" in trigger["workflow_dispatch"]["inputs"]
-    assert "source_run_id" in trigger["workflow_dispatch"]["inputs"]
-    assert "generation_run_id" in trigger["workflow_dispatch"]["inputs"]
-    assert "resume_from_round" in trigger["workflow_dispatch"]["inputs"]
-    assert len(trigger["workflow_dispatch"]["inputs"]) <= 10
+    inputs = trigger["workflow_dispatch"]["inputs"]
+    assert "validated_run_id" in inputs
+    assert "source_run_id" in inputs
+    assert "resume_from" in inputs
+    assert len(inputs) <= 10
+
+
+def test_diagnostic_entries_are_separate_workflows():
+    entry = _workflow(ENTRY_PATH)
+    probe = _trigger(_workflow(PROBE_ENTRY_PATH))["workflow_dispatch"]
+    issue_test = _trigger(_workflow(ISSUE_TEST_PATH))["workflow_dispatch"]
+
+    # Neither diagnostic can be selected from the production entry.
+    options = _trigger(entry)["workflow_dispatch"]["inputs"]["operation"][
+        "options"
+    ]
+    assert "existing_as_new_probe" not in options
+    assert "failure_issue_contract_test" not in options
+    assert "issue-contract-test" not in entry["jobs"]
+    # Each diagnostic entry pins its own mode, so it cannot be mis-selected.
+    assert "operation" not in probe["inputs"]
+    assert "operation" not in issue_test["inputs"]
+
+    probe_job = _workflow(PROBE_ENTRY_PATH)["jobs"]["probe"]
+    assert probe_job["uses"] == (
+        "./.github/workflows/_create_new_image_pipeline.yml"
+    )
+    assert probe_job["with"]["operation"] == "existing_as_new_probe"
+    assert probe_job["with"]["target_alias"] == "${{ inputs.app }}-e2e-test"
+
+
+def test_every_entry_delegates_to_one_shared_pipeline():
+    for path in (ENTRY_PATH, PROBE_ENTRY_PATH):
+        jobs = _workflow(path)["jobs"]
+        # A thin entry has exactly one job and that job has no steps of its
+        # own, so a gate can never be implemented per entry.
+        assert len(jobs) == 1
+        job = next(iter(jobs.values()))
+        assert job["uses"] == (
+            "./.github/workflows/_create_new_image_pipeline.yml"
+        )
+        assert "steps" not in job
 
 
 def test_prepare_job_leaves_time_for_the_bounded_adversarial_path():
@@ -87,19 +129,21 @@ def test_existing_as_new_probe_hides_reference_and_delivers_alias_pr():
     by_name = {step["name"]: step for step in steps}
 
     assert "existing_as_new_probe" in prepare["if"]
+    # target_alias is the single switch: the candidate is built under it and
+    # every probe-only step keys off it, so no step can drift out of sync.
     normalize = by_name["Normalize TaskSpec"]
-    assert "existing_as_new_probe" in normalize["run"]
-    assert '${APP}-e2e-test' in normalize["run"]
+    assert "TARGET_ALIAS" in normalize["run"]
+    assert normalize["env"]["TARGET_ALIAS"] == "${{ inputs.target_alias }}"
 
     hide = by_name["Hide existing app for probe"]
     restore = by_name["Restore existing app after probe"]
     generate = by_name["Generate candidate via agent"]
-    assert "existing_as_new_probe" in hide["if"]
+    assert hide["if"] == "${{ inputs.target_alias != '' }}"
     assert "update-index --skip-worktree" in hide["run"]
     assert "phase1-hidden-reference" in hide["run"]
     assert "existing_as_new_probe" in generate["if"]
     assert "always()" in restore["if"]
-    assert "existing_as_new_probe" in restore["if"]
+    assert "inputs.target_alias != ''" in restore["if"]
     assert "update-index" in restore["run"]
     assert "--no-skip-worktree" in restore["run"]
     assert "phase1-hidden-reference" in restore["run"]
@@ -133,20 +177,18 @@ def test_existing_as_new_context_reaches_generation_and_every_fixer():
     assert context["uses"] == (
         "./.github/actions/phase1-existing-as-new-context"
     )
-    assert "existing_as_new_probe" in context["if"]
+    assert context["if"] == "${{ inputs.target_alias != '' }}"
     assert context["with"]["canonical-app"] == "${{ inputs.app }}"
-    assert context["with"]["target-alias"] == "${{ inputs.app }}-e2e-test"
+    assert context["with"]["target-alias"] == "${{ inputs.target_alias }}"
     assert prepare_steps.index(context) < prepare_steps.index(
         prepare_by_name["Generate candidate via agent"]
     )
 
     for name in ROUNDS:
         call = jobs[name]["with"]
-        assert "existing_as_new_probe" in call["canonical_app"]
+        assert "inputs.target_alias != ''" in call["canonical_app"]
         assert "inputs.app" in call["canonical_app"]
-        assert "existing_as_new_probe" in call["target_alias"]
-        assert "inputs.app" in call["target_alias"]
-        assert "e2e-test" in call["target_alias"]
+        assert call["target_alias"] == "${{ inputs.target_alias }}"
 
     round_workflow = _workflow(ROUND_PATH)
     call_inputs = _trigger(round_workflow)["workflow_call"]["inputs"]
@@ -258,6 +300,7 @@ def test_existing_as_new_probe_shell_restores_reference_without_diff(tmp_path):
         "RUNNER_TEMP": str(tmp_path),
         "SOURCE_APP": "kylin",
         "DOMAIN": "Bigdata",
+        "TARGET_ALIAS": "kylin-e2e-test",
     }
 
     hidden = subprocess.run(
@@ -371,7 +414,7 @@ def test_validation_rounds_group_build_test_and_fix_jobs():
 
 def test_issue_trigger_reuses_scenario_one_and_finalizes_the_source_issue():
     data = _workflow()
-    inputs = _trigger(data)["workflow_dispatch"]["inputs"]
+    inputs = _trigger(_workflow(ENTRY_PATH))["workflow_dispatch"]["inputs"]
     jobs = data["jobs"]
 
     assert "Issue number" in inputs["source_run_id"]["description"]
@@ -528,7 +571,7 @@ def test_issue_watcher_polls_on_schedule_and_scans_up_to_max_issues():
 
 
 def test_phase1_task_defaults_are_the_confirmed_kvrocks_contract():
-    inputs = _trigger(_workflow())["workflow_dispatch"]["inputs"]
+    inputs = _trigger(_workflow(ENTRY_PATH))["workflow_dispatch"]["inputs"]
 
     assert inputs["app"]["default"] == "kvrocks"
     assert inputs["version"]["default"] == "2.16.0"
@@ -550,7 +593,6 @@ def test_native_jobs_use_exact_self_hosted_labels_and_no_emulation_actions():
         "package-candidate",
         "release-x86-builders",
         "deliver-fork-pr",
-        "issue-contract-test",
     ):
         assert jobs[name]["runs-on"] == [
             "self-hosted",
@@ -558,6 +600,9 @@ def test_native_jobs_use_exact_self_hosted_labels_and_no_emulation_actions():
             "X64",
             "oe-image-x86",
         ]
+    assert _workflow(ISSUE_TEST_PATH)["jobs"]["issue-contract-test"][
+        "runs-on"
+    ] == ["self-hosted", "Linux", "X64", "oe-image-x86"]
     assert jobs["release-arm-builders"]["runs-on"] == [
         "self-hosted",
         "Linux",
@@ -648,12 +693,12 @@ def test_resume_restarts_one_round_from_another_run_of_the_same_pipeline():
     seed = jobs["seed-resume"]
     seed_text = _job_text(seed)
 
-    assert seed["if"] == "${{ inputs.operation == 'resume_round' }}"
-    assert "phase1-patch${{ inputs.resume_from_round }}-${{" in seed_text
+    assert seed["if"] == "${{ inputs.operation == 'resume' }}"
+    assert "phase1-patch${{ inputs.resume_from }}-${{" in seed_text
     assert "run-id: ${{ inputs.source_run_id }}" in seed_text
     assert "github-token: ${{ github.token }}" in seed_text
     # Republished under this run so every round reads one uniform name.
-    assert "phase1-patch${{ inputs.resume_from_round }}-${{ github.run_id }}" in (
+    assert "phase1-patch${{ inputs.resume_from }}-${{ github.run_id }}" in (
         seed_text
     )
     # Packaging still needs the original generation reports. Resume must
@@ -664,7 +709,7 @@ def test_resume_restarts_one_round_from_another_run_of_the_same_pipeline():
     for index, name in enumerate(ROUNDS):
         condition = jobs[name]["if"]
         assert "needs.seed-resume.result == 'success'" in condition
-        assert f"inputs.resume_from_round == '{index + 1}'" in condition
+        assert f"inputs.resume_from == '{index + 1}'" in condition
 
     package = jobs["package-candidate"]
     package_text = _job_text(package)
@@ -678,14 +723,44 @@ def test_resume_restarts_one_round_from_another_run_of_the_same_pipeline():
         for step in package["steps"]
         if step.get("name") == "Upload resumed diagnostic candidate"
     )
-    assert "inputs.operation != 'resume_round'" in immutable_upload["if"]
-    assert "inputs.operation != 'resume_package'" in immutable_upload["if"]
-    assert "resume_round" in diagnostic_upload["if"]
-    assert "resume_package" in diagnostic_upload["if"]
+    # One resume operation covers both restart points, so a single condition
+    # decides promotability instead of one per restart point.
+    assert immutable_upload["if"] == "${{ inputs.operation != 'resume' }}"
+    assert diagnostic_upload["if"] == "${{ inputs.operation == 'resume' }}"
     assert "phase1-resume-candidate-" in _job_text(diagnostic_upload)
     assert "resume-provenance.json" in package_text
     assert '"promotable": false' in WORKFLOW_PATH.read_text()
     assert '"mode":"%s"' in WORKFLOW_PATH.read_text()
+
+
+def test_resume_from_package_seeds_the_same_names_a_fresh_run_produces():
+    jobs = _workflow()["jobs"]
+    seed_text = _job_text(jobs["seed-resume"])
+    package = jobs["package-candidate"]
+    package_text = _job_text(package)
+
+    # Packaging reads one uniform run ID because seed-resume republishes the
+    # converged candidate and its decisions under this run first.
+    assert "phase1-converged-${{ inputs.source_run_id }}" in seed_text
+    assert "phase1-converged-${{ github.run_id }}" in seed_text
+    assert "phase1-decide*-${{ inputs.source_run_id }}" in seed_text
+    # Republished under a name the packaging glob already matches.
+    assert "phase1-decideseed-${{ github.run_id }}" in seed_text
+
+    # Every packaging download names this run, with no source-run branch.
+    downloads = [
+        step
+        for step in package["steps"]
+        if "download-artifact" in step.get("uses", "")
+    ]
+    assert downloads
+    for step in downloads:
+        assert "inputs.source_run_id" not in _job_text(step)
+        assert "run-id" not in step["with"]
+    assert "phase1-converged-${{ github.run_id }}" in package_text
+    assert "phase1-decide*-${{ github.run_id }}" in package_text
+    assert "inputs.resume_from == 'package'" in package["if"]
+    assert "seed-resume" in package["needs"]
 
 
 def test_resume_republishes_decisions_before_the_restarted_round():
@@ -694,12 +769,12 @@ def test_resume_republishes_decisions_before_the_restarted_round():
         for step in _workflow()["jobs"]["seed-resume"]["steps"]
     }
     cases = (
-        (1, "inputs.resume_from_round != '1'"),
+        (1, "inputs.resume_from != '1'"),
         (
             2,
-            "inputs.resume_from_round == '3' || inputs.resume_from_round == '4'",
+            "inputs.resume_from == '3' || inputs.resume_from == '4'",
         ),
-        (3, "inputs.resume_from_round == '4'"),
+        (3, "inputs.resume_from == '4'"),
     )
 
     for round_number, condition in cases:
@@ -742,15 +817,15 @@ def test_artifact_producers_cover_each_package_input_mode():
     # all downstream consumers keep one stable artifact naming contract.
     assert "phase1-generation-${{ inputs.source_run_id }}" in seed_text
     assert "phase1-generation-${{ github.run_id }}" in seed_text
-    assert "phase1-patch${{ inputs.resume_from_round }}-${{" in seed_text
-    assert "phase1-patch${{ inputs.resume_from_round }}-${{ github.run_id }}" in (
+    assert "phase1-patch${{ inputs.resume_from }}-${{" in seed_text
+    assert "phase1-patch${{ inputs.resume_from }}-${{ github.run_id }}" in (
         seed_text
     )
-    # Package resume intentionally consumes the source run directly.
-    assert "phase1-converged-${{ inputs.operation == 'resume_package' &&" in (
-        package_text
-    )
-    assert "inputs.source_run_id || github.run_id" in package_text
+    # Package resume is seeded the same way, so packaging never branches on
+    # where its inputs came from.
+    assert "phase1-converged-${{ inputs.source_run_id }}" in seed_text
+    assert "phase1-converged-${{ github.run_id }}" in package_text
+    assert "inputs.source_run_id || github.run_id" not in package_text
 
 
 def test_round_artifact_producers_and_consumers_use_the_same_templates():
@@ -790,7 +865,7 @@ def test_round_artifact_producers_and_consumers_use_the_same_templates():
     package = _job_text(jobs["package-candidate"])
     delivery = _job_text(jobs["deliver-fork-pr"])
     assert "phase1-patch1-${{ github.run_id }}" in prepare
-    assert "phase1-patch${{ inputs.resume_from_round }}-${{" in seed
+    assert "phase1-patch${{ inputs.resume_from }}-${{" in seed
     assert "phase1-converged-${{" in package
     assert "phase1-converged-${{ github.run_id }}" in round_uploads
     assert "phase1-candidate-${{" in delivery
@@ -814,8 +889,8 @@ def test_candidate_verify_workflow_does_not_claim_to_check_current_base():
 
     assert "candidate-verify" in seal["run"]
     assert "--current-base-sha" not in seal["run"]
-    # The similarly named argument remains meaningful for recovered patches.
-    assert "--current-base-sha" in WORKFLOW_PATH.read_text()
+    # It went out with the one-time recovery path it was invented for.
+    assert "--current-base-sha" not in WORKFLOW_PATH.read_text()
 
 
 def test_sealed_candidate_preserves_both_junit_reports():
@@ -829,54 +904,6 @@ def test_sealed_candidate_preserves_both_junit_reports():
     assert "candidate/reports/x86_64.junit.xml" in seal["run"]
     assert "native-reports/aarch64.junit.xml" in seal["run"]
     assert "candidate/reports/aarch64.junit.xml" in seal["run"]
-
-
-def test_recover_package_combines_generation_and_validation_runs():
-    jobs = _workflow()["jobs"]
-    package = jobs["package-candidate"]
-    text = _job_text(package)
-
-    assert "recover_package" in package["if"]
-    assert "inputs.generation_run_id" in text
-    assert "inputs.source_run_id" in text
-    assert "target-apply-recovered-patch" in text
-    assert "recovery-provenance.json" in text
-    assert text.count("cmp ") == 4
-    assert "generation/task-spec.json" in text
-    assert "generation/base-sha.txt" in text
-    assert "promotable: true" in WORKFLOW_PATH.read_text()
-    assert "phase1-candidate-" in text
-    assert "phase1-resume-candidate-" in text
-    assert "DEEPSEEK_API_KEY" not in text
-    assert "phase1-native-repair" not in text
-    assert "phase1-native-validate" not in text
-
-
-def test_recover_package_only_accepts_confirmed_full_validation_lineage():
-    package = _job_text(_workflow()["jobs"]["package-candidate"])
-    workflow_text = WORKFLOW_PATH.read_text()
-
-    assert "30478803960" in package
-    assert "30483501656" in package
-    for digest in (
-        "3b9579c664c1a699121156d48384d43647a8ac6671490469d1189d788308a56f",
-        "65682e11649b4e992ee000872317f2b4d04786e1c56a233549dd2c8b2222fc37",
-        "afad06c7206854c432cba89c1a19ffd9836a79281763cd1736f01f3e0aae729d",
-        "8b046be0392a36dccb28b1d14f2c504c5b95fb6e3f518809731639d5e2c7ce86",
-    ):
-        assert digest in package
-    assert package.count(".checks == {") >= 2
-    for check in (
-        "native_build",
-        "dgoss",
-        "shared_tests",
-        "restart_persistence",
-    ):
-        assert workflow_text.count(f'"{check}": true') >= 2
-    assert 'evidence_run_id="${{ inputs.source_run_id }}"' in workflow_text
-    assert '--run-id "${evidence_run_id}"' in workflow_text
-    assert '--expected-run-id "${evidence_run_id}"' in workflow_text
-
 
 
 def test_validate_only_jobs_have_no_gitcode_credential_or_write_command():
@@ -953,34 +980,59 @@ def test_fork_pr_reuses_named_artifact_from_exact_validated_run():
     assert "--token" not in text
 
 
-def test_fork_pr_resume_reuses_named_resume_artifact_without_revalidation():
-    workflow = _workflow()
-    trigger = _trigger(workflow)
-    operations = trigger["workflow_dispatch"]["inputs"]["operation"]["options"]
-    job = workflow["jobs"]["deliver-fork-pr"]
+def test_fork_pr_falls_back_to_the_resume_candidate_of_the_same_run():
+    job = _workflow()["jobs"]["deliver-fork-pr"]
     steps = {step["name"]: step for step in job["steps"]}
+    entry_options = _trigger(_workflow(ENTRY_PATH))["workflow_dispatch"][
+        "inputs"
+    ]["operation"]["options"]
 
-    assert "fork_pr_resume" in operations
-    assert "inputs.operation == 'fork_pr_resume'" in job["if"]
-    assert "fork_pr_resume" in steps["Validate validated run ID"]["if"]
+    # One delivery operation covers both candidate shapes.
+    assert "fork_pr_resume" not in entry_options
+    assert "fork_pr" in entry_options
+    assert "fork_pr" in steps["Validate validated run ID"]["if"]
 
-    download = steps["Download resumed candidate"]
-    artifact_name = download["with"]["name"]
-    assert "inputs.operation == 'fork_pr_resume'" in download["if"]
-    assert artifact_name == (
+    validated = steps["Download validated candidate"]
+    resumed = steps["Download resumed candidate"]
+    assert validated["with"]["name"] == (
+        "phase1-candidate-${{ inputs.validated_run_id }}"
+    )
+    assert resumed["with"]["name"] == (
         "phase1-resume-candidate-${{ inputs.validated_run_id }}"
     )
-    assert "inputs.validated_run_id" in download["with"]["run-id"]
+    assert "steps.validated_candidate.outcome != 'success'" in resumed["if"]
+    for step in (validated, resumed):
+        assert "inputs.validated_run_id" in step["with"]["run-id"]
+
+    # Delivering a promotable=false candidate stays an explicit act: without
+    # the opt-in, a wrong run ID fails on the validated download instead of
+    # falling through and opening a PR from a diagnostic bundle.
+    assert validated["continue-on-error"] == (
+        "${{ inputs.allow_diagnostic_candidate }}"
+    )
+    assert "inputs.allow_diagnostic_candidate" in resumed["if"]
+    entry_inputs = _trigger(_workflow(ENTRY_PATH))["workflow_dispatch"][
+        "inputs"
+    ]
+    assert entry_inputs["allow_diagnostic_candidate"]["default"] is False
+    assert entry_inputs["allow_diagnostic_candidate"]["type"] == "boolean"
+
+    provenance = steps["Record delivered candidate provenance"]
+    assert "resume-provenance.json" in provenance["run"]
+    assert "promotable=false" in provenance["run"]
 
 
 def test_issue_probe_is_isolated_and_explicit():
-    jobs = _workflow()["jobs"]
-    issue = jobs["issue-contract-test"]
+    issue_workflow = _workflow(ISSUE_TEST_PATH)
+    issue = issue_workflow["jobs"]["issue-contract-test"]
+    pipeline_text = WORKFLOW_PATH.read_text()
 
-    assert "failure_issue_contract_test" in issue["if"]
+    # Isolation is now structural: it shares no job with the image pipeline.
+    assert set(issue_workflow["jobs"]) == {"issue-contract-test"}
     assert "issue-contract-test" in _job_text(issue)
     assert "GITCODE_TOKEN" in _job_text(issue)
-    assert "GITCODE_TOKEN" in _job_text(jobs["deliver-fork-pr"])
+    assert "issue-contract-test" not in pipeline_text
+    assert "GITCODE_TOKEN" in _job_text(_workflow()["jobs"]["deliver-fork-pr"])
 
 
 def test_actions_are_commit_pinned_and_python_install_requires_hashes():
@@ -1013,24 +1065,6 @@ def test_actions_are_commit_pinned_and_python_install_requires_hashes():
     setup = _action_text("phase1-setup")
     assert "--require-hashes" in setup
     assert ".github/python-phase1.lock.txt" in setup
-
-
-def test_legacy_evidence_is_allowed_only_on_the_reviewed_recovery_path():
-    workflow_text = WORKFLOW_PATH.read_text()
-    aggregate = next(
-        step
-        for step in _workflow()["jobs"]["package-candidate"]["steps"]
-        if step.get("name") == "Aggregate dual-architecture result evidence"
-    )["run"]
-
-    # Reports predating validated_patch_sha256 may only be accepted for the
-    # one reviewed run whose report bytes are already pinned by SHA256.
-    assert workflow_text.count("--allow-legacy-evidence") == 2
-    assert 'legacy_evidence=""' in aggregate
-    assert '"${{ inputs.operation }}" = "recover_package"' in aggregate
-    assert "TODO(test-recovery-cleanup)" in aggregate
-    assert "${legacy_evidence}" in aggregate
-
 
 
 def test_each_architecture_hands_its_run_builder_back_exactly_once():
@@ -1078,9 +1112,12 @@ def test_actionlint_knows_the_confirmed_custom_runner_labels():
 
 def test_jobs_and_run_have_readable_display_names():
     data = _workflow()
+    entry = _workflow(ENTRY_PATH)
 
-    assert "inputs.operation" in data["run-name"]
-    assert "inputs.app" in data["run-name"]
+    assert "inputs.operation" in entry["run-name"]
+    assert "inputs.app" in entry["run-name"]
+    # Moving the jobs into a shared spine must not rename any of them: these
+    # ids and display names are exactly what the pre-refactor workflow used.
     expected = {
         "prepare": "Prepare round 1 candidate",
         "seed-resume": "Seed resumed run artifacts",
@@ -1093,11 +1130,25 @@ def test_jobs_and_run_have_readable_display_names():
         "release-arm-builders": "Clean Environment (aarch64)",
         "deliver-fork-pr": "Create fork PR from candidate",
         "finalize-trigger-issue": "Finalize trigger Issue",
-        "issue-contract-test": "Test failure Issue lifecycle",
     }
     assert {
         job_id: job["name"] for job_id, job in data["jobs"].items()
     } == expected
+    assert (
+        _workflow(ISSUE_TEST_PATH)["jobs"]["issue-contract-test"]["name"]
+        == "Test failure Issue lifecycle"
+    )
+
+    # A caller job's name is prefixed onto every job of the workflow it calls,
+    # so these two names show up in front of all eleven names above.
+    callers = {
+        ENTRY_PATH: ("create-new-image", "Create new image"),
+        PROBE_ENTRY_PATH: ("probe", "Existing-as-new probe pipeline"),
+    }
+    for path, (job_id, name) in callers.items():
+        jobs = _workflow(path)["jobs"]
+        assert set(jobs) == {job_id}
+        assert jobs[job_id]["name"] == name
 
 
 
@@ -1301,9 +1352,12 @@ def test_every_native_job_delegates_setup_and_keeps_checkout_in_the_job():
     decide_setup = _delegated_setup_step(round_jobs["decide"])
     assert decide_setup["with"]["arch"] == "x86_64"
 
-    for name in ("deliver-fork-pr", "issue-contract-test"):
-        setup = _delegated_setup_step(jobs[name])
-        assert "with" not in setup
+    setup = _delegated_setup_step(jobs["deliver-fork-pr"])
+    assert "with" not in setup
+    issue_setup = _delegated_setup_step(
+        _workflow(ISSUE_TEST_PATH)["jobs"]["issue-contract-test"]
+    )
+    assert "with" not in issue_setup
 
 
 

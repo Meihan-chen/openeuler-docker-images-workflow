@@ -38,8 +38,6 @@ def _load_report(
     path: Path,
     architecture: str,
     task: TaskSpec,
-    *,
-    allow_legacy_evidence: bool = False,
 ) -> dict[str, object]:
     try:
         report = json.loads(path.read_text())
@@ -58,17 +56,12 @@ def _load_report(
     if not str(report.get("image_id", "")).startswith("sha256:"):
         raise ResultAggregationError(f"{architecture} report has no image ID")
     recorded = str(report.get("validated_patch_sha256", ""))
-    if not _SHA256_RE.fullmatch(recorded) and not (
-        allow_legacy_evidence and not recorded
-    ):
+    if not _SHA256_RE.fullmatch(recorded):
         raise ResultAggregationError(
             f"{architecture} report does not record the candidate it validated"
         )
     checks = report.get("checks")
-    if not native_checks_pass(
-        checks,
-        allow_legacy=allow_legacy_evidence,
-    ):
+    if not native_checks_pass(checks):
         raise ResultAggregationError(f"{architecture} report checks are incomplete")
     environment = report.get("environment")
     if not isinstance(environment, dict) or set(environment) != _ENVIRONMENT_FIELDS:
@@ -120,15 +113,8 @@ def aggregate_native_results(
     run_id: str,
     run_url: str,
     report_dir: Path,
-    allow_legacy_evidence: bool = False,
 ) -> dict[str, object]:
-    """Aggregate two native reports.
-
-    ``allow_legacy_evidence`` accepts reports produced before validations
-    recorded the candidate they validated. It exists only for the one-time
-    recovery of an already reviewed run, whose report bytes are pinned by
-    SHA256 in the workflow, and must be removed with that recovery path.
-    """
+    """Aggregate two native reports into bounded in-repository evidence."""
     if not _RUN_ID_RE.fullmatch(run_id):
         raise ResultAggregationError("run_id must be a positive integer")
     if not run_url.startswith("https://"):
@@ -149,7 +135,6 @@ def aggregate_native_results(
             report_dir / f"{architecture}.json",
             architecture,
             task,
-            allow_legacy_evidence=allow_legacy_evidence,
         )
         for architecture in _ARCHITECTURES
     }
@@ -157,7 +142,7 @@ def aggregate_native_results(
         str(reports[architecture].get("validated_patch_sha256", ""))
         for architecture in _ARCHITECTURES
     }
-    if validated != {""} and len(validated) != 1:
+    if len(validated) != 1:
         # Job order alone cannot prove this: a repair on one architecture
         # silently invalidates the other architecture's earlier pass.
         raise ResultAggregationError(

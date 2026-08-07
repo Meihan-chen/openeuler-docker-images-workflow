@@ -62,6 +62,10 @@ class DeliveryConfig:
             if guard_setting not in {"", "disabled"}:
                 raise DeliveryConfigError("duplicate PR guard is disabled in test")
             duplicate_pr_guard_enabled = False
+        # NOTE(production-delivery): this branch is fully implemented but
+        # currently unreachable. No workflow can select it, because
+        # flow.py _fork_deliver hard-codes the test pair above. Keep it in
+        # sync when the delivery config becomes a parameter.
         elif environment == "production":
             if delivery_mode != "direct_branch_pr":
                 raise DeliveryConfigError("production requires direct_branch_pr")

@@ -1,0 +1,87 @@
+name: Test failure Issue lifecycle
+run-name: >-
+  issue_contract_test / ${{ inputs.app }} ${{ inputs.version }}
+
+# GitCode Issue API contract smoke. It creates, updates, comments on and closes
+# one controlled Issue and touches no part of the image pipeline, which is why
+# it is its own workflow rather than an operation on create_new_images.yml.
+#
+# scripts/lib/issue_lifecycle.run_controlled_issue_probe refuses to run unless
+# it is called with environment=test and this exact operation name, so the
+# values below are load-bearing.
+
+on:
+  workflow_dispatch:
+    inputs:
+      app:
+        description: "Application name"
+        required: true
+        type: string
+        default: kvrocks
+      version:
+        description: "Application version"
+        required: true
+        type: string
+        default: 2.16.0
+      os_version:
+        description: "openEuler version"
+        required: true
+        type: string
+        default: 24.03-lts-sp4
+      domain:
+        description: "Target repository domain"
+        required: true
+        type: string
+        default: Database
+      source_url:
+        description: "Pinned upstream release URL"
+        required: true
+        type: string
+        default: https://github.com/apache/kvrocks/tree/v2.16.0
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  PYTHONUNBUFFERED: "1"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  issue-contract-test:
+    name: Test failure Issue lifecycle
+    runs-on: [self-hosted, Linux, X64, oe-image-x86]
+    timeout-minutes: 15
+    steps:
+      - name: Check out workflow source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Set up tooling
+        uses: ./.github/actions/phase1-setup
+
+      - name: Normalize TaskSpec
+        env:
+          APP: ${{ inputs.app }}
+          VERSION: ${{ inputs.version }}
+          OS_VERSION: ${{ inputs.os_version }}
+          DOMAIN: ${{ inputs.domain }}
+          SOURCE_URL: ${{ inputs.source_url }}
+        run: |
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
+            task-spec \
+            --app "${APP}" \
+            --version "${VERSION}" \
+            --os-version "${OS_VERSION}" \
+            --domain "${DOMAIN}" \
+            --source-url "${SOURCE_URL}" \
+            --output "${RUNNER_TEMP}/issue-task.json"
+
+      - name: Create, update, comment and close controlled Issue
+        env:
+          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+        run: |
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
+            issue-contract-test \
+            --task-spec "${RUNNER_TEMP}/issue-task.json" \
+            --github-run-id "${{ github.run_id }}" \
+            --failure-stage controlled-contract

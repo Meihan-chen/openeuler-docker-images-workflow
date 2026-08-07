@@ -63,24 +63,14 @@ _VERSION_INFO_FIELDS = {
 NATIVE_REQUIRED_CHECKS = frozenset(
     {"native_build", "dgoss", "shared_tests"}
 )
-LEGACY_NATIVE_REQUIRED_CHECKS = frozenset(
-    {*NATIVE_REQUIRED_CHECKS, "restart_persistence"}
-)
 
 
-def native_checks_pass(
-    checks: object,
-    *,
-    allow_legacy: bool = False,
-) -> bool:
+def native_checks_pass(checks: object) -> bool:
     if not isinstance(checks, dict) or not all(
         value is True for value in checks.values()
     ):
         return False
-    accepted = {NATIVE_REQUIRED_CHECKS}
-    if allow_legacy:
-        accepted.add(LEGACY_NATIVE_REQUIRED_CHECKS)
-    return frozenset(checks) in accepted
+    return frozenset(checks) == NATIVE_REQUIRED_CHECKS
 
 
 def junit_pass_rate(content: bytes) -> float:
@@ -1089,7 +1079,6 @@ def validate_final_target(
     task: TaskSpec,
     base_sha: str,
     expected_run_id: str,
-    allow_legacy_evidence: bool = False,
 ) -> dict[str, object]:
     if not _RUN_ID_RE.fullmatch(expected_run_id):
         raise TargetContractError("expected_run_id must be a positive integer")
@@ -1180,10 +1169,7 @@ def validate_final_target(
         )
     for architecture, evidence in architectures.items():
         checks = evidence.get("checks") if isinstance(evidence, dict) else None
-        if not native_checks_pass(
-            checks,
-            allow_legacy=allow_legacy_evidence,
-        ):
+        if not native_checks_pass(checks):
             raise TargetContractError(
                 f"results.json {architecture} checks did not all pass"
             )
