@@ -7,14 +7,8 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
-# The operator-facing entries own dispatch inputs only; every job lives in
-# the shared spine, so job-structure assertions read the pipeline.
-ENTRY_PATH = ROOT / ".github" / "workflows" / "create_new_images.yml"
-PROBE_ENTRY_PATH = ROOT / ".github" / "workflows" / "existing_as_new_probe.yml"
+WORKFLOW_PATH = ROOT / ".github" / "workflows" / "create_new_images.yml"
 ISSUE_TEST_PATH = ROOT / ".github" / "workflows" / "issue_contract_test.yml"
-WORKFLOW_PATH = (
-    ROOT / ".github" / "workflows" / "_create_new_image_pipeline.yml"
-)
 WATCH_PATH = ROOT / ".github" / "workflows" / "monitor_new_image_issues.yml"
 ROUND_PATH = ROOT / ".github" / "workflows" / "_create_new_image_rounds.yml"
 ROUNDS = ("round-1", "round-2", "round-3", "round-4")
@@ -25,7 +19,6 @@ PHASE1_ACTIONS = (
     "phase1-setup",
     "phase1-replay",
     "phase1-emit-patch",
-    "phase1-existing-as-new-context",
 )
 
 
@@ -59,7 +52,7 @@ def _job_text(job):
 
 
 def test_phase1_is_manual_only_with_explicit_operations():
-    trigger = _trigger(_workflow(ENTRY_PATH))
+    trigger = _trigger(_workflow())
 
     assert set(trigger) == {"workflow_dispatch"}
     operation = trigger["workflow_dispatch"]["inputs"]["operation"]
@@ -81,281 +74,8 @@ def test_phase1_is_manual_only_with_explicit_operations():
     assert len(inputs) <= 10
 
 
-def test_diagnostic_entries_are_separate_workflows():
-    entry = _workflow(ENTRY_PATH)
-    probe = _trigger(_workflow(PROBE_ENTRY_PATH))["workflow_dispatch"]
-    issue_test = _trigger(_workflow(ISSUE_TEST_PATH))["workflow_dispatch"]
-
-    # Neither diagnostic can be selected from the production entry.
-    options = _trigger(entry)["workflow_dispatch"]["inputs"]["operation"][
-        "options"
-    ]
-    assert "existing_as_new_probe" not in options
-    assert "failure_issue_contract_test" not in options
-    assert "issue-contract-test" not in entry["jobs"]
-    # Each diagnostic entry pins its own mode, so it cannot be mis-selected.
-    assert "operation" not in probe["inputs"]
-    assert "operation" not in issue_test["inputs"]
-
-    probe_job = _workflow(PROBE_ENTRY_PATH)["jobs"]["probe"]
-    assert probe_job["uses"] == (
-        "./.github/workflows/_create_new_image_pipeline.yml"
-    )
-    assert probe_job["with"]["operation"] == "existing_as_new_probe"
-    assert probe_job["with"]["target_alias"] == "${{ inputs.app }}-e2e-test"
-
-
-def test_every_entry_delegates_to_one_shared_pipeline():
-    for path in (ENTRY_PATH, PROBE_ENTRY_PATH):
-        jobs = _workflow(path)["jobs"]
-        # A thin entry has exactly one job and that job has no steps of its
-        # own, so a gate can never be implemented per entry.
-        assert len(jobs) == 1
-        job = next(iter(jobs.values()))
-        assert job["uses"] == (
-            "./.github/workflows/_create_new_image_pipeline.yml"
-        )
-        assert "steps" not in job
-
-
 def test_prepare_job_leaves_time_for_the_bounded_adversarial_path():
     assert _workflow()["jobs"]["prepare"]["timeout-minutes"] == 360
-
-
-def test_existing_as_new_probe_hides_reference_and_delivers_alias_pr():
-    jobs = _workflow()["jobs"]
-    prepare = jobs["prepare"]
-    steps = prepare["steps"]
-    by_name = {step["name"]: step for step in steps}
-
-    assert "existing_as_new_probe" in prepare["if"]
-    # target_alias is the single switch: the candidate is built under it and
-    # every probe-only step keys off it, so no step can drift out of sync.
-    normalize = by_name["Normalize TaskSpec"]
-    assert "TARGET_ALIAS" in normalize["run"]
-    assert normalize["env"]["TARGET_ALIAS"] == "${{ inputs.target_alias }}"
-
-    hide = by_name["Hide existing app for probe"]
-    restore = by_name["Restore existing app after probe"]
-    generate = by_name["Generate candidate via agent"]
-    assert hide["if"] == "${{ inputs.target_alias != '' }}"
-    assert "update-index --skip-worktree" in hide["run"]
-    assert "phase1-hidden-reference" in hide["run"]
-    assert "existing_as_new_probe" in generate["if"]
-    assert "always()" in restore["if"]
-    assert "inputs.target_alias != ''" in restore["if"]
-    assert "update-index" in restore["run"]
-    assert "--no-skip-worktree" in restore["run"]
-    assert "phase1-hidden-reference" in restore["run"]
-
-    names = [step["name"] for step in steps]
-    assert names.index(hide["name"]) < names.index(generate["name"])
-    assert names.index(generate["name"]) < names.index(restore["name"])
-    assert names.index(restore["name"]) < names.index(
-        "Create generation patch"
-    )
-
-    delivery = jobs["deliver-fork-pr"]
-    delivery_text = _job_text(delivery)
-    assert "inputs.operation == 'existing_as_new_probe'" in delivery["if"]
-    assert "needs.package-candidate.result == 'success'" in delivery["if"]
-    assert "inputs.operation == 'existing_as_new_probe'" in delivery_text
-    assert "github.run_id" in delivery_text
-    assert "phase1-candidate-" in delivery_text
-
-    package_text = _job_text(jobs["package-candidate"])
-    assert "Existing-as-new test passed" in package_text
-    assert "must not be merged" in package_text
-
-
-def test_existing_as_new_context_reaches_generation_and_every_fixer():
-    jobs = _workflow()["jobs"]
-    prepare_steps = jobs["prepare"]["steps"]
-    prepare_by_name = {step["name"]: step for step in prepare_steps}
-    context = prepare_by_name["Apply existing-as-new context"]
-
-    assert context["uses"] == (
-        "./.github/actions/phase1-existing-as-new-context"
-    )
-    assert context["if"] == "${{ inputs.target_alias != '' }}"
-    assert context["with"]["canonical-app"] == "${{ inputs.app }}"
-    assert context["with"]["target-alias"] == "${{ inputs.target_alias }}"
-    assert prepare_steps.index(context) < prepare_steps.index(
-        prepare_by_name["Generate candidate via agent"]
-    )
-
-    for name in ROUNDS:
-        call = jobs[name]["with"]
-        assert "inputs.target_alias != ''" in call["canonical_app"]
-        assert "inputs.app" in call["canonical_app"]
-        assert call["target_alias"] == "${{ inputs.target_alias }}"
-
-    round_workflow = _workflow(ROUND_PATH)
-    call_inputs = _trigger(round_workflow)["workflow_call"]["inputs"]
-    assert call_inputs["canonical_app"]["required"] is False
-    assert call_inputs["target_alias"]["required"] is False
-    decide_steps = round_workflow["jobs"]["decide"]["steps"]
-    decide_by_name = {step["name"]: step for step in decide_steps}
-    fixer_context = decide_by_name["Apply existing-as-new context"]
-    assert fixer_context["uses"] == context["uses"]
-    assert "inputs.canonical_app != ''" in fixer_context["if"]
-    assert fixer_context["with"]["canonical-app"] == (
-        "${{ inputs.canonical_app }}"
-    )
-    assert fixer_context["with"]["target-alias"] == (
-        "${{ inputs.target_alias }}"
-    )
-    assert decide_steps.index(fixer_context) < decide_steps.index(
-        decide_by_name["Converge or repair"]
-    )
-
-
-def test_existing_as_new_context_action_updates_every_agent_prompt(tmp_path):
-    action = _action("phase1-existing-as-new-context")
-    step = action["runs"]["steps"][0]
-    prompt_dir = tmp_path / ".github" / "agents"
-    prompt_dir.mkdir(parents=True)
-    prompts = (
-        "image-creator.md",
-        "testcase-creator.md",
-        "testcase-qa.md",
-        "code-fixer.md",
-    )
-    for prompt in prompts:
-        (prompt_dir / prompt).write_text(f"original {prompt}\n")
-
-    completed = subprocess.run(
-        ["bash", "-c", step["run"]],
-        env={
-            **os.environ,
-            "GITHUB_WORKSPACE": str(tmp_path),
-            "CANONICAL_APP": "kylin",
-            "TARGET_ALIAS": "kylin-e2e-test",
-        },
-        capture_output=True,
-        text=True,
-    )
-
-    assert completed.returncode == 0, completed.stderr
-    for prompt in prompts:
-        text = (prompt_dir / prompt).read_text()
-        assert f"original {prompt}" in text
-        assert "The canonical application is `kylin`." in text
-        assert "`kylin-e2e-test` is only a temporary" in text
-        assert "Do not create a probe-only, client-only" in text
-        assert "Tests must start and validate the candidate image itself" in text
-
-
-def test_existing_as_new_context_does_not_require_image_qa_prompt():
-    action = _action("phase1-existing-as-new-context")
-    step = action["runs"]["steps"][0]
-
-    assert "image-qa.md" not in step["run"]
-
-
-def test_existing_as_new_probe_shell_restores_reference_without_diff(tmp_path):
-    steps = {
-        step["name"]: step
-        for step in _workflow()["jobs"]["prepare"]["steps"]
-    }
-    workspace = tmp_path / "phase1-target"
-    reference = workspace / "Bigdata" / "kylin"
-    reference.mkdir(parents=True)
-    (reference / "Dockerfile").write_text("existing\n")
-    (workspace / "Bigdata" / "image-list.yml").write_text(
-        "images:\n  kylin: kylin\n"
-    )
-    subprocess.run(
-        ["git", "init", "-b", "master", str(workspace)],
-        check=True,
-        capture_output=True,
-    )
-    subprocess.run(
-        ["git", "-C", str(workspace), "config", "user.name", "Fixture"],
-        check=True,
-    )
-    subprocess.run(
-        [
-            "git",
-            "-C",
-            str(workspace),
-            "config",
-            "user.email",
-            "fixture@example.com",
-        ],
-        check=True,
-    )
-    subprocess.run(
-        ["git", "-C", str(workspace), "add", "."],
-        check=True,
-    )
-    subprocess.run(
-        ["git", "-C", str(workspace), "commit", "-m", "base"],
-        check=True,
-        capture_output=True,
-    )
-    (tmp_path / "phase1-prepare").mkdir()
-    env = {
-        **os.environ,
-        "RUNNER_TEMP": str(tmp_path),
-        "SOURCE_APP": "kylin",
-        "DOMAIN": "Bigdata",
-        "TARGET_ALIAS": "kylin-e2e-test",
-    }
-
-    hidden = subprocess.run(
-        ["bash", "-c", steps["Hide existing app for probe"]["run"]],
-        env=env,
-        capture_output=True,
-        text=True,
-    )
-    assert hidden.returncode == 0, hidden.stderr
-    assert not reference.exists()
-    subprocess.run(
-        [
-            "git",
-            "-C",
-            str(workspace),
-            "add",
-            "--intent-to-add",
-            "--",
-            ".",
-        ],
-        check=True,
-        capture_output=True,
-    )
-    assert subprocess.run(
-        ["git", "-C", str(workspace), "status", "--porcelain"],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout == ""
-
-    alias = workspace / "Bigdata" / "kylin-e2e-test"
-    alias.mkdir()
-    (alias / "Dockerfile").write_text("generated\n")
-    restored = subprocess.run(
-        [
-            "bash",
-            "-c",
-            steps["Restore existing app after probe"]["run"],
-        ],
-        env=env,
-        capture_output=True,
-        text=True,
-    )
-
-    assert restored.returncode == 0, restored.stderr
-    assert (reference / "Dockerfile").read_text() == "existing\n"
-    status = subprocess.run(
-        ["git", "-C", str(workspace), "status", "--porcelain"],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout
-    assert "Bigdata/kylin-e2e-test/" in status
-    assert "Bigdata/kylin/" not in status
-
 
 
 def test_scenario_one_runs_full_validation_chain_and_delivers_same_run():
@@ -414,7 +134,7 @@ def test_validation_rounds_group_build_test_and_fix_jobs():
 
 def test_issue_trigger_reuses_scenario_one_and_finalizes_the_source_issue():
     data = _workflow()
-    inputs = _trigger(_workflow(ENTRY_PATH))["workflow_dispatch"]["inputs"]
+    inputs = _trigger(_workflow())["workflow_dispatch"]["inputs"]
     jobs = data["jobs"]
 
     assert "Issue number" in inputs["source_run_id"]["description"]
@@ -571,7 +291,7 @@ def test_issue_watcher_polls_on_schedule_and_scans_up_to_max_issues():
 
 
 def test_phase1_task_defaults_are_the_confirmed_kvrocks_contract():
-    inputs = _trigger(_workflow(ENTRY_PATH))["workflow_dispatch"]["inputs"]
+    inputs = _trigger(_workflow())["workflow_dispatch"]["inputs"]
 
     assert inputs["app"]["default"] == "kvrocks"
     assert inputs["version"]["default"] == "2.16.0"
@@ -983,13 +703,13 @@ def test_fork_pr_reuses_named_artifact_from_exact_validated_run():
 def test_fork_pr_falls_back_to_the_resume_candidate_of_the_same_run():
     job = _workflow()["jobs"]["deliver-fork-pr"]
     steps = {step["name"]: step for step in job["steps"]}
-    entry_options = _trigger(_workflow(ENTRY_PATH))["workflow_dispatch"][
+    operations = _trigger(_workflow())["workflow_dispatch"][
         "inputs"
     ]["operation"]["options"]
 
     # One delivery operation covers both candidate shapes.
-    assert "fork_pr_resume" not in entry_options
-    assert "fork_pr" in entry_options
+    assert "fork_pr_resume" not in operations
+    assert "fork_pr" in operations
     assert "fork_pr" in steps["Validate validated run ID"]["if"]
 
     validated = steps["Download validated candidate"]
@@ -1011,7 +731,7 @@ def test_fork_pr_falls_back_to_the_resume_candidate_of_the_same_run():
         "${{ inputs.allow_diagnostic_candidate }}"
     )
     assert "inputs.allow_diagnostic_candidate" in resumed["if"]
-    entry_inputs = _trigger(_workflow(ENTRY_PATH))["workflow_dispatch"][
+    entry_inputs = _trigger(_workflow())["workflow_dispatch"][
         "inputs"
     ]
     assert entry_inputs["allow_diagnostic_candidate"]["default"] is False
@@ -1112,12 +832,10 @@ def test_actionlint_knows_the_confirmed_custom_runner_labels():
 
 def test_jobs_and_run_have_readable_display_names():
     data = _workflow()
-    entry = _workflow(ENTRY_PATH)
+    entry = _workflow()
 
     assert "inputs.operation" in entry["run-name"]
     assert "inputs.app" in entry["run-name"]
-    # Moving the jobs into a shared spine must not rename any of them: these
-    # ids and display names are exactly what the pre-refactor workflow used.
     expected = {
         "prepare": "Prepare round 1 candidate",
         "seed-resume": "Seed resumed run artifacts",
@@ -1139,16 +857,6 @@ def test_jobs_and_run_have_readable_display_names():
         == "Test failure Issue lifecycle"
     )
 
-    # A caller job's name is prefixed onto every job of the workflow it calls,
-    # so these two names show up in front of all eleven names above.
-    callers = {
-        ENTRY_PATH: ("create-new-image", "Create new image"),
-        PROBE_ENTRY_PATH: ("probe", "Existing-as-new probe pipeline"),
-    }
-    for path, (job_id, name) in callers.items():
-        jobs = _workflow(path)["jobs"]
-        assert set(jobs) == {job_id}
-        assert jobs[job_id]["name"] == name
 
 
 
