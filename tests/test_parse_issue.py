@@ -104,6 +104,23 @@ def test_parse_minimal_issue_can_take_version_from_pinned_source_url():
     assert fields["app_version"] == "2.16.0"
 
 
+def test_parse_pinned_source_url_keeps_a_compound_upstream_version():
+    body = MINIMAL_TARGET_ISSUE.replace(
+        "https://github.com/apache/kvrocks/tree/v2.16.0",
+        (
+            "https://github.com/percona/percona-server/tree/"
+            "Percona-Server-5.5.25a-27.1"
+        ),
+    ).replace("kvrocks", "percona-server")
+
+    fields = parse_issue_request(
+        "【new-image】add percona-server docker image on openEuler 24.03-LTS-SP4",
+        body,
+    )
+
+    assert fields["app_version"] == "5.5.25a-27.1"
+
+
 def test_title_version_takes_precedence_over_a_different_source_ref(monkeypatch):
     def unexpected_urlopen(request, timeout):
         pytest.fail(f"latest release lookup was not expected: {request.full_url}")
@@ -126,17 +143,44 @@ def test_parse_minimal_issue_uses_latest_github_release_or_tag_when_version_is_o
 
     def fake_urlopen(request, timeout):
         requested_urls.append((request.full_url, timeout))
-        payload = (
-            {"tag_name": "Percona-Server-5.5.55-38.8"}
-            if request.full_url.endswith("/releases/latest")
-            else [
+        if request.full_url.endswith("/releases/latest"):
+            payload = {
+                "tag_name": "Percona-Server-5.5.55-38.8",
+                "published_at": "2017-07-05T20:27:17Z",
+            }
+        elif request.full_url.endswith("/graphql"):
+            payload = {
+                "data": {
+                    "repository": {
+                        "refs": {
+                            "nodes": [
+                                {
+                                    "name": "Percona-Server-9.7.1-1",
+                                    "target": {
+                                        "tagger": {
+                                            "date": "2026-08-05T09:22:28Z",
+                                        },
+                                        "target": {
+                                            "committedDate": (
+                                                "2026-07-26T15:44:44Z"
+                                            ),
+                                        },
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        else:
+            payload = [
                 {"ref": "refs/tags/12.4"},
                 {"ref": "refs/tags/mysqlsummit-0.2.1"},
+                {"ref": "refs/tags/Percona-Server-5.5.25a-27.1"},
                 {"ref": "refs/tags/Percona-Server-8.4.10-10"},
                 {"ref": "refs/tags/Percona-Server-9.7.1-1"},
                 {"ref": "refs/tags/version_where_test_case_for_bug_31581_works"},
             ]
-        )
         return BytesIO(json.dumps(payload).encode())
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
@@ -160,8 +204,7 @@ def test_parse_minimal_issue_uses_latest_github_release_or_tag_when_version_is_o
             30,
         ),
         (
-            "https://api.github.com/repos/percona/percona-server/"
-            "git/matching-refs/tags/",
+            "https://api.github.com/graphql",
             30,
         ),
     ]
@@ -180,7 +223,23 @@ def test_parse_minimal_issue_falls_back_to_latest_github_tag(monkeypatch):
                 {},
                 None,
             )
-        return BytesIO(json.dumps([{"ref": "refs/tags/v9.1.0"}]).encode())
+        payload = {
+            "data": {
+                "repository": {
+                    "refs": {
+                        "nodes": [
+                            {
+                                "name": "v9.1.0",
+                                "target": {
+                                    "committedDate": "2026-07-01T00:00:00Z",
+                                },
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+        return BytesIO(json.dumps(payload).encode())
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
     body = MINIMAL_TARGET_ISSUE.replace(
@@ -199,7 +258,7 @@ def test_parse_minimal_issue_falls_back_to_latest_github_tag(monkeypatch):
     )
     assert requested_urls == [
         "https://api.github.com/repos/example/no-releases/releases/latest",
-        "https://api.github.com/repos/example/no-releases/git/matching-refs/tags/",
+        "https://api.github.com/graphql",
     ]
 
 

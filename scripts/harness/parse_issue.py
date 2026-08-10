@@ -7,6 +7,7 @@ import sys
 import urllib.error
 import urllib.request
 from collections.abc import Mapping
+from datetime import datetime
 from urllib.parse import quote, urlparse
 
 
@@ -39,7 +40,8 @@ _TITLE_RE = re.compile(
     re.IGNORECASE,
 )
 _TAG_VERSION_RE = re.compile(
-    r"(?<!\d)(\d+(?:\.\d+)+(?:[-+._][A-Za-z0-9]+)*)"
+    r"(?<!\d)(\d+(?:\.\d+)+(?:[A-Za-z][A-Za-z0-9]*)?"
+    r"(?:[-+._][A-Za-z0-9]+(?:\.[A-Za-z0-9]+)*)*)"
 )
 
 
@@ -99,19 +101,11 @@ def validate(fields: dict) -> list[str]:
     return [f for f in required if f not in fields]
 
 
-def _version_key(version: str) -> tuple[int, ...]:
-    return tuple(int(part) for part in re.findall(r"\d+", version))
-
-
 def _version_from_tag(tag: str) -> str | None:
     versions = _TAG_VERSION_RE.findall(tag)
     if not versions:
         return None
-    return max(versions, key=_version_key)
-
-
-def _normalized_identifier(value: str) -> str:
-    return re.sub(r"[^a-z0-9]", "", value.lower())
+    return versions[0]
 
 
 def _version_from_source_url(source_url: str) -> str | None:
@@ -145,7 +139,11 @@ def _github_repository(source_url: str) -> tuple[str, str]:
     return owner, repo
 
 
-def _github_api_json(url: str) -> object:
+def _github_api_json(
+    url: str,
+    *,
+    payload: Mapping[str, object] | None = None,
+) -> object:
     headers = {
         "Accept": "application/vnd.github+json",
         "User-Agent": "openeuler-autopilot/1.0",
@@ -154,7 +152,11 @@ def _github_api_json(url: str) -> object:
     github_token = os.environ.get("GITHUB_TOKEN", "").strip()
     if github_token:
         headers["Authorization"] = f"Bearer {github_token}"
-    request = urllib.request.Request(url, headers=headers)
+    data = None
+    if payload is not None:
+        headers["Content-Type"] = "application/json"
+        data = json.dumps(payload).encode()
+    request = urllib.request.Request(url, data=data, headers=headers)
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
             return json.loads(response.read())
@@ -166,43 +168,119 @@ def _github_api_json(url: str) -> object:
         raise IssueParseError(f"GitHub API lookup failed: {error}") from error
 
 
+_LATEST_TAG_QUERY = """
+query LatestVersionTag($owner: String!, $repo: String!) {
+  repository(owner: $owner, name: $repo) {
+    refs(
+      refPrefix: "refs/tags/"
+      first: 100
+      orderBy: {field: TAG_COMMIT_DATE, direction: DESC}
+    ) {
+      nodes {
+        name
+        target {
+          ... on Commit {
+            committedDate
+          }
+          ... on Tag {
+            tagger {
+              date
+            }
+            target {
+              ... on Commit {
+                committedDate
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+
+def _tag_timestamp(target: object) -> str:
+    if not isinstance(target, Mapping):
+        return ""
+    tagger = target.get("tagger")
+    if isinstance(tagger, Mapping) and tagger.get("date"):
+        return str(tagger["date"])
+    if target.get("committedDate"):
+        return str(target["committedDate"])
+    nested_target = target.get("target")
+    if isinstance(nested_target, Mapping) and nested_target.get("committedDate"):
+        return str(nested_target["committedDate"])
+    return ""
+
+
+def _latest_github_tag(owner: str, repo: str) -> tuple[str, str] | None:
+    payload = _github_api_json(
+        "https://api.github.com/graphql",
+        payload={
+            "query": _LATEST_TAG_QUERY,
+            "variables": {"owner": owner, "repo": repo},
+        },
+    )
+    if not isinstance(payload, Mapping) or payload.get("errors"):
+        raise IssueParseError("GitHub latest tag lookup returned an error")
+    data = payload.get("data")
+    repository = data.get("repository") if isinstance(data, Mapping) else None
+    refs = repository.get("refs") if isinstance(repository, Mapping) else None
+    nodes = refs.get("nodes") if isinstance(refs, Mapping) else None
+    if not isinstance(nodes, list):
+        raise IssueParseError("GitHub latest tag lookup returned invalid data")
+    tags = [
+        (str(node.get("name", "")).strip(), _tag_timestamp(node.get("target")))
+        for node in nodes
+        if isinstance(node, Mapping) and str(node.get("name", "")).strip()
+    ]
+    if not tags:
+        return None
+    return next(
+        (candidate for candidate in tags if _version_from_tag(candidate[0])),
+        tags[0],
+    )
+
+
+def _timestamp_key(timestamp: str) -> float:
+    if not timestamp:
+        return float("-inf")
+    try:
+        return datetime.fromisoformat(timestamp.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return float("-inf")
+
+
 def _latest_github_release_or_tag(source_url: str) -> tuple[str, str]:
     owner, repo = _github_repository(source_url)
     release_payload = _github_api_json(
         f"https://api.github.com/repos/{owner}/{repo}/releases/latest"
     )
-    refs_payload = _github_api_json(
-        f"https://api.github.com/repos/{owner}/{repo}/git/matching-refs/tags/"
-    )
-    tags = []
+    candidates = []
     if isinstance(release_payload, Mapping):
-        tags.append(str(release_payload.get("tag_name", "")).strip())
-    if isinstance(refs_payload, list):
-        tags.extend(
-            str(item.get("ref", "")).removeprefix("refs/tags/").strip()
-            for item in refs_payload
-            if isinstance(item, Mapping)
-        )
-    candidates = [
-        (version, tag)
-        for tag in tags
-        if tag
-        for version in [_version_from_tag(tag)]
-        if version is not None
-    ]
+        release_tag = str(release_payload.get("tag_name", "")).strip()
+        if release_tag:
+            candidates.append(
+                (
+                    release_tag,
+                    str(
+                        release_payload.get("published_at")
+                        or release_payload.get("created_at")
+                        or ""
+                    ),
+                )
+            )
+    latest_tag = _latest_github_tag(owner, repo)
+    if latest_tag is not None:
+        candidates.append(latest_tag)
     if not candidates:
-        raise IssueParseError("GitHub repository has no versioned release or tag")
-    normalized_repo = _normalized_identifier(repo)
-    repository_candidates = [
-        candidate
-        for candidate in candidates
-        if normalized_repo
-        and normalized_repo in _normalized_identifier(candidate[1])
-    ]
-    version, tag = max(
-        repository_candidates or candidates,
-        key=lambda candidate: _version_key(candidate[0]),
+        raise IssueParseError("GitHub repository has no release or tag")
+    tag, _timestamp = max(
+        candidates,
+        key=lambda candidate: _timestamp_key(candidate[1]),
     )
+    version = _version_from_tag(tag) or tag
     pinned_url = (
         f"https://github.com/{owner}/{repo}/tree/{quote(tag, safe='')}"
     )
