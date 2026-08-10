@@ -4,7 +4,10 @@ import json
 import os
 import re
 import sys
-from urllib.parse import urlparse
+import urllib.error
+import urllib.request
+from collections.abc import Mapping
+from urllib.parse import quote, urlparse
 
 
 class IssueParseError(ValueError):
@@ -34,6 +37,9 @@ _TITLE_RE = re.compile(
     r"on\s+openEuler\s+(?P<os_version>\d{2}\.\d{2}"
     r"(?:-lts)?(?:-sp\d+)?)\s*$",
     re.IGNORECASE,
+)
+_TAG_VERSION_RE = re.compile(
+    r"(?<!\d)(\d+(?:\.\d+)+(?:[-+._][A-Za-z0-9]+)*)"
 )
 
 
@@ -93,20 +99,114 @@ def validate(fields: dict) -> list[str]:
     return [f for f in required if f not in fields]
 
 
-def _version_from_source_url(source_url: str) -> str:
+def _version_key(version: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in re.findall(r"\d+", version))
+
+
+def _version_from_tag(tag: str) -> str | None:
+    versions = _TAG_VERSION_RE.findall(tag)
+    if not versions:
+        return None
+    return max(versions, key=_version_key)
+
+
+def _normalized_identifier(value: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", value.lower())
+
+
+def _version_from_source_url(source_url: str) -> str | None:
     path = [part for part in urlparse(source_url).path.split("/") if part]
     for marker in ("tree", "tag"):
         if marker not in path:
             continue
         index = path.index(marker)
         if index + 1 < len(path):
-            version = path[index + 1]
-            if version.startswith("v") and len(version) > 1:
-                version = version[1:]
-            return version
-    raise IssueParseError(
-        "version is missing from the Issue title and pinned source URL"
+            return _version_from_tag(path[index + 1])
+    return None
+
+
+def _github_repository(source_url: str) -> tuple[str, str]:
+    parsed = urlparse(source_url)
+    parts = [part for part in parsed.path.split("/") if part]
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != "github.com"
+        or len(parts) < 2
+    ):
+        raise IssueParseError(
+            "automatic latest release lookup requires a GitHub repository URL"
+        )
+    owner = parts[0]
+    repo = parts[1].removesuffix(".git")
+    if not owner or not repo:
+        raise IssueParseError(
+            "automatic latest release lookup requires a GitHub repository URL"
+        )
+    return owner, repo
+
+
+def _github_api_json(url: str) -> object:
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "openeuler-autopilot/1.0",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    github_token = os.environ.get("GITHUB_TOKEN", "").strip()
+    if github_token:
+        headers["Authorization"] = f"Bearer {github_token}"
+    request = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return json.loads(response.read())
+    except urllib.error.HTTPError as error:
+        if error.code == 404:
+            return None
+        raise IssueParseError(f"GitHub API lookup failed: {error}") from error
+    except (OSError, ValueError, urllib.error.URLError) as error:
+        raise IssueParseError(f"GitHub API lookup failed: {error}") from error
+
+
+def _latest_github_release_or_tag(source_url: str) -> tuple[str, str]:
+    owner, repo = _github_repository(source_url)
+    release_payload = _github_api_json(
+        f"https://api.github.com/repos/{owner}/{repo}/releases/latest"
     )
+    refs_payload = _github_api_json(
+        f"https://api.github.com/repos/{owner}/{repo}/git/matching-refs/tags/"
+    )
+    tags = []
+    if isinstance(release_payload, Mapping):
+        tags.append(str(release_payload.get("tag_name", "")).strip())
+    if isinstance(refs_payload, list):
+        tags.extend(
+            str(item.get("ref", "")).removeprefix("refs/tags/").strip()
+            for item in refs_payload
+            if isinstance(item, Mapping)
+        )
+    candidates = [
+        (version, tag)
+        for tag in tags
+        if tag
+        for version in [_version_from_tag(tag)]
+        if version is not None
+    ]
+    if not candidates:
+        raise IssueParseError("GitHub repository has no versioned release or tag")
+    normalized_repo = _normalized_identifier(repo)
+    repository_candidates = [
+        candidate
+        for candidate in candidates
+        if normalized_repo
+        and normalized_repo in _normalized_identifier(candidate[1])
+    ]
+    version, tag = max(
+        repository_candidates or candidates,
+        key=lambda candidate: _version_key(candidate[0]),
+    )
+    pinned_url = (
+        f"https://github.com/{owner}/{repo}/tree/{quote(tag, safe='')}"
+    )
+    return version, pinned_url
 
 
 def parse_issue_request(title: str, body: str) -> dict[str, str]:
@@ -132,11 +232,14 @@ def parse_issue_request(title: str, body: str) -> dict[str, str]:
     if title_package.lower() != fields["package_name"].lower():
         raise IssueParseError("package in title and body must match")
 
-    app_version = (
-        request_parts[1]
-        if len(request_parts) == 2
-        else _version_from_source_url(fields["source_repo_url"])
-    )
+    if len(request_parts) == 2:
+        app_version = request_parts[1]
+    else:
+        app_version = _version_from_source_url(fields["source_repo_url"])
+        if app_version is None:
+            app_version, fields["source_repo_url"] = _latest_github_release_or_tag(
+                fields["source_repo_url"]
+            )
     return {
         "package_name": fields["package_name"],
         "source_repo_url": fields["source_repo_url"],

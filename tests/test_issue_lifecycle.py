@@ -441,7 +441,7 @@ def test_production_selection_uses_new_status_and_new_image_title():
     assert len(dispatched) == 1
 
 
-def test_invalid_new_issue_is_rejected_without_dispatch():
+def test_invalid_new_issue_is_rejected_without_dispatch_and_kept_open():
     from scripts.lib.issue_lifecycle import claim_new_image_issue
 
     client = TriggerIssueClient(
@@ -467,7 +467,7 @@ def test_invalid_new_issue_is_rejected_without_dispatch():
     assert [name for name, _ in client.calls] == ["get", "comment", "update"]
     reject_call = client.calls[-1][1]
     assert reject_call["issue_status"] == "已拒绝"
-    assert reject_call["state"] == "closed"
+    assert reject_call["state"] == "open"
 
 
 def test_dispatch_failure_returns_claimed_issue_to_new_state():

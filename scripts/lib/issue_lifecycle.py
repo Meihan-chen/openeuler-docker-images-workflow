@@ -362,7 +362,7 @@ def claim_new_image_issue(
             target_repo=target_repo,
             issue=issue,
             issue_status="已拒绝",
-            state="closed",
+            state="open",
         )
         return None
 
