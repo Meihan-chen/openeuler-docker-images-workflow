@@ -500,8 +500,8 @@ def test_dispatch_failure_returns_claimed_issue_to_new_state():
         (
             "success",
             "https://gitcode.com/openeuler/openeuler-docker-images/pull/4000",
-            "已挂起",
-            "open",
+            "已完成",
+            "closed",
         ),
         ("failure", "", "已挂起", "open"),
         ("needs-human-review", "", "已挂起", "open"),
@@ -534,6 +534,8 @@ def test_trigger_issue_is_finalized_from_scenario_one_result(
     assert "actions/runs/123" in comment
     if outcome == "success":
         assert pr_url in comment
+        assert "Issue 已完成" in comment
+        assert "保持打开" not in comment
     else:
         assert "package_candidate=failure" in comment
         if outcome == "needs-human-review":
