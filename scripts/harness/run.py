@@ -19,7 +19,6 @@ Environment:
 import argparse
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -241,8 +240,8 @@ def _build_creator_prompt(role: str, *, round_num: int, qa_feedback: dict | None
     else:
         instruction = (
             f"Create functional test cases for {pkg} {app_ver}.\n"
-            f"Place tests under {target}/{domain}/{pkg}/tests/ "
-            "(goss.yaml, goss_wait.yaml, test_helpers.sh, test.sh).\n"
+            f"Place test.sh and optional test_helpers.sh under "
+            f"{target}/{domain}/{pkg}/tests/.\n"
             f"Read the Dockerfile at {target}/{domain}/{pkg}/{app_ver}/"
             f"{os_ver}/Dockerfile to determine binary name, ports, and "
             "version.\nWrite test-ai-result.json with your self-assessment."
@@ -282,8 +281,8 @@ def _build_qa_prompt(
         f"{tests_root}.\n"
         f"Scenario: {scenario}. Apply the same evidence contract regardless "
         f"of whether this is new-image, version-update, or oe-upgrade.\n"
-        f"Read tests/goss.yaml, optional tests/goss_wait.yaml, optional "
-        f"tests/test_helpers.sh, tests/test.sh, and test-ai-result.json.\n"
+        f"Read tests/test.sh, optional tests/test_helpers.sh, and "
+        f"test-ai-result.json.\n"
         f"The Dockerfile (read-only context) may explain the runtime contract, "
         f"but image-only findings are out of scope and must not trigger repair.\n"
         f"Output your review as JSON per the schema in your instructions.\n"
@@ -501,153 +500,13 @@ def cmd_adversarial_pair(args: argparse.Namespace) -> None:
     _run_adversarial_pair(args.role)
 
 
-def _parse_tag(tag: str) -> tuple[str, str]:
-    """Parse '1.27.2-oe2403lts' into ('1.27.2', '24.03-lts').
-
-    Falls back to env APP_VERSION / OS_VERSION if tag shape is unexpected.
-    """
-    m = re.match(r"^(.+?)-oe(\d{2})(\d{2})(lts.*?|sp\d+.*?)?$", tag)
-    if not m:
-        return (os.environ.get("APP_VERSION", ""), os.environ.get("OS_VERSION", ""))
-    app_ver = m.group(1)
-    yy, mm = m.group(2), m.group(3)
-    suffix = m.group(4) or "lts"
-    oe_ver = f"{yy}.{mm}-{suffix}"
-    return (app_ver, oe_ver)
-
-
 def cmd_test(args: argparse.Namespace) -> None:
-    """Run tests against a built Docker image, archive JUnit XML per DESIGN §5.3."""
-    target = _target_dir()
-    app = args.app
-    arch = args.platform.replace("/", "_")  # amd64 | arm64
-
-    test_dir = None
-    for p in target.glob(f"**/{app}/tests"):
-        test_dir = p
-        break
-
-    if not test_dir or not (test_dir / "goss.yaml").exists():
-        print(f"No tests/goss.yaml found for {app}; trying test.sh fallback")
-        _run_test_sh_fallback(target, app, arch)
-        return
-
-    app_dir = test_dir.parent
-    meta_path = app_dir / "meta.yml"
-    if not meta_path.exists():
-        print(f"No meta.yml at {app_dir}", file=sys.stderr)
-        sys.exit(1)
-
-    import yaml
-    meta = yaml.safe_load(meta_path.read_text()) or {}
-    tag = next(iter(meta.keys()), "")
-    app_ver, oe_ver = _parse_tag(tag)
-
-    results_dir = app_dir / "results" / app_ver / oe_ver
-    results_dir.mkdir(parents=True, exist_ok=True)
-
-    goss_file = test_dir / "goss.yaml"
-    container_name = f"oe-test-{app}-{arch}"
-
-    env = os.environ.copy()
-    env["GOSS_FILE"] = "goss.yaml"
-    env["GOSS_SLEEP"] = "15"
-
-    print(f"Running dgoss for {app} on {arch} (results -> {results_dir})")
-    if not shutil.which("dgoss"):
-        print(f"dgoss not found; falling back to test.sh for {app}")
-        _run_test_sh_fallback(target, app, arch, results_dir)
-        return
-    result = subprocess.run(
-        ["dgoss", "run", "--name", container_name, f"openeuler/{app}:test"],
-        env=env,
-        capture_output=True,
-        text=True,
-        cwd=str(test_dir),
+    """Fail closed until legacy version-update scenarios are migrated."""
+    print(
+        "Legacy scenario runtime testing is not supported by this entrypoint",
+        file=sys.stderr,
     )
-
-    if result.returncode != 0:
-        print(f"dgoss FAILED for {app} on {arch}, falling back to test.sh")
-        print(result.stdout[-2000:])
-        print(result.stderr[-1000:], file=sys.stderr)
-        subprocess.run(["docker", "rm", "-f", container_name], capture_output=True)
-        _run_test_sh_fallback(target, app, arch, results_dir)
-        return
-
-
-def _run_test_sh_fallback(target: Path, app: str, arch: str, results_dir: Path | None = None) -> None:
-    """Fallback: run the app-level shared test inside the image."""
-    test_sh = None
-    for p in target.glob(f"**/{app}/tests/test.sh"):
-        test_sh = p
-        break
-
-    if not test_sh:
-        print(f"No shared tests/test.sh found for {app} either; marking as skipped")
-        return
-
-    app_dir = test_sh.parent.parent
-    meta_path = app_dir / "meta.yml"
-    meta = {}
-    if meta_path.is_file():
-        import yaml
-        meta = yaml.safe_load(meta_path.read_text()) or {}
-    tag = next(iter(meta.keys()), "")
-    expected_version, _ = _parse_tag(tag)
-
-    container_name = f"{app}-test"
-    subprocess.run(["docker", "rm", "-f", container_name], capture_output=True)
-    run = subprocess.run(
-        [
-            "docker",
-            "run",
-            "-d",
-            "--name",
-            container_name,
-            "-v",
-            f"{test_sh.parent.resolve()}:/opt/oe-tests:ro",
-            f"openeuler/{app}:test",
-        ],
-        capture_output=True, text=True,
-    )
-    if run.returncode != 0:
-        print(f"docker run failed: {run.stderr}", file=sys.stderr)
-        sys.exit(1)
-
-    result = subprocess.run(
-        [
-            "docker",
-            "exec",
-            "-e",
-            f"EXPECTED_VERSION={expected_version}",
-            "-e",
-            f"BINARY={app}",
-            container_name,
-            "bash",
-            "/opt/oe-tests/test.sh",
-        ],
-        capture_output=True,
-        text=True,
-    )
-    print(result.stdout)
-    if result.stderr:
-        print(result.stderr, file=sys.stderr)
-    subprocess.run(["docker", "rm", "-f", container_name], capture_output=True)
-
-    if results_dir:
-        results_dir.mkdir(parents=True, exist_ok=True)
-        junit_file = results_dir / f"{arch}.junit.xml"
-        failures = 0 if result.returncode == 0 else 1
-        junit_file.write_text(f"""<?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="{app}" tests="1" failures="{failures}" errors="0">
-  <testcase name="{app}_test_sh">
-    {f'<failure message="test.sh failed (exit {result.returncode})">{result.stdout}</failure>' if failures else ''}
-    <system-out>{result.stdout}</system-out>
-  </testcase>
-</testsuite>""")
-
-    if result.returncode != 0:
-        sys.exit(1)
+    raise SystemExit(2)
 
 
 def _build_fixer_prompt(

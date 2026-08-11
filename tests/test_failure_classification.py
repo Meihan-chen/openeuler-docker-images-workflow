@@ -1,9 +1,4 @@
-"""Deterministic routing of a failure to the action that can resolve it.
-
-The Fixer used to receive free-text evidence that pointed at the wrong repair:
-Run 30480464176 read a Goss config parse error as a UID permission problem, and
-Run 30567356119 expressed one unpacked tarball as 496 out-of-scope file errors.
-"""
+"""Deterministic routing of a failure to the action that can resolve it."""
 
 import pytest
 
@@ -52,30 +47,13 @@ def test_a_real_candidate_scope_violation_is_not_workspace_hygiene():
     assert result["category"] == "candidate-scope"
 
 
-def test_goss_parse_failure_is_config_parse_not_a_runtime_problem():
-    """Reproduces Run 30480464176 and the `dir: true` failure in 30599107031."""
-    from scripts.lib.failure_classification import classify_failure
-
-    report = {
-        "status": "failed",
-        "failed_stage": "dgoss",
-        "failure": "invalid Attribute for File:/var/lib/kvrocks: dir",
-        "failure_details": {"returncode": 1},
-    }
-
-    result = classify_failure(report=report)
-
-    assert result["category"] == "config-parse"
-    assert "goss" in result["guidance"].lower()
-
-
 @pytest.mark.parametrize(
     ("stage", "category"),
     (
         ("native_build", "build-error"),
-        ("dgoss", "runtime-error"),
-        ("shared_tests", "runtime-error"),
-        ("restart_persistence", "runtime-error"),
+        ("runtime_test", "runtime-error"),
+        ("test_sh", "runtime-error"),
+        ("post_inspect", "runtime-error"),
     ),
 )
 def test_failed_stage_separates_build_from_runtime(stage, category):
@@ -168,7 +146,7 @@ def test_upstream_format_failure_routes_by_evidence_kind(kind, category, owner):
         assert result["owner"] == owner
 
 
-@pytest.mark.parametrize("stage", ("dgoss", "shared_tests"))
+@pytest.mark.parametrize("stage", ("runtime_test", "test_sh"))
 def test_a_candidate_runtime_timeout_is_not_misclassified_as_infra(stage):
     from scripts.lib.failure_classification import classify_failure
 
@@ -210,6 +188,32 @@ def test_missing_evidence_is_reported_rather_than_guessed():
     from scripts.lib.failure_classification import classify_failure
 
     assert classify_failure()["category"] == "unclassified"
+
+
+@pytest.mark.parametrize(
+    "stage",
+    (
+        "runtime_test",
+        "default_start",
+        "wait_healthcheck",
+        "wait_tcp",
+        "test_sh",
+        "post_inspect",
+    ),
+)
+def test_runtime_test_substages_route_to_runtime_repair(stage):
+    from scripts.lib.failure_classification import classify_failure
+
+    result = classify_failure(
+        report={
+            "status": "failed",
+            "failed_stage": stage,
+            "failure": "runtime validation failed",
+            "failure_details": {"returncode": 1},
+        }
+    )
+
+    assert result["category"] == "runtime-error"
 
 
 def test_a_modified_tracked_file_is_scope_not_research_junk():
@@ -268,7 +272,7 @@ def test_stray_added_files_at_the_repo_root_are_hygiene():
 
 
 def test_yaml_parse_text_during_a_build_is_a_build_error():
-    """Upstream YAML processed inside a RUN step is not a Goss config fault."""
+    """Upstream YAML processed inside a RUN step remains a build failure."""
     from scripts.lib.failure_classification import classify_failure
 
     report = {

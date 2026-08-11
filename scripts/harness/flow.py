@@ -422,8 +422,6 @@ def cmd_phase1_native_repair(args: argparse.Namespace) -> None:
         base_sha=args.base_sha,
         architecture=args.architecture,
         run_id=args.run_id,
-        dgoss=args.dgoss,
-        goss=args.goss,
         report_path=args.report,
         junit_path=args.junit,
         repair_report_dir=args.repair_report_dir,
@@ -445,8 +443,6 @@ def cmd_phase1_native_validate(args: argparse.Namespace) -> None:
         task=_load_task(args.task_spec),
         architecture=args.architecture,
         run_id=args.run_id,
-        dgoss=args.dgoss,
-        goss=args.goss,
         report_path=args.report,
         junit_path=args.junit,
         format_validator=run_upstream_format_check,
@@ -473,8 +469,6 @@ def cmd_phase1_native_smoke(args: argparse.Namespace) -> None:
         task=_load_task(args.task_spec),
         architecture=args.architecture,
         run_id=args.run_id,
-        dgoss=args.dgoss,
-        goss=args.goss,
         report_path=args.report,
         junit_path=args.junit,
         repair_report_dir=args.repair_report_dir,
@@ -724,8 +718,6 @@ def _add_native_arguments(parser: argparse.ArgumentParser) -> None:
         choices=("x86_64", "aarch64"),
     )
     parser.add_argument("--run-id", required=True)
-    parser.add_argument("--dgoss", required=True, type=Path)
-    parser.add_argument("--goss", required=True, type=Path)
     parser.add_argument("--report", required=True, type=Path)
     parser.add_argument("--junit", required=True, type=Path)
 
@@ -771,7 +763,7 @@ def _add_native_commands(commands: argparse._SubParsersAction) -> None:
 
     smoke = commands.add_parser(
         "phase1-native-smoke",
-        help="Exercise native Docker and dgoss plumbing without AI",
+        help="Exercise native Docker validation plumbing without AI",
     )
     _add_native_arguments(smoke)
     smoke.add_argument("--repair-report-dir", required=True, type=Path)

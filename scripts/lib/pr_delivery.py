@@ -695,8 +695,9 @@ def compose_pull_request(bundle: CandidateBundle) -> PullRequestContent:
             "contract passed.",
             f"- Target base SHA: `{bundle.manifest.base_sha}`.",
             f"- Task ID: `{bundle.manifest.task_id}`.",
-            "- Result evidence: `results.json`, `version_info.json`, "
-            "`x86_64.junit.xml`, `aarch64.junit.xml`.",
+            "- Target evidence: `version_info.json`, `x86_64.junit.xml`, "
+            "`aarch64.junit.xml`.",
+            "- Production candidate evidence: `reports/results.json`.",
             "- Candidate integrity: verified before delivery.",
             "",
             "## Checklist",

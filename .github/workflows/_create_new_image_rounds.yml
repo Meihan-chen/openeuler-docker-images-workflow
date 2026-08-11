@@ -91,8 +91,6 @@ jobs:
             --task-spec "${RUNNER_TEMP}/phase1-input/task-spec.json" \
             --architecture x86_64 \
             --run-id "${{ github.run_id }}" \
-            --dgoss "${{ steps.tools.outputs.dgoss_path }}" \
-            --goss "${{ steps.tools.outputs.goss_path }}" \
             --report "${RUNNER_TEMP}/phase1-round/x86_64.json" \
             --junit "${RUNNER_TEMP}/phase1-round/x86_64.junit.xml"
 
@@ -109,8 +107,6 @@ jobs:
             --task-spec "${RUNNER_TEMP}/phase1-input/task-spec.json" \
             --architecture x86_64 \
             --run-id "${{ github.run_id }}" \
-            --dgoss "${{ steps.tools.outputs.dgoss_path }}" \
-            --goss "${{ steps.tools.outputs.goss_path }}" \
             --report "${RUNNER_TEMP}/phase1-round/x86_64.json" \
             --junit "${RUNNER_TEMP}/phase1-round/x86_64.junit.xml" \
             --repair-report-dir "${RUNNER_TEMP}/phase1-round/smoke-agents"
@@ -167,8 +163,6 @@ jobs:
             --task-spec "${RUNNER_TEMP}/phase1-input/task-spec.json" \
             --architecture aarch64 \
             --run-id "${{ github.run_id }}" \
-            --dgoss "${{ steps.tools.outputs.dgoss_path }}" \
-            --goss "${{ steps.tools.outputs.goss_path }}" \
             --report "${RUNNER_TEMP}/phase1-round/aarch64.json" \
             --junit "${RUNNER_TEMP}/phase1-round/aarch64.junit.xml"
 
@@ -185,8 +179,6 @@ jobs:
             --task-spec "${RUNNER_TEMP}/phase1-input/task-spec.json" \
             --architecture aarch64 \
             --run-id "${{ github.run_id }}" \
-            --dgoss "${{ steps.tools.outputs.dgoss_path }}" \
-            --goss "${{ steps.tools.outputs.goss_path }}" \
             --report "${RUNNER_TEMP}/phase1-round/aarch64.json" \
             --junit "${RUNNER_TEMP}/phase1-round/aarch64.junit.xml" \
             --repair-report-dir "${RUNNER_TEMP}/phase1-round/smoke-agents"

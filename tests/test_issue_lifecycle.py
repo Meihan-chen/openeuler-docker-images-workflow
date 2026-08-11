@@ -566,7 +566,7 @@ def test_needs_human_comment_summarizes_stages_fixer_and_blocker(tmp_path):
                 "issues": [
                     {
                         "severity": "major",
-                        "file": "Database/example/tests/goss.yaml",
+                        "file": "Database/example/tests/test.sh",
                         "description": "Expected UID differs from Dockerfile.",
                     }
                 ],
@@ -620,8 +620,7 @@ def test_needs_human_comment_summarizes_stages_fixer_and_blocker(tmp_path):
                         "status": "passed",
                         "checks": {
                             "native_build": True,
-                            "dgoss": True,
-                            "shared_tests": True,
+                            "runtime_test": True,
                         },
                     },
                     "aarch64": {

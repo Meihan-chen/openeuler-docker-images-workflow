@@ -67,8 +67,7 @@ def _candidate(tmp_path, upstream):
         "status": "passed",
         "checks": {
             "native_build": True,
-            "dgoss": True,
-            "shared_tests": True,
+            "runtime_test": True,
         },
     }
     for report in ("x86_64", "aarch64"):
@@ -85,6 +84,21 @@ def _candidate(tmp_path, upstream):
         json.dumps({"status": "passed", "delivery_allowed": True}) + "\n"
     )
     (candidate / "reports" / "hadolint.txt").write_text("")
+    (candidate / "reports" / "results.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "status": "passed",
+                "task_id": _task().task_id,
+                "validated_run_id": "123456",
+                "artifact_url": "https://example.test/actions/runs/123456",
+                "architectures": {
+                    architecture: {"checks": native["checks"]}
+                    for architecture in ("x86_64", "aarch64")
+                },
+            }
+        )
+    )
     CandidateBundle.create(
         candidate,
         task=_task(),

@@ -30,14 +30,14 @@ patterns:
     verification:
       status: verified
       sources: ["regression:tests/test_failure_knowledge.py"]
-  - id: goss_schema_mismatch
-    title: Goss rejects an unknown resource attribute
-    stages: [dgoss]
-    symptom_keywords: ["invalid Attribute for", "dgoss"]
-    diagnosis: The gossfile does not match the pinned Goss schema.
+  - id: protocol_command_semantics_mismatch
+    title: A protocol command has application-specific semantics
+    stages: [runtime_test]
+    symptom_keywords: ["runtime_test", "metadata assertion failed"]
+    diagnosis: The test assumes unsupported command semantics.
     remediation:
-      - Use an attribute supported by the pinned Goss resource schema.
-    prevention: Validate the complete gossfile during native dgoss execution.
+      - Use a command assertion supported by fixed upstream evidence.
+    prevention: Review application command semantics before native execution.
     verification:
       status: verified
       sources: ["regression:tests/test_native_validation.py"]
@@ -52,7 +52,7 @@ def test_parses_verified_structured_patterns():
     assert [pattern.id for pattern in patterns] == [
         "artifact_source_unavailable",
         "environment_variable_self_reference",
-        "goss_schema_mismatch",
+        "protocol_command_semantics_mismatch",
     ]
     assert patterns[0].keywords == ("404 Not Found", "download")
     assert patterns[2].verification_sources == (
@@ -88,13 +88,15 @@ def test_ranks_the_pattern_whose_symptoms_match():
 
     patterns = parse_patterns(_DOCUMENT)
     evidence = {
-        "failed_stage": "dgoss",
-        "failure": "Error: invalid Attribute for File:/data: dir",
+        "failed_stage": "runtime_test",
+        "failure": "functional roundtrip passed but metadata assertion failed",
     }
 
     selected = select_patterns(patterns, evidence)
 
-    assert [pattern.id for pattern in selected] == ["goss_schema_mismatch"]
+    assert [pattern.id for pattern in selected] == [
+        "protocol_command_semantics_mismatch"
+    ]
 
 
 def test_renders_index_and_only_matched_sections():
@@ -102,11 +104,11 @@ def test_renders_index_and_only_matched_sections():
 
     rendered = render_knowledge(
         _DOCUMENT,
-        {"failure": "invalid Attribute for File:/data: dir"},
+        {"failure": "runtime_test metadata assertion failed"},
     )
 
-    assert "goss_schema_mismatch" in rendered
-    assert "The gossfile does not match the pinned Goss schema" in rendered
+    assert "protocol_command_semantics_mismatch" in rendered
+    assert "unsupported command semantics" in rendered
     assert "The pinned source does not serve" not in rendered
     assert "regression:tests/test_native_validation.py" in rendered
 
@@ -129,7 +131,6 @@ def test_shipped_knowledge_is_small_verified_and_application_neutral():
     assert {pattern.id for pattern in patterns} == {
         "runtime_identity_collision",
         "build_feature_dependency_mismatch",
-        "goss_schema_mismatch",
         "protocol_command_semantics_mismatch",
     }
     assert all(pattern.verification_sources for pattern in patterns)
@@ -153,12 +154,8 @@ def test_shipped_knowledge_is_small_verified_and_application_neutral():
         "build_feature_dependency_mismatch": {
             "failure": "cannot find static library; disable ENABLE_STATIC=OFF"
         },
-        "goss_schema_mismatch": {
-            "failed_stage": "dgoss",
-            "failure": "invalid Attribute for File:/data: dir",
-        },
         "protocol_command_semantics_mismatch": {
-            "failed_stage": "shared_tests",
+            "failed_stage": "runtime_test",
             "failure": "functional roundtrip passed but metadata assertion failed",
         },
     }
@@ -166,3 +163,89 @@ def test_shipped_knowledge_is_small_verified_and_application_neutral():
         pattern_id: select_patterns(patterns, evidence)[0].id
         for pattern_id, evidence in evidence_by_pattern.items()
     } == {pattern_id: pattern_id for pattern_id in evidence_by_pattern}
+
+
+@pytest.mark.parametrize(
+    ("failed_stage", "check", "failure", "native_build", "runtime_test"),
+    (
+        ("native_build", "native_build", "compiler exited 2", False, None),
+        ("wait_tcp", "runtime_test", "PROBE_TIMEOUT", True, False),
+        (
+            "test_sh",
+            "runtime_test",
+            "syntax error near unexpected token",
+            True,
+            False,
+        ),
+        (
+            "test_sh",
+            "runtime_test",
+            "functional roundtrip passed",
+            True,
+            False,
+        ),
+        (
+            "test_sh",
+            "runtime_test",
+            "TESTS_FAILED: 1 failure(s)",
+            True,
+            False,
+        ),
+        (
+            "post_inspect",
+            "runtime_test",
+            "container was OOMKilled",
+            True,
+            False,
+        ),
+    ),
+)
+def test_shipped_protocol_pattern_ignores_generic_native_failure_structure(
+    failed_stage,
+    check,
+    failure,
+    native_build,
+    runtime_test,
+):
+    from scripts.lib.failure_knowledge import parse_patterns, select_patterns
+
+    patterns = parse_patterns(KNOWLEDGE.read_text())
+    evidence = {
+        "kind": "native_validation_failure",
+        "architectures": {
+            "x86_64": {
+                "status": "failed",
+                "checks": {
+                    "native_build": native_build,
+                    "runtime_test": runtime_test,
+                },
+                "failed_stage": failed_stage,
+                "failure": failure,
+                "failures": [
+                    {
+                        "stage": failed_stage,
+                        "check": check,
+                        "failure": failure,
+                        "failure_details": {},
+                    }
+                ],
+            }
+        },
+    }
+
+    selected_ids = {pattern.id for pattern in select_patterns(patterns, evidence)}
+
+    assert "protocol_command_semantics_mismatch" not in selected_ids
+
+
+def test_shipped_knowledge_uses_the_native_runtime_stage_only():
+    from scripts.lib.failure_knowledge import parse_patterns
+
+    document = KNOWLEDGE.read_text()
+    patterns = parse_patterns(document)
+
+    assert any(
+        "runtime_test" in pattern.stages
+        for pattern in patterns
+        if pattern.id == "protocol_command_semantics_mismatch"
+    )

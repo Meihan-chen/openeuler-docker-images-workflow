@@ -38,7 +38,7 @@ class TestNewImageFlow:
         assert is_allowed_modification("AI/image-list.yml") is True
         # Dockerfile and test files cannot be modified
         assert is_allowed_modification("AI/test-app/1.0/24.03-lts/Dockerfile") is False
-        assert is_allowed_modification("AI/test-app/tests/goss.yaml") is False
+        assert is_allowed_modification("AI/test-app/tests/test.sh") is False
 
     def test_meta_validation_flow(self):
         from validate_meta import validate_meta_file

@@ -38,8 +38,6 @@ def _args(tmp_path):
         base_sha="1" * 40,
         architecture="aarch64",
         run_id="123456",
-        dgoss=tmp_path / "dgoss",
-        goss=tmp_path / "goss",
         report=tmp_path / "reports" / "aarch64.json",
         junit=tmp_path / "reports" / "aarch64.junit.xml",
         repair_report_dir=tmp_path / "reports" / "agents",

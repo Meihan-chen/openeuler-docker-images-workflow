@@ -60,14 +60,12 @@ def test_repository_toolchain_lock_pins_required_tools_and_architectures():
 
     lock = ToolchainLock.load(LOCK_FILE)
 
-    assert set(lock.tools) == {"dgoss", "goss", "hadolint", "jq", "opencode"}
+    assert set(lock.tools) == {"hadolint", "jq", "opencode"}
     assert lock.tools["opencode"].version == "1.18.8"
-    assert lock.tools["goss"].version == "0.4.10"
     assert lock.tools["hadolint"].version == "2.14.0"
     assert lock.tools["jq"].version == "1.8.2"
-    for name in ("goss", "hadolint", "jq", "opencode"):
+    for name in ("hadolint", "jq", "opencode"):
         assert set(lock.tools[name].assets) == {"aarch64", "x86_64"}
-    assert set(lock.tools["dgoss"].assets) == {"common"}
 
 
 @pytest.mark.parametrize(

@@ -28,6 +28,7 @@ _REQUIRED_PAYLOAD = (
     "reports/aarch64.junit.xml",
     "reports/gates.json",
     "reports/hadolint.txt",
+    "reports/results.json",
     "reports/x86_64.json",
     "reports/x86_64.junit.xml",
     "task-spec.json",
@@ -113,6 +114,38 @@ def _validate_reports(root: Path) -> None:
             raise CandidateBundleError(f"{name} JUnit evidence did not pass")
 
 
+def _validate_results(root: Path, *, task_id: str, run_id: str) -> None:
+    path = root / "reports" / "results.json"
+    try:
+        results = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError) as exc:
+        raise CandidateBundleError("results.json is invalid") from exc
+    if not isinstance(results, dict) or results.get("schema_version") != 1:
+        raise CandidateBundleError("results.json schema version is unsupported")
+    if results.get("status") != "passed":
+        raise CandidateBundleError("results.json does not record a passed result")
+    if results.get("task_id") != task_id:
+        raise CandidateBundleError("results.json belongs to another task")
+    if results.get("validated_run_id") != run_id:
+        raise CandidateBundleError("results.json run ID does not match candidate")
+    if not str(results.get("artifact_url", "")).startswith("https://"):
+        raise CandidateBundleError("results.json artifact URL must use HTTPS")
+    architectures = results.get("architectures")
+    if not isinstance(architectures, dict) or set(architectures) != {
+        "x86_64",
+        "aarch64",
+    }:
+        raise CandidateBundleError(
+            "results.json must contain x86_64 and aarch64 evidence"
+        )
+    for architecture, evidence in architectures.items():
+        checks = evidence.get("checks") if isinstance(evidence, dict) else None
+        if not native_checks_pass(checks):
+            raise CandidateBundleError(
+                f"results.json {architecture} checks are incomplete"
+            )
+
+
 @dataclass(frozen=True)
 class CandidateManifest:
     schema_version: int
@@ -145,6 +178,11 @@ class CandidateBundle:
 
         (root / "task-spec.json").write_text(task.to_json() + "\n")
         _validate_reports(root)
+        _validate_results(
+            root,
+            task_id=task.task_id,
+            run_id=validated_run_id,
+        )
 
         payload = _payload_files(root)
         missing = sorted(set(_REQUIRED_PAYLOAD) - set(payload))
@@ -205,6 +243,11 @@ class CandidateBundle:
             raise CandidateBundleError("candidate TaskSpec is invalid") from exc
         if task.task_id != manifest.task_id:
             raise CandidateBundleError("candidate TaskSpec does not match manifest")
+        _validate_results(
+            root,
+            task_id=task.task_id,
+            run_id=manifest.validated_run_id,
+        )
 
         return cls(root=root, task=task, manifest=manifest)
 

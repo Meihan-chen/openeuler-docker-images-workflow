@@ -22,6 +22,7 @@ def _passing_gate():
         "status": "passed",
         "build_allowed": True,
         "test_allowed": True,
+        "runtime_test_allowed": True,
         "delivery_allowed": True,
         "findings": [],
     }
@@ -51,8 +52,7 @@ class NativeValidator:
             "architecture": kwargs["architecture"],
             "checks": {
                 "native_build": True,
-                "dgoss": True,
-                "shared_tests": True,
+                "runtime_test": True,
             },
         }
         kwargs["report_path"].write_text(json.dumps(report))
@@ -108,8 +108,6 @@ def test_zero_repair_success_writes_nonempty_agent_artifact_directory(
         base_sha="1" * 40,
         architecture="x86_64",
         run_id="123456",
-        dgoss=tmp_path / "dgoss",
-        goss=tmp_path / "goss",
         report_path=evidence / "x86_64.json",
         junit_path=evidence / "x86_64.junit.xml",
         repair_report_dir=evidence / "agents",
@@ -128,6 +126,30 @@ def test_zero_repair_success_writes_nonempty_agent_artifact_directory(
         "repair_attempts": 0,
         "status": "passed",
     }
+
+
+def test_native_repair_has_no_removed_runtime_tool_parameters():
+    import inspect
+
+    from scripts.lib.native_repair import validate_native_with_repairs
+
+    parameters = inspect.signature(validate_native_with_repairs).parameters
+    assert tuple(parameters) == (
+        "workspace",
+        "task",
+        "base_sha",
+        "architecture",
+        "run_id",
+        "report_path",
+        "junit_path",
+        "repair_report_dir",
+        "executable",
+        "api_key",
+        "max_repairs",
+        "native_validator",
+        "agent_runner",
+        "target_validator",
+    )
 
 
 def test_native_gate_requires_explicit_build_and_test_permissions(tmp_path):
@@ -184,8 +206,6 @@ def test_native_failure_is_fixed_gated_and_retried_up_to_success(tmp_path):
         base_sha="1" * 40,
         architecture="aarch64",
         run_id="123456",
-        dgoss=tmp_path / "dgoss",
-        goss=tmp_path / "goss",
         report_path=evidence / "aarch64.json",
         junit_path=evidence / "aarch64.junit.xml",
         repair_report_dir=evidence / "agents",
@@ -241,8 +261,6 @@ def test_native_fixer_can_edit_existing_auxiliary_candidate_files(tmp_path):
         base_sha="1" * 40,
         architecture="x86_64",
         run_id="123456",
-        dgoss=tmp_path / "dgoss",
-        goss=tmp_path / "goss",
         report_path=evidence / "x86_64.json",
         junit_path=evidence / "x86_64.junit.xml",
         repair_report_dir=evidence / "agents",
@@ -272,6 +290,7 @@ def test_delivery_only_gate_finding_does_not_block_native_validation(tmp_path):
         "status": "passed",
         "build_allowed": True,
         "test_allowed": True,
+        "runtime_test_allowed": True,
         "delivery_allowed": False,
         "errors": ["README metadata is incomplete"],
         "findings": [
@@ -290,8 +309,6 @@ def test_delivery_only_gate_finding_does_not_block_native_validation(tmp_path):
         base_sha="1" * 40,
         architecture="x86_64",
         run_id="123456",
-        dgoss=tmp_path / "dgoss",
-        goss=tmp_path / "goss",
         report_path=evidence / "x86_64.json",
         junit_path=evidence / "x86_64.junit.xml",
         repair_report_dir=evidence / "agents",
@@ -322,8 +339,6 @@ def test_native_repair_returns_needs_human_after_exactly_three_fixes(tmp_path):
         base_sha="1" * 40,
         architecture="x86_64",
         run_id="123456",
-        dgoss=tmp_path / "dgoss",
-        goss=tmp_path / "goss",
         report_path=tmp_path / "x86_64.json",
         junit_path=tmp_path / "x86_64.junit.xml",
         repair_report_dir=tmp_path / "agents",
@@ -357,14 +372,16 @@ def test_post_fixer_target_gate_is_returned_before_native_retry(
                 "status": "passed",
                 "build_allowed": True,
                 "test_allowed": False,
+                "runtime_test_allowed": False,
                 "delivery_allowed": False,
-                "errors": ["goss_wait timeout is invalid"],
+                "errors": ["generated readiness control is forbidden"],
                 "findings": [
                     {
-                        "code": "tests.wait_timeout",
+                        "code": "tests.forbidden_control_asset",
                         "level": "delivery_stop",
                         "owner": "testcase_creator",
-                        "message": "goss_wait timeout is invalid",
+                        "check": "runtime_test",
+                        "message": "generated readiness control is forbidden",
                     }
                 ],
             },
@@ -378,8 +395,6 @@ def test_post_fixer_target_gate_is_returned_before_native_retry(
         base_sha="1" * 40,
         architecture="x86_64",
         run_id="123456",
-        dgoss=tmp_path / "dgoss",
-        goss=tmp_path / "goss",
         report_path=tmp_path / "x86_64.json",
         junit_path=tmp_path / "x86_64.junit.xml",
         repair_report_dir=tmp_path / "agents",
@@ -395,7 +410,7 @@ def test_post_fixer_target_gate_is_returned_before_native_retry(
     assert len(validator.calls) == 2
     assert len(fixer.calls) == 2
     assert "compile failed attempt 1" in fixer.calls[1]["prompt"]
-    assert "goss_wait timeout is invalid" in fixer.calls[1]["prompt"]
+    assert "generated readiness control is forbidden" in fixer.calls[1]["prompt"]
     second_report = json.loads(
         (
             tmp_path
@@ -404,7 +419,7 @@ def test_post_fixer_target_gate_is_returned_before_native_retry(
         ).read_text()
     )
     assert second_report["_input_review"]["gate"]["errors"] == [
-        "goss_wait timeout is invalid"
+        "generated readiness control is forbidden"
     ]
     assert (
         second_report["_input_review"]["native_failure"]["failure"]
@@ -426,8 +441,6 @@ def test_target_gate_failure_remains_bounded_by_total_fixer_budget(tmp_path):
         base_sha="1" * 40,
         architecture="x86_64",
         run_id="123456",
-        dgoss=tmp_path / "dgoss",
-        goss=tmp_path / "goss",
         report_path=tmp_path / "x86_64.json",
         junit_path=tmp_path / "x86_64.junit.xml",
         repair_report_dir=tmp_path / "agents",
@@ -439,6 +452,7 @@ def test_target_gate_failure_remains_bounded_by_total_fixer_budget(tmp_path):
             "status": "passed",
             "build_allowed": True,
             "test_allowed": False,
+            "runtime_test_allowed": False,
             "delivery_allowed": False,
             "errors": ["still invalid"],
             "findings": [
@@ -478,8 +492,6 @@ def test_initial_gate_infrastructure_error_does_not_call_fixer(tmp_path):
             base_sha="1" * 40,
             architecture="x86_64",
             run_id="123456",
-            dgoss=tmp_path / "dgoss",
-            goss=tmp_path / "goss",
             report_path=tmp_path / "x86_64.json",
             junit_path=tmp_path / "x86_64.junit.xml",
             repair_report_dir=tmp_path / "agents",
@@ -511,8 +523,6 @@ def test_unsuccessful_fixer_report_is_retained_before_failure(tmp_path):
             base_sha="1" * 40,
             architecture="x86_64",
             run_id="123456",
-            dgoss=tmp_path / "dgoss",
-            goss=tmp_path / "goss",
             report_path=tmp_path / "x86_64.json",
             junit_path=tmp_path / "x86_64.junit.xml",
             repair_report_dir=repair_dir,
@@ -538,8 +548,7 @@ def _report(architecture, *, status="passed", digest=DIGEST):
         "architecture": architecture,
         "checks": {
             "native_build": status == "passed",
-            "dgoss": status == "passed",
-            "shared_tests": status == "passed",
+            "runtime_test": status == "passed",
         },
     }
     if status == "passed":
@@ -804,17 +813,17 @@ def test_fixer_receives_a_classification_for_every_native_check_failure(
     x86 = _report("x86_64", status="failed")
     x86.update(
         {
-            "failed_stage": "dgoss",
-            "failure": "invalid Attribute for File:/tmp: dir",
+            "failed_stage": "wait_healthcheck",
+            "failure": "configured health check timed out",
             "failure_details": {"returncode": 1},
             "failures": [
                 {
-                    "stage": "dgoss",
-                    "failure": "invalid Attribute for File:/tmp: dir",
+                    "stage": "wait_healthcheck",
+                    "failure": "configured health check timed out",
                     "failure_details": {"returncode": 1},
                 },
                 {
-                    "stage": "shared_tests",
+                    "stage": "test_sh",
                     "failure": "version assertion failed",
                     "failure_details": {"returncode": 1},
                 },
@@ -833,11 +842,11 @@ def test_fixer_receives_a_classification_for_every_native_check_failure(
     )
     classification = report["_input_review"]["classification"]["x86_64"]
     assert [failure["stage"] for failure in classification["failures"]] == [
-        "dgoss",
-        "shared_tests",
+        "wait_healthcheck",
+        "test_sh",
     ]
     assert [failure["category"] for failure in classification["failures"]] == [
-        "config-parse",
+        "runtime-error",
         "runtime-error",
     ]
 
@@ -957,44 +966,7 @@ def test_unsuccessful_fixer_cannot_hide_a_hard_boundary_change(tmp_path):
     assert fixer_report["success"] is False
 
 
-def test_a_repair_with_one_executable_check_advances_to_rebuild(
-    tmp_path,
-):
-    fixer = Fixer()
-    partial_gate = {
-        "status": "passed",
-        "build_allowed": True,
-        "goss_allowed": False,
-        "shared_tests_allowed": True,
-        "test_allowed": False,
-        "delivery_allowed": False,
-        "errors": ["goss.yaml must be valid YAML"],
-        "findings": [
-            {
-                "code": "tests.goss_yaml",
-                "level": "delivery_stop",
-                "owner": "testcase_creator",
-                "check": "dgoss",
-                "message": "goss.yaml must be valid YAML",
-            }
-        ],
-    }
-
-    decision = _decide(
-        tmp_path,
-        {
-            "x86_64": _report("x86_64", status="failed"),
-            "aarch64": _report("aarch64"),
-        },
-        agent_runner=fixer,
-        target_validator=lambda **_: partial_gate,
-    )
-
-    assert decision.repair_attempts == 1
-    assert len(fixer.calls) == 1
-
-
-def test_a_repair_with_no_executable_checks_is_re_asked_before_rebuild(
+def test_an_invalid_runtime_test_is_re_asked_before_rebuild(
     tmp_path,
 ):
     fixer = Fixer()
@@ -1003,27 +975,16 @@ def test_a_repair_with_no_executable_checks_is_re_asked_before_rebuild(
             {
                 "status": "passed",
                 "build_allowed": True,
-                "goss_allowed": False,
-                "shared_tests_allowed": False,
                 "test_allowed": False,
+                "runtime_test_allowed": False,
                 "delivery_allowed": False,
-                "errors": [
-                    "goss.yaml must be valid YAML",
-                    "test.sh must be valid Bash",
-                ],
+                "errors": ["test.sh must be valid Bash"],
                 "findings": [
-                    {
-                        "code": "tests.goss_yaml",
-                        "level": "delivery_stop",
-                        "owner": "testcase_creator",
-                        "check": "dgoss",
-                        "message": "goss.yaml must be valid YAML",
-                    },
                     {
                         "code": "tests.shell_syntax",
                         "level": "delivery_stop",
                         "owner": "testcase_creator",
-                        "check": "shared_tests",
+                        "check": "runtime_test",
                         "message": "test.sh must be valid Bash",
                     }
                 ],
@@ -1031,9 +992,8 @@ def test_a_repair_with_no_executable_checks_is_re_asked_before_rebuild(
             {
                 "status": "passed",
                 "build_allowed": True,
-                "goss_allowed": True,
-                "shared_tests_allowed": True,
                 "test_allowed": True,
+                "runtime_test_allowed": True,
                 "delivery_allowed": True,
                 "findings": [],
             },
@@ -1051,7 +1011,7 @@ def test_a_repair_with_no_executable_checks_is_re_asked_before_rebuild(
     )
 
     assert decision.repair_attempts == 2
-    assert "tests.goss_yaml" in fixer.calls[1]["prompt"]
+    assert "tests.shell_syntax" in fixer.calls[1]["prompt"]
 
 
 def test_format_and_native_failures_are_both_classified_for_the_fixer(tmp_path):
@@ -1059,14 +1019,14 @@ def test_format_and_native_failures_are_both_classified_for_the_fixer(tmp_path):
     x86 = _report("x86_64", status="failed")
     x86.update(
         {
-            "failed_stage": "dgoss",
-            "failure": "invalid Attribute for File:/tmp: dir",
+            "failed_stage": "test_sh",
+            "failure": "version assertion failed",
             "failure_details": {"returncode": 1},
             "failures": [
                 {
-                    "stage": "dgoss",
-                    "check": "dgoss",
-                    "failure": "invalid Attribute for File:/tmp: dir",
+                    "stage": "test_sh",
+                    "check": "runtime_test",
+                    "failure": "version assertion failed",
                     "failure_details": {"returncode": 1},
                 }
             ],
@@ -1090,11 +1050,11 @@ def test_format_and_native_failures_are_both_classified_for_the_fixer(tmp_path):
     )
     failures = report["_input_review"]["classification"]["x86_64"]["failures"]
     assert [failure["stage"] for failure in failures] == [
-        "dgoss",
+        "test_sh",
         "upstream_format",
     ]
     assert [failure["category"] for failure in failures] == [
-        "config-parse",
+        "runtime-error",
         "image-contract",
     ]
 
@@ -1188,6 +1148,7 @@ def test_round_gate_repair_exhaustion_returns_needs_human(tmp_path):
         "status": "passed",
         "build_allowed": True,
         "test_allowed": False,
+        "runtime_test_allowed": False,
         "delivery_allowed": False,
         "findings": [
             {
@@ -1257,8 +1218,6 @@ def test_workspace_hygiene_hard_stops_before_calling_fixer(tmp_path):
             base_sha="1" * 40,
             architecture="x86_64",
             run_id="123456",
-            dgoss=tmp_path / "dgoss",
-            goss=tmp_path / "goss",
             report_path=evidence / "x86_64.json",
             junit_path=evidence / "x86_64.junit.xml",
             repair_report_dir=evidence / "agents",
@@ -1276,9 +1235,8 @@ def test_workspace_hygiene_hard_stops_before_calling_fixer(tmp_path):
 def test_each_architecture_is_classified_before_the_fixer_is_asked(tmp_path):
     """One Fixer sees both architectures, so one category cannot speak for both.
 
-    A Goss config fault on x86 and a build failure on ARM would otherwise be
-    handed over as "fix the test configuration and do not change the
-    Dockerfile", which is wrong for ARM.
+    A runtime assertion failure on x86 and a build failure on ARM require
+    separate diagnoses even though one Fixer receives both reports.
     """
     from scripts.lib.native_repair import decide_round
 
@@ -1288,8 +1246,8 @@ def test_each_architecture_is_classified_before_the_fixer_is_asked(tmp_path):
     reports = {
         "x86_64": {
             "status": "failed",
-            "failed_stage": "dgoss",
-            "failure": "invalid Attribute for File:/var/lib/kvrocks: dir",
+            "failed_stage": "test_sh",
+            "failure": "version assertion failed",
             "failure_details": {"returncode": 1},
         },
         "aarch64": {
@@ -1315,13 +1273,13 @@ def test_each_architecture_is_classified_before_the_fixer_is_asked(tmp_path):
     )
 
     prompt = fixer.calls[0]["prompt"]
-    assert "config-parse" in prompt
+    assert "runtime-error" in prompt
     assert "build-error" in prompt
     report = json.loads(
         (tmp_path / "evidence" / "fixer-native-dual-round1-attempt1.json").read_text()
     )
     per_arch = report["_input_review"]["classification"]
-    assert per_arch["x86_64"]["category"] == "config-parse"
+    assert per_arch["x86_64"]["category"] == "runtime-error"
     assert per_arch["aarch64"]["category"] == "build-error"
 
 

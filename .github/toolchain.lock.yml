@@ -2,36 +2,6 @@
   "schema_version": 1,
   "cache_root": "/opt/oe-image-tools",
   "tools": {
-    "dgoss": {
-      "version": "0.4.10",
-      "binary": "dgoss",
-      "assets": {
-        "common": {
-          "url": "https://github.com/goss-org/goss/releases/download/v0.4.10/dgoss",
-          "format": "raw",
-          "sha256": "3bb3ac9df33eeab8ce71a35763f4a69582eceb7db7bf02b4d0a551e72c7a888d",
-          "binary_sha256": "3bb3ac9df33eeab8ce71a35763f4a69582eceb7db7bf02b4d0a551e72c7a888d"
-        }
-      }
-    },
-    "goss": {
-      "version": "0.4.10",
-      "binary": "goss",
-      "assets": {
-        "x86_64": {
-          "url": "https://github.com/goss-org/goss/releases/download/v0.4.10/goss_0.4.10_linux_x86_64.tar.gz",
-          "format": "tar.gz",
-          "sha256": "26e365428946294bcec0c61d867bb3c8349f39feb3d0e6f59084e98632785cc7",
-          "binary_sha256": "29d64f541c2b6edee5c7ee75dd5dd4da1c8b94e336c56ffeb864ae460a527c4f"
-        },
-        "aarch64": {
-          "url": "https://github.com/goss-org/goss/releases/download/v0.4.10/goss_0.4.10_linux_arm64.tar.gz",
-          "format": "tar.gz",
-          "sha256": "90a59612b4d67d9f1a9038634c000790136bb82526a69de1e81ac075c2f6d2c6",
-          "binary_sha256": "e841af0f55fa0b146bcceb35d2d3bf5db623e17e45034113374c047623ffdde4"
-        }
-      }
-    },
     "hadolint": {
       "version": "2.14.0",
       "binary": "hadolint",

@@ -119,15 +119,10 @@ def _validate_task_contract(args: argparse.Namespace) -> dict[str, object]:
             task=task,
             base_sha=args.base_sha,
         )
-    if not args.expected_run_id:
-        raise TargetContractError(
-            "--expected-run-id is required for final validation"
-        )
     return validate_final_target(
         repo=args.workspace,
         task=task,
         base_sha=args.base_sha,
-        expected_run_id=args.expected_run_id,
     )
 
 
@@ -151,7 +146,6 @@ def main(argv: list[str] | None = None) -> int:
     validate.add_argument("--workspace", required=True, type=Path)
     validate.add_argument("--task-spec", required=True, type=Path)
     validate.add_argument("--base-sha", required=True)
-    validate.add_argument("--expected-run-id", default="")
     args = parser.parse_args(actual)
     try:
         report = _validate_task_contract(args)

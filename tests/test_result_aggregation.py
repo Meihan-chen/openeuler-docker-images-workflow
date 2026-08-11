@@ -1,5 +1,8 @@
 import json
+import subprocess
+import sys
 import xml.etree.ElementTree as ET
+from pathlib import Path
 
 import pytest
 
@@ -41,6 +44,7 @@ def _environment(architecture):
 
 
 CANDIDATE_DIGEST = "a" * 64
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def _write_report(
@@ -61,8 +65,7 @@ def _write_report(
         "environment": _environment(architecture),
         "checks": {
             "native_build": status == "passed",
-            "dgoss": status == "passed",
-            "shared_tests": status == "passed",
+            "runtime_test": status == "passed",
         },
     }
     (root / f"{architecture}.json").write_text(json.dumps(payload) + "\n")
@@ -91,11 +94,12 @@ def _reports(tmp_path):
     return root
 
 
-def test_aggregates_two_native_reports_into_confirmed_app_result_path(tmp_path):
+def test_keeps_schema_v1_results_in_production_output(tmp_path):
     from scripts.utils.artifacts import aggregate_native_results
 
     workspace = _workspace(tmp_path)
     reports = _reports(tmp_path)
+    production_results = tmp_path / "candidate" / "reports" / "results.json"
 
     summary = aggregate_native_results(
         workspace=workspace,
@@ -103,6 +107,7 @@ def test_aggregates_two_native_reports_into_confirmed_app_result_path(tmp_path):
         run_id="123456",
         run_url="https://github.com/Meihan-chen/repo/actions/runs/123456",
         report_dir=reports,
+        results_output=production_results,
     )
 
     result_dir = (
@@ -117,7 +122,6 @@ def test_aggregates_two_native_reports_into_confirmed_app_result_path(tmp_path):
     assert summary["total_bytes"] <= 20 * 1024
     assert sorted(path.name for path in result_dir.iterdir()) == [
         "aarch64.junit.xml",
-        "results.json",
         "version_info.json",
         "x86_64.junit.xml",
     ]
@@ -125,11 +129,47 @@ def test_aggregates_two_native_reports_into_confirmed_app_result_path(tmp_path):
     assert len(version_info) == 11
     assert version_info["architecture"] == "x86_64,aarch64"
     assert version_info["cpu_cores"] == 16
-    results = json.loads((result_dir / "results.json").read_text())
+    results = json.loads(production_results.read_text())
     assert results["status"] == "passed"
     assert results["validated_run_id"] == "123456"
     assert set(results["architectures"]) == {"x86_64", "aarch64"}
     assert results["artifact_url"].endswith("/123456")
+    assert summary["results_file"] == str(production_results)
+
+
+def test_aggregate_cli_routes_results_to_production_output(tmp_path):
+    workspace = _workspace(tmp_path)
+    reports = _reports(tmp_path)
+    task_spec = tmp_path / "task-spec.json"
+    task_spec.write_text(_task().to_json())
+    production_results = tmp_path / "candidate" / "reports" / "results.json"
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "utils" / "artifacts.py"),
+            "aggregate-native",
+            "--workspace",
+            str(workspace),
+            "--task-spec",
+            str(task_spec),
+            "--run-id",
+            "123456",
+            "--run-url",
+            "https://example.test/actions/runs/123456",
+            "--report-dir",
+            str(reports),
+            "--results-output",
+            str(production_results),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert production_results.is_file()
 
 
 def test_rejects_failed_architecture_without_writing_result_directory(tmp_path):
@@ -149,6 +189,7 @@ def test_rejects_failed_architecture_without_writing_result_directory(tmp_path):
             run_id="123456",
             run_url="https://github.com/Meihan-chen/repo/actions/runs/123456",
             report_dir=reports,
+            results_output=tmp_path / "production-results.json",
         )
 
     assert not (workspace / "Database" / "kvrocks" / "results").exists()
@@ -179,6 +220,7 @@ def test_rejects_junit_that_does_not_prove_executed_passes(tmp_path, junit):
             run_id="123456",
             run_url="https://github.com/Meihan-chen/repo/actions/runs/123456",
             report_dir=reports,
+            results_output=tmp_path / "production-results.json",
         )
 
 
@@ -188,8 +230,7 @@ def test_rejects_junit_that_does_not_prove_executed_passes(tmp_path, junit):
         {"native_build": True},
         {
             "native_build": True,
-            "dgoss": True,
-            "shared_tests": True,
+            "runtime_test": True,
             "invented_check": True,
         },
     ),
@@ -214,6 +255,7 @@ def test_rejects_noncanonical_native_check_sets(tmp_path, checks):
             run_id="123456",
             run_url="https://github.com/Meihan-chen/repo/actions/runs/123456",
             report_dir=reports,
+            results_output=tmp_path / "production-results.json",
         )
 
 
@@ -243,6 +285,7 @@ def test_refuses_to_overwrite_existing_version_os_results(tmp_path):
             run_id="123456",
             run_url="https://github.com/Meihan-chen/repo/actions/runs/123456",
             report_dir=reports,
+            results_output=tmp_path / "production-results.json",
         )
 
     assert (existing / "owned").read_text() == "preserve\n"
@@ -268,6 +311,7 @@ def test_rejects_report_for_a_different_task(tmp_path):
             run_id="123456",
             run_url="https://github.com/Meihan-chen/repo/actions/runs/123456",
             report_dir=reports,
+            results_output=tmp_path / "production-results.json",
         )
 
 
@@ -290,6 +334,7 @@ def test_rejects_architectures_that_validated_different_candidates(tmp_path):
             run_id="123456",
             run_url="https://github.com/Meihan-chen/repo/actions/runs/123456",
             report_dir=reports,
+            results_output=tmp_path / "production-results.json",
         )
 
     assert not (
@@ -316,6 +361,5 @@ def test_rejects_a_report_that_does_not_name_the_validated_candidate(tmp_path):
             run_id="123456",
             run_url="https://github.com/Meihan-chen/repo/actions/runs/123456",
             report_dir=reports,
+            results_output=tmp_path / "production-results.json",
         )
-
-

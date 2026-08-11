@@ -49,37 +49,11 @@ patterns:
       sources:
         - https://github.com/Meihan-chen/openeuler-docker-images-workflow/actions/runs/30781977554/job/91597036026
 
-  - id: goss_schema_mismatch
-    title: Goss rejects an attribute before executing assertions
-    stages: [dgoss]
-    symptom_keywords:
-      - invalid Attribute for
-      - config-parse
-      - dgoss
-    diagnosis: >-
-      An Agent-authored gossfile uses an attribute that is not accepted by the
-      pinned Goss resource schema, so no runtime assertion executes.
-    remediation:
-      - Replace the attribute with one documented by the pinned Goss resource schema.
-      - Keep the repair scoped to the test asset when native build evidence is healthy.
-    prevention: >-
-      Keep generated assertions within the pinned Goss schema and let native
-      dgoss validate the complete configuration inside the candidate container.
-    verification:
-      status: verified
-      sources:
-        - https://github.com/Meihan-chen/openeuler-docker-images-workflow/actions/runs/30781977554/job/91597036026
-        - regression:tests/test_native_validation.py
-        - regression:tests/test_target_contract.py
-
   - id: protocol_command_semantics_mismatch
     title: A protocol-compatible command has application-specific semantics
-    stages: [shared_tests]
+    stages: [runtime_test]
     symptom_keywords:
-      - shared_tests
-      - functional roundtrip passed
       - metadata assertion failed
-      - TESTS_FAILED
     diagnosis: >-
       A test assumes the conventional meaning of a familiar command, while the
       target application implements asynchronous, cached, placeholder, or

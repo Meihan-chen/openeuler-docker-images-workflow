@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -82,7 +84,7 @@ def test_agent_execution_is_exposed_through_flow_orchestrator():
     assert "native-validate-repair" not in workflow
 
 
-def test_legacy_harness_also_uses_only_the_app_shared_test_entrypoint(
+def test_legacy_harness_generates_only_the_app_shared_test_entrypoint(
     tmp_path,
     monkeypatch,
 ):
@@ -105,10 +107,28 @@ def test_legacy_harness_also_uses_only_the_app_shared_test_entrypoint(
     assert (
         tmp_path / "Cloud" / "nginx" / "tests" / "test.sh"
     ).is_file()
-    assert "tests/ (goss.yaml, goss_wait.yaml, test_helpers.sh, test.sh)" in (
-        prompt
-    )
+    assert {
+        path.name
+        for path in (tmp_path / "Cloud" / "nginx" / "tests").iterdir()
+    } == {"test.sh", "test_helpers.sh"}
+    assert "Place test.sh and optional test_helpers.sh" in prompt
     assert "alongside the Dockerfile" not in prompt
+
+
+def test_legacy_test_command_fails_closed_until_scenarios_are_supported(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    from scripts.harness import run
+
+    monkeypatch.setenv("TARGET_REPO_DIR", str(tmp_path))
+
+    with pytest.raises(SystemExit) as caught:
+        run.main(["test", "--app", "nginx", "--platform", "linux/amd64"])
+
+    assert caught.value.code == 2
+    assert "not supported" in capsys.readouterr().err
 
 
 def test_workflow_uses_existing_validation_and_artifact_clis():

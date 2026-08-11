@@ -16,12 +16,6 @@ inputs:
     default: "false"
 
 outputs:
-  dgoss_path:
-    description: "Absolute path to the locked dgoss"
-    value: ${{ steps.tools.outputs.dgoss_path }}
-  goss_path:
-    description: "Absolute path to the locked goss"
-    value: ${{ steps.tools.outputs.goss_path }}
   hadolint_path:
     description: "Absolute path to the locked hadolint"
     value: ${{ steps.tools.outputs.hadolint_path }}

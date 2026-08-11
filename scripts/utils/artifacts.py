@@ -108,6 +108,7 @@ def main() -> None:
     aggregate.add_argument("--run-id", required=True)
     aggregate.add_argument("--run-url", required=True)
     aggregate.add_argument("--report-dir", required=True, type=Path)
+    aggregate.add_argument("--results-output", required=True, type=Path)
 
     args = parser.parse_args()
 
@@ -128,6 +129,7 @@ def main() -> None:
             run_id=args.run_id,
             run_url=args.run_url,
             report_dir=args.report_dir,
+            results_output=args.results_output,
         )
         print(json.dumps(report, ensure_ascii=False, sort_keys=True))
     else:

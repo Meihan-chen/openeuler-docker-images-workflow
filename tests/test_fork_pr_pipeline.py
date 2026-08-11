@@ -38,8 +38,7 @@ def _candidate(tmp_path):
                     "duration_seconds": 1,
                     "checks": {
                         "native_build": True,
-                        "dgoss": True,
-                        "shared_tests": True,
+                        "runtime_test": True,
                     },
                 }
             )
@@ -54,6 +53,26 @@ def _candidate(tmp_path):
         '{"status":"passed","delivery_allowed":true}\n'
     )
     (root / "reports" / "hadolint.txt").write_text("")
+    (root / "reports" / "results.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "status": "passed",
+                "task_id": _task().task_id,
+                "validated_run_id": "123456",
+                "artifact_url": "https://example.test/actions/runs/123456",
+                "architectures": {
+                    architecture: {
+                        "checks": {
+                            "native_build": True,
+                            "runtime_test": True,
+                        }
+                    }
+                    for architecture in ("x86_64", "aarch64")
+                },
+            }
+        )
+    )
     for name in ("testcase-qa",):
         (agents / f"{name}-round1.json").write_text(
             '{"status":"approved"}\n'

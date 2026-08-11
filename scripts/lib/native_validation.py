@@ -72,10 +72,23 @@ _PROBE_MAX_DEPTH = "6"
 _PROBE_MAX_AGE_MINUTES = "180"
 _E2E_CHECKS = (
     "native_build",
-    "dgoss",
-    "shared_tests",
+    "runtime_test",
 )
 _SMOKE_CHECKS = _E2E_CHECKS
+_WAIT_STATUSES = frozenset(
+    {
+        "READY_HEALTH",
+        "READY_TCP",
+        "TERMINAL",
+        "RUNNING_NO_PROBE",
+        "PROBE_TIMEOUT",
+        "RUNTIME_ERROR",
+    }
+)
+_WAIT_RETURN_CODES = {
+    "PROBE_TIMEOUT": 2,
+    "RUNTIME_ERROR": 3,
+}
 
 
 def _default_runner(
@@ -658,55 +671,293 @@ def _environment_evidence(task: TaskSpec, architecture: str) -> dict[str, object
     }
 
 
-def _run_dgoss(
+def _image_runtime_probes(
     runner: CommandRunner,
     *,
     workspace: Path,
-    image: str,
-    tests_root: Path,
-    version: str,
-    dgoss: Path,
-    goss: Path,
-    container: str,
-    service_mode: bool,
-) -> None:
-    command = [str(dgoss), "run", "--name", container]
-    if not service_mode:
-        command.extend(("--entrypoint", "/bin/sh"))
-    command.extend(("--env", f"EXPECTED_VERSION={version}", image))
-    if not service_mode:
-        command.extend(("-c", "sleep 300"))
-    environment = {
-        "GOSS_PATH": str(goss),
-        "GOSS_FILES_PATH": str(tests_root),
-        "GOSS_FILE": "goss.yaml",
-        "EXPECTED_VERSION": version,
-    }
-    if service_mode:
-        environment["GOSS_WAIT_OPTS"] = "-r 30s -s 1s"
-    _run(
+    image_id: str,
+) -> tuple[bool, tuple[int, ...]]:
+    inspected = _run(
         runner,
-        command,
+        ["docker", "image", "inspect", image_id],
         cwd=workspace,
-        env=environment,
-        timeout=300,
     )
+    try:
+        config = json.loads(str(inspected.stdout or ""))[0]["Config"]
+        healthcheck = config.get("Healthcheck")
+        test = healthcheck.get("Test", []) if isinstance(healthcheck, dict) else []
+        has_healthcheck = bool(test) and test != ["NONE"]
+        ports = tuple(
+            sorted(
+                int(port.partition("/")[0])
+                for port in (config.get("ExposedPorts") or {})
+                if port.endswith("/tcp") and port.partition("/")[0].isdigit()
+            )
+        )
+    except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise NativeValidationError(
+            "docker image inspect returned invalid runtime configuration",
+            details={"stage": "default_start", "error": str(error)},
+        ) from error
+    return has_healthcheck, ports
 
 
-def _run_shared_tests(
+def _supports_health_start_interval(
     runner: CommandRunner,
     *,
     workspace: Path,
-    image: str,
+) -> bool:
+    version = _run(
+        runner,
+        ["docker", "version", "--format", "{{.Client.APIVersion}}"],
+        cwd=workspace,
+        timeout=30,
+        check=False,
+    )
+    if version.returncode != 0:
+        return False
+    match = re.fullmatch(
+        r"([0-9]+)\.([0-9]+)",
+        str(version.stdout or "").strip(),
+    )
+    return match is not None and tuple(map(int, match.groups())) >= (1, 44)
+
+
+def _inspect_runtime_state(
+    runner: CommandRunner,
+    *,
+    workspace: Path,
+    container: str,
+) -> dict[str, object]:
+    inspected = _run(
+        runner,
+        ["docker", "inspect", "--format", "{{json .State}}", container],
+        cwd=workspace,
+        check=False,
+    )
+    if inspected.returncode != 0:
+        raise NativeValidationError(
+            _merged_output(inspected) or "docker inspect failed",
+            details={
+                "stage": "post_inspect",
+                "command": ["docker", "inspect", container],
+                "returncode": inspected.returncode,
+            },
+        )
+    try:
+        state = json.loads(str(inspected.stdout or ""))
+    except (TypeError, json.JSONDecodeError) as error:
+        raise NativeValidationError(
+            "docker inspect returned invalid container state",
+            details={"stage": "post_inspect", "error": str(error)},
+        ) from error
+    if not isinstance(state, dict):
+        raise NativeValidationError(
+            "docker inspect returned invalid container state",
+            details={"stage": "post_inspect"},
+        )
+    return state
+
+
+def _runtime_failure(
+    stage: str,
+    message: str,
+    **details: object,
+) -> dict[str, object]:
+    return {
+        "stage": stage,
+        "failure": message,
+        "failure_details": details,
+    }
+
+
+def _error_details(error: NativeValidationError) -> dict[str, object]:
+    return {
+        key: value
+        for key, value in error.details.items()
+        if key != "stage"
+    }
+
+
+def _wait_for_runtime_event(
+    runner: CommandRunner,
+    *,
+    workspace: Path,
+    waiter: Path,
+    container: str,
+    mode: str,
+    ports: Sequence[int],
+    wait_timeout: int,
+) -> tuple[str, dict[str, object] | None]:
+    command = [str(waiter), container, str(wait_timeout), mode]
+    command.extend(str(port) for port in ports)
+    try:
+        waited = _run(
+            runner,
+            command,
+            cwd=workspace,
+            timeout=wait_timeout + 10,
+            check=False,
+        )
+    except (NativeValidationError, subprocess.SubprocessError, OSError) as error:
+        status = "RUNTIME_ERROR"
+        output = str(error) or error.__class__.__name__
+        returncode = 124 if isinstance(error, subprocess.TimeoutExpired) else 1
+    else:
+        output = _merged_output(waited)
+        returncode = waited.returncode
+        status = next(
+            (
+                line.strip()
+                for line in str(waited.stdout or "").splitlines()
+                if line.strip()
+            ),
+            "RUNTIME_ERROR",
+        )
+    if status not in _WAIT_STATUSES:
+        status = "RUNTIME_ERROR"
+    if returncode != _WAIT_RETURN_CODES.get(status, 0):
+        status = "RUNTIME_ERROR"
+
+    stage = {
+        "health": "wait_healthcheck",
+        "tcp": "wait_tcp",
+    }.get(mode, "default_start")
+    if status == "PROBE_TIMEOUT":
+        return status, _runtime_failure(
+            stage,
+            f"explicit {mode} probe did not become ready within "
+            f"{wait_timeout} seconds",
+            wait_status=status,
+            output=output,
+        )
+    if status == "RUNTIME_ERROR":
+        return status, _runtime_failure(
+            stage,
+            "runtime readiness observation failed",
+            wait_status=status,
+            output=output,
+            returncode=returncode,
+        )
+    return status, None
+
+
+def _runtime_test_command(
+    *,
+    carrier: str,
+    image_id: str,
     tests_root: Path,
     version: str,
     container: str,
-    service_mode: bool,
+    test_container: str,
     run_id: str,
-) -> None:
-    command = [
+) -> list[str]:
+    if carrier == "default":
+        return [
+            "docker",
+            "exec",
+            "--env",
+            f"EXPECTED_VERSION={version}",
+            container,
+            "/bin/bash",
+            "/opt/oe-tests/test.sh",
+        ]
+    return [
         "docker",
         "run",
+        "--name",
+        test_container,
+        "--label",
+        f"oe.autopilot.run={run_id}",
+        "--volume",
+        f"{tests_root}:/opt/oe-tests:ro",
+        "--env",
+        f"EXPECTED_VERSION={version}",
+        "--entrypoint",
+        "/bin/bash",
+        image_id,
+        "/opt/oe-tests/test.sh",
+    ]
+
+
+def _runtime_post_failure(
+    *,
+    wait_status: str,
+    state: Mapping[str, object],
+) -> dict[str, object] | None:
+    if state.get("OOMKilled") is True or state.get("Error"):
+        return _runtime_failure(
+            "post_inspect",
+            "container reports OOMKilled or State.Error",
+            state=dict(state),
+        )
+    health = state.get("Health") or {}
+    if wait_status in {"READY_HEALTH", "READY_TCP"} and (
+        state.get("Status") != "running"
+        or (
+            wait_status == "READY_HEALTH"
+            and isinstance(health, Mapping)
+            and health.get("Status") == "unhealthy"
+        )
+    ):
+        return _runtime_failure(
+            "post_inspect",
+            "ready container became unhealthy or stopped after test.sh",
+            state=dict(state),
+        )
+    if wait_status == "RUNNING_NO_PROBE" and not (
+        state.get("Status") == "running"
+        or (state.get("Status") == "exited" and state.get("ExitCode") == 0)
+    ):
+        return _runtime_failure(
+            "post_inspect",
+            "no-probe container did not remain running or exit cleanly",
+            state=dict(state),
+        )
+    return None
+
+
+def _run_runtime_test(
+    runner: CommandRunner,
+    *,
+    workspace: Path,
+    image_id: str,
+    tests_root: Path,
+    version: str,
+    container: str,
+    test_container: str,
+    run_id: str,
+    waiter: Path,
+    wait_timeout: int = 90,
+) -> dict[str, object]:
+    """Run the generated Bash test once after the default container is ready."""
+    failures: list[dict[str, object]] = []
+
+    def fail(
+        stage: str,
+        message: str,
+        **details: object,
+    ) -> None:
+        failures.append(_runtime_failure(stage, message, **details))
+
+    runtime_config_available = True
+    try:
+        has_healthcheck, ports = _image_runtime_probes(
+            runner,
+            workspace=workspace,
+            image_id=image_id,
+        )
+    except NativeValidationError as error:
+        runtime_config_available = False
+        has_healthcheck, ports = False, ()
+        fail(
+            "default_start",
+            str(error),
+            **_error_details(error),
+        )
+    create = [
+        "docker",
+        "create",
         "--name",
         container,
         "--label",
@@ -714,36 +965,139 @@ def _run_shared_tests(
         "--volume",
         f"{tests_root}:/opt/oe-tests:ro",
     ]
-    if service_mode:
-        command.insert(2, "--detach")
-        command.append(image)
-        _run(runner, command, cwd=workspace)
+    if has_healthcheck:
+        create.append("--health-interval=1s")
+        if _supports_health_start_interval(runner, workspace=workspace):
+            create.append("--health-start-interval=1s")
+    create.append(image_id)
+    mode = "health" if has_healthcheck else "tcp" if ports else "none"
+    wait_status = "RUNTIME_ERROR"
+    default_started = False
+    created = (
         _run(
             runner,
-            [
-                "docker",
-                "exec",
-                "--env",
-                f"EXPECTED_VERSION={version}",
-                container,
-                "/opt/oe-tests/test.sh",
-            ],
+            create,
             cwd=workspace,
-            timeout=600,
+            check=False,
         )
-        return
-    command.extend(
-        (
-            "--env",
-            f"EXPECTED_VERSION={version}",
-            "--entrypoint",
-            "/bin/sh",
-            image,
-            "-c",
-            "exec /opt/oe-tests/test.sh",
-        )
+        if runtime_config_available
+        else None
     )
-    _run(runner, command, cwd=workspace, timeout=300)
+    if created is not None:
+        if created.returncode != 0:
+            fail(
+                "default_start",
+                _merged_output(created) or "docker create failed",
+                command=create,
+                returncode=created.returncode,
+            )
+        else:
+            start_command = ["docker", "start", container]
+            started = _run(
+                runner,
+                start_command,
+                cwd=workspace,
+                check=False,
+            )
+            if started.returncode != 0:
+                fail(
+                    "default_start",
+                    _merged_output(started) or "docker start failed",
+                    command=start_command,
+                    returncode=started.returncode,
+                )
+            else:
+                default_started = True
+                wait_status, wait_failure = _wait_for_runtime_event(
+                    runner,
+                    workspace=workspace,
+                    waiter=waiter,
+                    container=container,
+                    mode=mode,
+                    ports=ports,
+                    wait_timeout=wait_timeout,
+                )
+                if wait_failure is not None:
+                    failures.append(wait_failure)
+
+    carrier = "fresh"
+    post_state: dict[str, object] = {}
+    if default_started:
+        try:
+            state = _inspect_runtime_state(
+                runner,
+                workspace=workspace,
+                container=container,
+            )
+        except NativeValidationError as error:
+            fail(
+                "default_start",
+                str(error),
+                **_error_details(error),
+            )
+        else:
+            carrier = "default" if state.get("Status") == "running" else "fresh"
+    test_command = _runtime_test_command(
+        carrier=carrier,
+        image_id=image_id,
+        tests_root=tests_root,
+        version=version,
+        container=container,
+        test_container=test_container,
+        run_id=run_id,
+    )
+    tested = _run(
+        runner,
+        test_command,
+        cwd=workspace,
+        timeout=600,
+        check=False,
+    )
+    if tested.returncode != 0:
+        fail(
+            "test_sh",
+            _merged_output(tested) or "test.sh failed",
+            command=test_command,
+            returncode=tested.returncode,
+        )
+    if default_started:
+        try:
+            post_state = _inspect_runtime_state(
+                runner,
+                workspace=workspace,
+                container=container,
+            )
+        except NativeValidationError as error:
+            fail(
+                "post_inspect",
+                str(error),
+                **_error_details(error),
+            )
+        else:
+            post_failure = _runtime_post_failure(
+                wait_status=wait_status,
+                state=post_state,
+            )
+            if post_failure is not None:
+                failures.append(post_failure)
+    if failures:
+        summary = "; ".join(
+            f"{failure['stage']}: {failure['failure']}" for failure in failures
+        )
+        raise NativeValidationError(
+            summary,
+            details={
+                "failures": failures,
+                "wait_status": wait_status,
+                "carrier": carrier,
+                "test_attempted": True,
+            },
+        )
+    return {
+        "wait_status": wait_status,
+        "carrier": carrier,
+        "state": post_state,
+    }
 
 
 def validate_native_image(
@@ -752,12 +1106,9 @@ def validate_native_image(
     task: TaskSpec,
     architecture: str,
     run_id: str,
-    dgoss: Path,
-    goss: Path,
     report_path: Path,
     junit_path: Path,
     runner: CommandRunner = _default_runner,
-    sleep: Callable[[float], None] = time.sleep,
     format_validator: FormatValidator | None = None,
 ) -> dict[str, object]:
     if architecture not in _PLATFORMS:
@@ -778,9 +1129,6 @@ def validate_native_image(
         architecture=architecture,
         report_path=report_path,
     )
-    dgoss = _validate_tool(dgoss, "dgoss")
-    goss = _validate_tool(goss, "goss")
-
     app_root = workspace / task.domain / task.app
     image_root = app_root / task.version / task.os_version
     tests_root = app_root / "tests"
@@ -790,21 +1138,23 @@ def validate_native_image(
             f"native validation input is missing: {dockerfile}"
         )
     test_contract = validate_test_contract(repo=workspace, task=task)
-    service_mode = (tests_root / "goss_wait.yaml").is_file()
+    waiter = _validate_tool(
+        Path(__file__).resolve().parents[1] / "harness" / "wait_ready.sh",
+        "runtime waiter",
+    )
 
     platform = _PLATFORMS[architecture]
     slug = architecture.replace("_", "-")
     prefix = f"oe-e2e-{run_id}-{slug}"
     builder = f"{prefix}-builder"
-    dgoss_container = f"{prefix}-dgoss"
     container = f"{prefix}-runtime"
+    test_container = f"{prefix}-runtime-test"
     image = f"oe-autopilot/{task.app}:{task.version}-{run_id}-{slug}"
     validated_patch_sha256 = validated_patch_digest(workspace)
     image_id = ""
     failures: list[dict[str, object]] = []
     container_evidence: dict[str, object] = {}
-    # None means the check was never reached. Sharing one boolean across all
-    # checks made a dgoss failure look like a build failure to the Fixer.
+    # None distinguishes a check that was never reached from a failed check.
     checks: dict[str, bool | None] = {name: None for name in _E2E_CHECKS}
     stage = f"native:{architecture}"
     log(stage, "START validation")
@@ -816,6 +1166,24 @@ def validate_native_image(
         failed_stage: str | None = None,
     ) -> None:
         checks[check] = False
+        substage_failures = error.details.get("failures")
+        if check == "runtime_test" and isinstance(substage_failures, list):
+            for substage in substage_failures:
+                if not isinstance(substage, Mapping):
+                    continue
+                failures.append(
+                    {
+                        "stage": str(substage.get("stage") or check),
+                        "check": check,
+                        "failure": str(substage.get("failure") or error),
+                        "failure_details": dict(
+                            substage.get("failure_details") or {}
+                        ),
+                    }
+                )
+            if failures:
+                log(stage, f"FAIL {check}: {error}")
+                return
         failures.append(
             {
                 "stage": failed_stage or check,
@@ -826,15 +1194,17 @@ def validate_native_image(
         )
         log(stage, f"FAIL {check}: {error}")
 
-    def run_check(check: str, action: Callable[[], None]) -> None:
+    def run_check(check: str, action: Callable[[], object]) -> object | None:
         log(stage, f"START {check}")
         try:
-            action()
+            result = action()
         except NativeValidationError as error:
             record_failure(check, error)
+            return None
         else:
             checks[check] = True
             log(stage, f"PASS {check}")
+            return result
 
     def contract_error(check: str) -> NativeValidationError:
         findings = [
@@ -885,45 +1255,41 @@ def validate_native_image(
         else:
             checks["native_build"] = True
             log(stage, "PASS build")
-            if test_contract["goss_allowed"] is True:
-                run_check(
-                    "dgoss",
-                    lambda: _run_dgoss(
+            if test_contract["runtime_test_allowed"] is True:
+                runtime_outcome = run_check(
+                    "runtime_test",
+                    lambda: _run_runtime_test(
                         runner,
                         workspace=workspace,
-                        image=image,
-                        tests_root=tests_root,
-                        version=task.version,
-                        dgoss=dgoss,
-                        goss=goss,
-                        container=dgoss_container,
-                        service_mode=service_mode,
-                    ),
-                )
-            else:
-                record_failure(
-                    "dgoss",
-                    contract_error("dgoss"),
-                    failed_stage="test_contract",
-                )
-            if test_contract["shared_tests_allowed"] is True:
-                run_check(
-                    "shared_tests",
-                    lambda: _run_shared_tests(
-                        runner,
-                        workspace=workspace,
-                        image=image,
+                        image_id=image_id,
                         tests_root=tests_root,
                         version=task.version,
                         container=container,
-                        service_mode=service_mode,
+                        test_container=test_container,
                         run_id=run_id,
+                        waiter=waiter,
                     ),
                 )
+                if isinstance(runtime_outcome, Mapping):
+                    runtime_state = runtime_outcome.get("state")
+                    if isinstance(runtime_state, Mapping):
+                        state_summary = " ".join(
+                            str(runtime_state.get(key, ""))
+                            for key in ("Status", "ExitCode", "Error")
+                        ).strip()
+                    else:
+                        state_summary = ""
+                    container_evidence[container] = {
+                        "state": state_summary,
+                        "probe": (
+                            f"wait_status={runtime_outcome.get('wait_status')} "
+                            f"carrier={runtime_outcome.get('carrier')}"
+                        ),
+                    }
             else:
                 record_failure(
-                    "shared_tests",
-                    contract_error("shared_tests"),
+                    "runtime_test",
+                    contract_error("runtime_test"),
                     failed_stage="test_contract",
                 )
         if failures:
@@ -932,7 +1298,7 @@ def validate_native_image(
                 container_evidence = _container_evidence(
                     runner,
                     workspace=workspace,
-                    containers=(dgoss_container, container),
+                    containers=(container, test_container),
                     artifact_root=report_path.parent,
                 )
             except Exception as error:
@@ -944,8 +1310,8 @@ def validate_native_image(
         # validation and must keep the cached builder stage. It is released
         # once per run by release_run_builders.
         cleanup_commands = (
-            ["docker", "rm", "--force", dgoss_container],
             ["docker", "rm", "--force", container],
+            ["docker", "rm", "--force", test_container],
             ["docker", "image", "rm", "--force", image],
         )
         for command in cleanup_commands:
@@ -979,12 +1345,12 @@ def validate_native_image(
         report["failed_stage"] = first_failure["stage"]
         report["failure_details"] = first_failure["failure_details"]
         report["failures"] = failures
-        if container_evidence:
-            report["container_evidence"] = container_evidence
     elif format_failure:
         report["failure"] = format_failure
         report["failed_stage"] = "upstream_format"
         report["failure_details"] = _format_failure_details(format_check or {})
+    if container_evidence:
+        report["container_evidence"] = container_evidence
     _write_evidence(
         report_path=report_path,
         junit_path=junit_path,
@@ -1013,8 +1379,6 @@ def validate_native_smoke(
     task: TaskSpec,
     architecture: str,
     run_id: str,
-    dgoss: Path,
-    goss: Path,
     report_path: Path,
     junit_path: Path,
     repair_report_dir: Path,
@@ -1030,8 +1394,10 @@ def validate_native_smoke(
     workspace = Path(workspace)
     if not workspace.is_dir():
         raise NativeValidationError("target workspace does not exist")
-    dgoss = _validate_tool(dgoss, "dgoss")
-    goss = _validate_tool(goss, "goss")
+    waiter = _validate_tool(
+        Path(__file__).resolve().parents[1] / "harness" / "wait_ready.sh",
+        "runtime waiter",
+    )
     report_path = Path(report_path)
     junit_path = Path(junit_path)
     repair_report_dir = Path(repair_report_dir)
@@ -1045,33 +1411,32 @@ def validate_native_smoke(
 
     context = report_path.parent / "pipeline-smoke-context"
     contexts: dict[str, Path] = {}
-    for mode in ("service", "cli"):
+    modes = {
+        "health-ready": (
+            'HEALTHCHECK CMD test -f /pipeline-smoke-health-ready\n'
+            'CMD ["sleep", "300"]\n'
+        ),
+        "terminal": 'CMD ["/bin/bash", "-c", "exit 7"]\n',
+        "no-probe": 'CMD ["sleep", "300"]\n',
+        "probe-timeout": (
+            'HEALTHCHECK CMD test -f /never-ready\n'
+            'CMD ["sleep", "300"]\n'
+        ),
+    }
+    for mode, docker_runtime in modes.items():
         mode_root = context / mode
         mode_root.mkdir(parents=True, exist_ok=True)
         marker = f"/pipeline-smoke-{mode}"
-        command = (
-            'CMD ["sleep", "300"]\n'
-            if mode == "service"
-            else 'CMD ["unexpected-image-cmd"]\n'
-        )
         (mode_root / "Dockerfile").write_text(
             f"FROM openeuler/openeuler:{task.os_version}\n"
             f"RUN printf 'pipeline-smoke-{mode}\\n' > {marker}\n"
-            + command
+            + docker_runtime
         )
-        (mode_root / "goss.yaml").write_text(
-            "file:\n"
-            f"  {marker}:\n"
-            "    exists: true\n"
-        )
-        if mode == "service":
-            (mode_root / "goss_wait.yaml").write_text(
-                "process:\n  sleep:\n    running: true\n"
-            )
         test_sh = mode_root / "test.sh"
         test_sh.write_text(
-            "#!/bin/sh\nset -eu\n"
+            "#!/bin/bash\nset -euo pipefail\n"
             "test \"$#\" -eq 0\n"
+            f"test \"$EXPECTED_VERSION\" = {task.version!r}\n"
             f"test -f {marker}\n"
         )
         test_sh.chmod(0o755)
@@ -1084,7 +1449,7 @@ def validate_native_smoke(
     containers = [
         f"{prefix}-{mode}-{kind}"
         for mode in contexts
-        for kind in ("dgoss", "runtime")
+        for kind in ("runtime", "runtime-test")
     ]
     images = {
         mode: f"oe-autopilot/pipeline-smoke-{mode}:{run_id}-{slug}"
@@ -1093,6 +1458,7 @@ def validate_native_smoke(
     stage = f"smoke:{architecture}"
     validated_patch_sha256 = validated_patch_digest(workspace)
     image_id = ""
+    image_ids: dict[str, str] = {}
     failure: str | None = None
     failure_details: dict[str, object] = {}
     checks: dict[str, bool | None] = {name: None for name in _SMOKE_CHECKS}
@@ -1122,47 +1488,60 @@ def validate_native_smoke(
                 cwd=workspace,
                 timeout=1800,
             )
+            inspected = _run(
+                runner,
+                [
+                    "docker",
+                    "image",
+                    "inspect",
+                    "--format",
+                    "{{.Id}}",
+                    images[mode],
+                ],
+                cwd=workspace,
+            )
+            image_ids[mode] = str(inspected.stdout or "").strip()
         checks["native_build"] = True
-        current_check = "dgoss"
+        image_id = image_ids["health-ready"]
+        current_check = "runtime_test"
         for mode, mode_root in contexts.items():
-            _run_dgoss(
-                runner,
-                workspace=workspace,
-                image=images[mode],
-                tests_root=mode_root,
-                version=task.version,
-                dgoss=dgoss,
-                goss=goss,
-                container=f"{prefix}-{mode}-dgoss",
-                service_mode=mode == "service",
-            )
-        checks["dgoss"] = True
-        current_check = "shared_tests"
-        for mode, mode_root in contexts.items():
-            _run_shared_tests(
-                runner,
-                workspace=workspace,
-                image=images[mode],
-                tests_root=mode_root,
-                version=task.version,
-                container=f"{prefix}-{mode}-runtime",
-                service_mode=mode == "service",
-                run_id=run_id,
-            )
-        checks["shared_tests"] = True
-        inspected = _run(
-            runner,
-            [
-                "docker",
-                "image",
-                "inspect",
-                "--format",
-                "{{.Id}}",
-                images["service"],
-            ],
-            cwd=workspace,
-        )
-        image_id = str(inspected.stdout or "").strip()
+            try:
+                _run_runtime_test(
+                    runner,
+                    workspace=workspace,
+                    image_id=image_ids[mode],
+                    tests_root=mode_root,
+                    version=task.version,
+                    container=f"{prefix}-{mode}-runtime",
+                    test_container=f"{prefix}-{mode}-runtime-test",
+                    run_id=run_id,
+                    waiter=waiter,
+                    wait_timeout=(
+                        5 if mode in {"health-ready", "terminal"} else 0
+                    ),
+                )
+            except NativeValidationError as error:
+                expected_timeout = (
+                    mode == "probe-timeout"
+                    and error.details.get("test_attempted") is True
+                    and error.details.get("wait_status") == "PROBE_TIMEOUT"
+                    and any(
+                        isinstance(item, Mapping)
+                        and item.get("stage") == "wait_healthcheck"
+                        and isinstance(item.get("failure_details"), Mapping)
+                        and item["failure_details"].get("wait_status")
+                        == "PROBE_TIMEOUT"
+                        for item in error.details.get("failures", [])
+                    )
+                )
+                if not expected_timeout:
+                    raise
+            else:
+                if mode == "probe-timeout":
+                    raise NativeValidationError(
+                        "pipeline smoke expected explicit probe timeout"
+                    )
+        checks["runtime_test"] = True
     except NativeValidationError as error:
         failure = str(error)
         failure_details = dict(error.details)

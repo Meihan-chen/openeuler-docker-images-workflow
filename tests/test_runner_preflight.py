@@ -11,7 +11,7 @@ def _snapshot(tmp_path):
     from scripts.lib.toolchain import RunnerSnapshot
 
     tools = {}
-    for name in ("dgoss", "goss", "hadolint", "jq", "opencode"):
+    for name in ("hadolint", "jq", "opencode"):
         path = tmp_path / name
         path.write_text("#!/bin/sh\nexit 0\n")
         path.chmod(0o755)
@@ -73,8 +73,6 @@ def test_preflight_reports_all_missing_capabilities(tmp_path):
         "at least 10 GiB",
         "Docker daemon",
         "Buildx",
-        "dgoss",
-        "goss",
         "hadolint",
         "jq",
         "opencode",
@@ -86,9 +84,9 @@ def test_preflight_rejects_non_executable_tool(tmp_path):
     from scripts.lib.toolchain import PreflightError, evaluate_preflight
 
     snapshot = _snapshot(tmp_path)
-    snapshot.tools["goss"].chmod(0o644)
+    snapshot.tools["hadolint"].chmod(0o644)
 
-    with pytest.raises(PreflightError, match="goss"):
+    with pytest.raises(PreflightError, match="hadolint"):
         evaluate_preflight(snapshot, expected_arch="x86_64")
 
 
@@ -108,19 +106,19 @@ MemAvailable:   14680064 kB
 def test_load_tool_paths_reads_bootstrap_output(tmp_path):
     from scripts.lib.toolchain import load_tool_paths
 
-    tool = tmp_path / "goss"
+    tool = tmp_path / "hadolint"
     payload = tmp_path / "toolchain.json"
     payload.write_text(
         json.dumps(
             {
                 "tools": {
-                    "goss": {
+                    "hadolint": {
                         "path": str(tool),
-                        "version": "0.4.10",
+                        "version": "2.14.0",
                     }
                 }
             }
         )
     )
 
-    assert load_tool_paths(payload) == {"goss": tool}
+    assert load_tool_paths(payload) == {"hadolint": tool}

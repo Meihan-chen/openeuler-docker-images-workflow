@@ -69,7 +69,7 @@ def _image_creator_output(**overrides):
 def _testcase_creator_output(**overrides):
     payload = {
         "success": True,
-        "files_created": ["Database/kvrocks/tests/goss.yaml"],
+        "files_created": ["Database/kvrocks/tests/test.sh"],
         "command_evidence": [
             {
                 "command": "redis-cli PING",
@@ -350,7 +350,7 @@ def test_generation_returns_failed_testcase_gate_to_creator_once(tmp_path):
     workspace.mkdir()
     testcase_creator = {
         "success": True,
-        "files_created": ["Database/kvrocks/tests/goss.yaml"],
+        "files_created": ["Database/kvrocks/tests/test.sh"],
     }
     agent = StubAgent(
         {
@@ -475,7 +475,7 @@ def test_generation_continues_to_qa_when_test_contract_survives_repair(
     workspace.mkdir()
     testcase_creator = {
         "success": True,
-        "files_created": ["Database/kvrocks/tests/goss.yaml"],
+        "files_created": ["Database/kvrocks/tests/test.sh"],
     }
     agent = _fully_approved_agent()
     agent.responses["testcase_creator"].append(testcase_creator)
@@ -488,8 +488,8 @@ def test_generation_continues_to_qa_when_test_contract_survives_repair(
         full_calls += 1
         return _repairable_gate(
             owner="testcase_creator",
-            code="tests.goss_yaml",
-            message="goss.yaml must be valid YAML",
+            code="tests.shell_syntax",
+            message="test.sh must be valid Bash",
         )
 
     result = run_generation_pipeline(
@@ -1990,7 +1990,7 @@ def test_generation_accepts_a_task_it_has_never_seen(tmp_path):
     # to speak about the task under test rather than the default one.
     agent.responses["testcase_creator"] = [
         _testcase_creator_output(
-            files_created=["Cloud/caddy/tests/goss.yaml"],
+            files_created=["Cloud/caddy/tests/test.sh"],
             command_evidence=[
                 {
                     "command": "caddy version",
@@ -2092,6 +2092,7 @@ def test_phase1_prompts_pin_task_paths_without_injecting_app_implementation():
     assert "2.16.0/24.03-lts-sp4/Dockerfile" in prompt
     assert "Database/image-list.yml" in prompt
     assert "Do not modify any other path" in prompt
+    assert "Do not create workflow control assets" in prompt
     assert "official upstream" in prompt
     for fragment in (
         "./x.py build",
@@ -2124,18 +2125,13 @@ def test_phase1_prompts_pin_task_paths_without_injecting_app_implementation():
         task=_task(),
         base_sha="1" * 40,
     )
-    assert "service mode" in testcase_prompt
-    assert "already-running container" in testcase_prompt
-    assert "CLI/one-shot mode" in testcase_prompt
-    assert "container entrypoint" in testcase_prompt
+    assert "runtime_test" in testcase_prompt
+    assert "executes the shared test.sh exactly once" in testcase_prompt
     assert "must not invoke Docker" in testcase_prompt
     assert "Database/kvrocks/tests/test.sh" in testcase_prompt
-    assert "available in the runtime image" in testcase_prompt
-    assert "`ss`" in testcase_prompt
+    assert "runtime image" in testcase_prompt
     assert "image-list, Dockerfile, metadata" in testcase_prompt
     assert "read-only" in testcase_prompt
-    assert "order-independent" in testcase_prompt
-    assert "stateful sequence" in testcase_prompt
     assert "final Dockerfile" in testcase_prompt
     for fragment in ("redis-cli", "6666", "UID 999", "kvrocks --version"):
         assert fragment not in testcase_prompt
@@ -2145,9 +2141,38 @@ def test_phase1_prompts_pin_task_paths_without_injecting_app_implementation():
         task=_task(),
         base_sha="1" * 40,
     )
-    assert "available in the runtime image" in fixer_prompt
+    assert "runtime_test" in fixer_prompt
     assert "observable runtime contract" in fixer_prompt
     assert "dependent candidate files" in fixer_prompt
+
+
+def test_test_roles_have_one_runtime_test_contract():
+    from scripts.lib.generation_pipeline import build_role_prompt
+
+    for role in ("testcase_creator", "testcase_qa", "fixer"):
+        prompt = build_role_prompt(
+            role=role,
+            task=_task(),
+            base_sha="1" * 40,
+        ).lower()
+        assert "runtime_test" in prompt
+        assert "tests/test.sh" in prompt
+
+
+def test_smoke_candidate_generates_only_native_test_assets(tmp_path):
+    from scripts.lib.generation_pipeline import write_smoke_candidate
+
+    workspace = tmp_path / "target"
+    (workspace / "Database").mkdir(parents=True)
+    (workspace / "Database" / "image-list.yml").write_text("images: {}\n")
+
+    write_smoke_candidate(workspace=workspace, task=_task())
+
+    tests = workspace / "Database" / "kvrocks" / "tests"
+    assert sorted(path.name for path in tests.iterdir()) == ["test.sh"]
+    script = (tests / "test.sh").read_text()
+    assert 'test "${reported_version}" = "${EXPECTED_VERSION}"' in script
+    assert 'test "${ping}" = "PONG"' in script
 
 
 def test_shared_prompt_contract_does_not_inject_kvrocks_rules():
@@ -2189,7 +2214,7 @@ def test_shared_prompt_contract_does_not_inject_kvrocks_rules():
             task=task,
             base_sha="1" * 40,
         )
-        assert "available in the runtime image" in prompt
+        assert "runtime_test" in prompt
         for fragment in ("Kvrocks", "redis-cli", "6666", "./x.py build"):
             assert fragment not in prompt
 
@@ -2226,7 +2251,8 @@ def test_fixer_prompt_whitelists_generated_candidate_files(tmp_path):
     assert "Database/kvrocks/2.16.0/24.03-lts-sp4/service.conf" in prompt
     assert "Database/kvrocks/2.16.0/24.03-lts-sp4/entrypoint.sh" in prompt
     assert "Database/kvrocks/2.16.0/24.03-lts-sp4/test.sh" not in prompt
-    assert "Database/kvrocks/tests/goss.yaml" in prompt
+    assert "Database/kvrocks/tests/test.sh" in prompt
+    assert "Database/kvrocks/tests/test_helpers.sh" in prompt
     assert "Database/kvrocks/results/results.json" not in prompt
 
 
@@ -2578,7 +2604,7 @@ def test_large_evidence_remains_reviewable_in_the_bounded_qa_prompt(tmp_path):
     workspace = tmp_path / "target"
     tests = workspace / "Database" / "kvrocks" / "tests"
     tests.mkdir(parents=True)
-    (tests / "goss.yaml").write_text("#" + "c" * 59_000)
+    (tests / "test.sh").write_text("#" + "c" * 59_000)
 
     creator_evidence = [
         {
@@ -2621,7 +2647,7 @@ def test_large_evidence_remains_reviewable_in_the_bounded_qa_prompt(tmp_path):
         base_sha="1" * 40,
         creator_payload={
             "success": True,
-            "files_created": ["Database/kvrocks/tests/goss.yaml"],
+            "files_created": ["Database/kvrocks/tests/test.sh"],
             "command_evidence": [
                 {
                     "command": f"command-{index}",
@@ -2659,22 +2685,58 @@ def test_fixer_prompt_inlines_only_the_matching_failure_patterns(tmp_path):
             "kind": "native_validation_failure",
             "architectures": {
                 "x86_64": {
-                    "failed_stage": "dgoss",
-                    "failure": (
-                        "Error: invalid Attribute for "
-                        "File:/var/lib/kvrocks: dir"
-                    ),
+                    "failed_stage": "runtime_test",
+                    "failure": "functional roundtrip passed but metadata assertion failed",
                 }
             },
         },
     )
 
     assert "## Verified failure knowledge" in prompt
-    assert "goss_schema_mismatch" in prompt
-    assert "pinned Goss resource schema" in prompt
+    assert "protocol_command_semantics_mismatch" in prompt
+    assert "application-specific semantics" in prompt
     # An unrelated pattern stays collapsed to its index line.
     assert "runtime_identity_collision" in prompt
     assert "A requested numeric user" not in prompt
+
+
+def test_fixer_prompt_does_not_expand_protocol_pattern_for_build_failure():
+    from scripts.lib.generation_pipeline import build_role_prompt
+
+    failure = "compiler exited 2"
+    prompt = build_role_prompt(
+        role="fixer",
+        task=_task(),
+        base_sha="1" * 40,
+        review={
+            "kind": "native_validation_failure",
+            "architectures": {
+                "x86_64": {
+                    "status": "failed",
+                    "checks": {
+                        "native_build": False,
+                        "runtime_test": None,
+                    },
+                    "failed_stage": "native_build",
+                    "failure": failure,
+                    "failure_details": {"returncode": 2},
+                    "failures": [
+                        {
+                            "stage": "native_build",
+                            "check": "native_build",
+                            "failure": failure,
+                            "failure_details": {"returncode": 2},
+                        }
+                    ],
+                }
+            },
+        },
+    )
+
+    # The stable index lists every pattern, but unmatched pattern details stay hidden.
+    assert "protocol_command_semantics_mismatch" in prompt
+    assert "A test assumes the conventional meaning of a familiar command" not in prompt
+    assert "Do not change a healthy image merely to satisfy" not in prompt
 
 
 def test_fixer_prompt_treats_external_native_logs_as_untrusted_read_only_data():

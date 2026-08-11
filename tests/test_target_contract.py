@@ -112,32 +112,22 @@ def _write_valid_generated_candidate(repo):
         "HEALTHCHECK CMD redis-cli -p 6666 PING | grep PONG\n"
         "ENTRYPOINT [\"kvrocks\", \"--bind\", \"0.0.0.0\"]\n"
     )
-    (tests / "goss.yaml").write_text(
-        "port:\n"
-        "  tcp:6666:\n"
-        "    listening: true\n"
-        "command:\n"
-        "  version:\n"
-        "    exec: kvrocks --version\n"
-        "    stdout:\n"
-        "      - \"{{.Env.EXPECTED_VERSION}}\"\n"
-        "  ping:\n"
-        "    exec: redis-cli -p 6666 PING\n"
-        "    stdout:\n"
-        "      - PONG\n"
-    )
-    (tests / "goss_wait.yaml").write_text(
-        "port:\n  tcp:6666:\n    listening: true\n"
-    )
     (tests / "test_helpers.sh").write_text(
-        "#!/bin/bash\nwait_for_kvrocks() { redis-cli -p 6666 PING; }\n"
+        "#!/bin/bash\nassert_non_root() { test \"$(id -u)\" != 0; }\n"
     )
     (tests / "test.sh").write_text(
         "#!/bin/bash\n"
         "set -euo pipefail\n"
         ": \"${EXPECTED_VERSION:?}\"\n"
-        "kvrocks --version | grep -F \"${EXPECTED_VERSION}\"\n"
-        "redis-cli -p 6666 PING | grep -F PONG\n"
+        "version_output=\"$(kvrocks --version)\"\n"
+        "read -r binary label reported_version details "
+        "<<< \"${version_output}\"\n"
+        "test \"${binary}\" = kvrocks\n"
+        "test \"${label}\" = version\n"
+        "test \"${reported_version}\" = \"${EXPECTED_VERSION}\"\n"
+        "test -n \"${details}\"\n"
+        "ping=\"$(redis-cli -p 6666 PING)\"\n"
+        "test \"${ping}\" = PONG\n"
         "test \"$(id -u)\" != 0\n"
     )
     (tests / "test.sh").chmod(0o755)
@@ -178,29 +168,6 @@ def _write_valid_results(repo):
         "numpy_version": "not-installed",
     }
     (root / "version_info.json").write_text(json.dumps(version_info))
-    (root / "results.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "status": "passed",
-                "task_id": _task().task_id,
-                "validated_run_id": "123456",
-                "artifact_url": (
-                    "https://github.com/Meihan-chen/repo/actions/runs/123456"
-                ),
-                "architectures": {
-                    architecture: {
-                        "checks": {
-                            "native_build": True,
-                            "dgoss": True,
-                            "shared_tests": True,
-                        }
-                    }
-                    for architecture in ("x86_64", "aarch64")
-                },
-            }
-        )
-    )
 
 
 def _remove_testcase_owned_files(repo):
@@ -244,7 +211,7 @@ def test_valid_generated_kvrocks_candidate_passes_contract(tmp_path):
     assert report["test_allowed"] is True
     assert report["findings"] == []
     assert report["task_id"] == _task().task_id
-    assert report["added_files"] == 9
+    assert report["added_files"] == 7
     assert report["modified_files"] == ["Database/image-list.yml"]
 
 
@@ -321,7 +288,6 @@ def test_contract_does_not_require_optional_test_helpers(tmp_path):
     repo, base_sha = _repo(tmp_path)
     _write_valid_generated_candidate(repo)
     tests = repo / "Database" / "kvrocks" / "tests"
-    (tests / "goss_wait.yaml").unlink()
     (tests / "test_helpers.sh").unlink()
 
     report = validate_generated_target(
@@ -334,32 +300,7 @@ def test_contract_does_not_require_optional_test_helpers(tmp_path):
     assert report["delivery_allowed"] is True
 
 
-def test_test_contract_keeps_shared_tests_available_when_goss_is_invalid(
-    tmp_path,
-):
-    from scripts.lib.target_contract import validate_test_contract
-
-    repo, _ = _repo(tmp_path)
-    _write_valid_generated_candidate(repo)
-    (repo / "Database" / "kvrocks" / "tests" / "goss.yaml").write_text(
-        "command: [\n"
-    )
-
-    report = validate_test_contract(repo=repo, task=_task())
-
-    assert report["goss_allowed"] is False
-    assert report["shared_tests_allowed"] is True
-    assert report["test_allowed"] is False
-    assert any(
-        finding["code"] == "tests.goss_yaml"
-        and finding["check"] == "dgoss"
-        for finding in report["findings"]
-    )
-
-
-def test_test_contract_keeps_goss_available_when_shared_tests_are_invalid(
-    tmp_path,
-):
+def test_test_contract_rejects_invalid_runtime_script(tmp_path):
     from scripts.lib.target_contract import validate_test_contract
 
     repo, _ = _repo(tmp_path)
@@ -370,12 +311,11 @@ def test_test_contract_keeps_goss_available_when_shared_tests_are_invalid(
 
     report = validate_test_contract(repo=repo, task=_task())
 
-    assert report["goss_allowed"] is True
-    assert report["shared_tests_allowed"] is False
+    assert report["runtime_test_allowed"] is False
     assert report["test_allowed"] is False
     assert any(
         finding["code"] == "tests.shell_syntax"
-        and finding["check"] == "shared_tests"
+        and finding["check"] == "runtime_test"
         for finding in report["findings"]
     )
 
@@ -475,18 +415,6 @@ def test_generated_contract_does_not_gate_application_implementation_syntax(
             "CMD [\"sh\"]\n"
         )
     elif variant == "application_selected_test_strategy":
-        (app / "tests" / "goss.yaml").write_text(
-            "command:\n"
-            "  application-check:\n"
-            "    exec: /usr/local/bin/application check\n"
-            "    exit-status: 0\n"
-        )
-        (app / "tests" / "goss_wait.yaml").write_text(
-            "command:\n"
-            "  application-ready:\n"
-            "    exec: /usr/local/bin/application ready\n"
-            "    exit-status: 0\n"
-        )
         (app / "tests" / "test.sh").write_text(
             "#!/bin/bash\n"
             "set -euo pipefail\n"
@@ -751,106 +679,13 @@ def test_contract_hard_stops_when_meta_cannot_be_parsed(tmp_path):
         validate_generated_target(repo=repo, task=_task(), base_sha=base_sha)
 
 
-def test_contract_keeps_buildable_candidate_with_invalid_goss_contract(tmp_path):
+def test_contract_classifies_extra_test_asset_as_test_contract(tmp_path):
     from scripts.harness.gate_diff import validate_generated_target
 
     repo, base_sha = _repo(tmp_path)
     _write_valid_generated_candidate(repo)
-    goss = repo / "Database" / "kvrocks" / "tests" / "goss.yaml"
-    goss.write_text(
-        "port:\n"
-        "  tcp:6666:\n"
-        "    listening: true\n"
-        "command:\n"
-        "  version:\n"
-        "    exec: kvrocks --version\n"
-        "    stdout:\n"
-        "      contains: \"{{.Env.EXPECTED_VERSION}}\"\n"
-        "  ping:\n"
-        "    exec: redis-cli -p 6666 PING\n"
-        "    stdout:\n"
-        "      contains: PONG\n"
-    )
-
-    report = validate_generated_target(
-        repo=repo,
-        task=_task(),
-        base_sha=base_sha,
-    )
-
-    assert report["status"] == "passed"
-    assert report["build_allowed"] is True
-    assert report["goss_allowed"] is False
-    assert report["shared_tests_allowed"] is True
-    assert report["test_allowed"] is False
-    assert report["delivery_allowed"] is False
-    assert any(
-        finding["code"] == "tests.goss_stdout_schema"
-        and finding["owner"] == "testcase_creator"
-        for finding in report["findings"]
-    )
-
-
-def test_contract_classifies_invalid_optional_wait_as_test_contract(tmp_path):
-    from scripts.harness.gate_diff import validate_generated_target
-
-    repo, base_sha = _repo(tmp_path)
-    _write_valid_generated_candidate(repo)
-    goss_wait = (
-        repo / "Database" / "kvrocks" / "tests" / "goss_wait.yaml"
-    )
-    goss_wait.write_text(
-        "port:\n"
-        "  tcp:6666:\n"
-        "    listening: true\n"
-        "    timeout: 30000\n"
-    )
-
-    report = validate_generated_target(
-        repo=repo,
-        task=_task(),
-        base_sha=base_sha,
-    )
-
-    assert report["status"] == "passed"
-    assert report["test_allowed"] is False
-    assert any(
-        finding["code"] == "tests.wait_timeout"
-        for finding in report["findings"]
-    )
-
-
-def test_contract_accepts_application_selected_goss_wait_resource(tmp_path):
-    from scripts.harness.gate_diff import validate_generated_target
-
-    repo, base_sha = _repo(tmp_path)
-    _write_valid_generated_candidate(repo)
-    goss_wait = (
-        repo / "Database" / "kvrocks" / "tests" / "goss_wait.yaml"
-    )
-    goss_wait.write_text(
-        "command:\n"
-        "  redis-cli -p 6666 PING:\n"
-        "    exit-status: 0\n"
-    )
-
-    report = validate_generated_target(
-        repo=repo,
-        task=_task(),
-        base_sha=base_sha,
-    )
-
-    assert report["status"] == "passed"
-
-
-@pytest.mark.parametrize("content", ("", "{}\n"))
-def test_present_wait_marker_must_define_a_readiness_resource(tmp_path, content):
-    from scripts.harness.gate_diff import validate_generated_target
-
-    repo, base_sha = _repo(tmp_path)
-    _write_valid_generated_candidate(repo)
-    goss_wait = repo / "Database" / "kvrocks" / "tests" / "goss_wait.yaml"
-    goss_wait.write_text(content)
+    extra = repo / "Database" / "kvrocks" / "tests" / "readiness.sh"
+    extra.write_text("#!/bin/bash\nexit 0\n")
 
     report = validate_generated_target(
         repo=repo,
@@ -861,7 +696,7 @@ def test_present_wait_marker_must_define_a_readiness_resource(tmp_path, content)
     assert report["build_allowed"] is True
     assert report["test_allowed"] is False
     assert any(
-        finding["code"] == "tests.wait_empty"
+        finding["code"] == "tests.forbidden_control_asset"
         for finding in report["findings"]
     )
 
@@ -980,7 +815,7 @@ def test_contract_derives_documented_tag_from_task_os_version(tmp_path):
     assert report["status"] == "passed"
 
 
-def test_final_contract_requires_and_accepts_bounded_dual_arch_results(tmp_path):
+def test_final_contract_accepts_public_evidence_without_a_run_id(tmp_path):
     from scripts.harness.gate_diff import validate_final_target
 
     repo, base_sha = _repo(tmp_path)
@@ -991,12 +826,38 @@ def test_final_contract_requires_and_accepts_bounded_dual_arch_results(tmp_path)
         repo=repo,
         task=_task(),
         base_sha=base_sha,
-        expected_run_id="123456",
     )
 
     assert report["status"] == "passed"
-    assert report["validated_run_id"] == "123456"
+    assert "validated_run_id" not in report
     assert report["result_bytes"] <= 20 * 1024
+
+
+def test_final_contract_rejects_production_results_in_target_repo(tmp_path):
+    from scripts.harness.gate_diff import (
+        TargetContractError,
+        validate_final_target,
+    )
+
+    repo, base_sha = _repo(tmp_path)
+    _write_valid_generated_candidate(repo)
+    _write_valid_results(repo)
+    result_dir = (
+        repo
+        / "Database"
+        / "kvrocks"
+        / "results"
+        / "2.16.0"
+        / "24.03-lts-sp4"
+    )
+    (result_dir / "results.json").write_text('{"schema_version": 1}\n')
+
+    with pytest.raises(TargetContractError, match="unexpected results.json"):
+        validate_final_target(
+            repo=repo,
+            task=_task(),
+            base_sha=base_sha,
+        )
 
 
 def test_final_contract_rejects_missing_architecture_junit(tmp_path):
@@ -1023,7 +884,6 @@ def test_final_contract_rejects_missing_architecture_junit(tmp_path):
             repo=repo,
             task=_task(),
             base_sha=base_sha,
-            expected_run_id="123456",
         )
 
 
@@ -1059,18 +919,108 @@ def test_final_contract_requires_junit_to_prove_executed_passes(tmp_path, junit)
             repo=repo,
             task=_task(),
             base_sha=base_sha,
-            expected_run_id="123456",
         )
 
 
-def test_generation_contract_has_no_goss_sandbox_interface():
-    import inspect
+def test_native_contract_uses_only_build_and_runtime_test_checks():
+    from scripts.lib.target_contract import NATIVE_REQUIRED_CHECKS
 
+    assert NATIVE_REQUIRED_CHECKS == frozenset(
+        {"native_build", "runtime_test"}
+    )
+
+
+def test_reserved_control_assets_only_name_current_workflow_controls():
+    from scripts.lib.target_contract import _RESERVED_CONTROL_ASSETS
+
+    assert _RESERVED_CONTROL_ASSETS == frozenset(
+        {"wait_ready.sh", "mode.yml"}
+    )
+
+
+def test_test_contract_exposes_one_runtime_permission(tmp_path):
+    from scripts.lib.target_contract import validate_test_contract
+
+    repo, _ = _repo(tmp_path)
+    _write_valid_generated_candidate(repo)
+
+    report = validate_test_contract(repo=repo, task=_task())
+
+    assert report["status"] == "passed"
+    assert report["test_allowed"] is True
+    assert report["runtime_test_allowed"] is True
+    assert set(report) == {
+        "status",
+        "test_allowed",
+        "runtime_test_allowed",
+        "findings",
+        "errors",
+    }
+
+
+@pytest.mark.parametrize(
+    "relative",
+    (
+        "tests/wait_ready.sh",
+        "tests/mode.yml",
+        "tests/AGENTS.md",
+        "tests/.agents/runtime.md",
+    ),
+)
+def test_contract_rejects_removed_test_control_assets(tmp_path, relative):
+    from scripts.lib.target_contract import validate_test_contract
+
+    repo, _ = _repo(tmp_path)
+    _write_valid_generated_candidate(repo)
+    path = repo / "Database" / "kvrocks" / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("removed control asset\n")
+
+    report = validate_test_contract(repo=repo, task=_task())
+
+    assert report["status"] == "failed"
+    assert report["runtime_test_allowed"] is False
+    assert any(
+        finding["code"] == "tests.forbidden_control_asset"
+        and finding["check"] == "runtime_test"
+        for finding in report["findings"]
+    )
+
+
+@pytest.mark.parametrize(
+    "relative",
+    (
+        "2.16.0/24.03-lts-sp4/wait_ready.sh",
+        "doc/mode.yml",
+        "AGENTS.md",
+        ".agents/runtime.md",
+    ),
+)
+def test_image_phase_rejects_reserved_control_assets_anywhere(
+    tmp_path,
+    relative,
+):
     from scripts.lib.target_contract import validate_generated_target
 
-    assert "goss_executable" not in inspect.signature(
-        validate_generated_target
-    ).parameters
+    repo, base_sha = _repo(tmp_path)
+    _write_valid_generated_candidate(repo)
+    path = repo / "Database" / "kvrocks" / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("reserved workflow control\n")
+
+    report = validate_generated_target(
+        repo=repo,
+        task=_task(),
+        base_sha=base_sha,
+        phase="image",
+    )
+
+    assert report["delivery_allowed"] is False
+    assert any(
+        finding["code"] == "scope.reserved_control_asset"
+        and finding["owner"] == "image_creator"
+        for finding in report["findings"]
+    )
 
 
 def test_contract_rejects_shared_test_bash_syntax_errors(tmp_path):

@@ -40,14 +40,15 @@ def _run_script(script, *args):
 
 
 def _write_candidate_payload(root):
+    from scripts.lib.task_spec import TaskSpec
+
     (root / "reports" / "agents").mkdir(parents=True)
     (root / "changes.patch").write_text("diff --git a/a b/a\n")
     report = {
         "status": "passed",
         "checks": {
             "native_build": True,
-            "dgoss": True,
-            "shared_tests": True,
+            "runtime_test": True,
         },
     }
     (root / "reports" / "x86_64.json").write_text(json.dumps(report) + "\n")
@@ -60,6 +61,30 @@ def _write_candidate_payload(root):
     (root / "reports" / "gates.json").write_text(gate)
     (root / "reports" / "generation-gates.json").write_text(gate)
     (root / "reports" / "hadolint.txt").write_text("")
+    task = TaskSpec.from_workflow_dispatch(
+        {
+            "app": "kvrocks",
+            "version": "2.16.0",
+            "os_version": "24.03-lts-sp4",
+            "domain": "Database",
+            "source_url": "https://github.com/apache/kvrocks",
+        }
+    )
+    (root / "reports" / "results.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "status": "passed",
+                "task_id": task.task_id,
+                "validated_run_id": "123456",
+                "artifact_url": "https://example.test/actions/runs/123456",
+                "architectures": {
+                    architecture: {"checks": report["checks"]}
+                    for architecture in ("x86_64", "aarch64")
+                },
+            }
+        )
+    )
 
 
 def _phase1_decide_args(tmp_path, reports, *, round_number=1):
@@ -111,8 +136,7 @@ def _passed_native_report(*, commit_sha=""):
         "status": "passed",
         "checks": {
             "native_build": True,
-            "dgoss": True,
-            "shared_tests": True,
+            "runtime_test": True,
         },
         "validated_patch_sha256": "a" * 64,
     }
@@ -130,8 +154,7 @@ def _infra_native_report():
         "status": "failed",
         "checks": {
             "native_build": False,
-            "dgoss": None,
-            "shared_tests": None,
+            "runtime_test": None,
         },
         "failed_stage": "native_build",
         "failure": "timed out",
@@ -731,7 +754,6 @@ def test_phase1_generate_wires_hadolint_into_pipeline(
     )
 
     assert calls["pipeline"]["task"] is task
-    assert "goss_executable" not in calls["pipeline"]
     assert calls["pipeline"]["evidence_resolver"].__name__ == (
         "freeze_creator_evidence"
     )

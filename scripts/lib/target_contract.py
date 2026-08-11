@@ -30,12 +30,10 @@ class TargetContractError(ValueError):
 
 _LINT_TIMEOUT_SECONDS = 30
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
-_RUN_ID_RE = re.compile(r"^[1-9][0-9]*$")
 _RESULT_FILES = {
     "x86_64.junit.xml",
     "aarch64.junit.xml",
     "version_info.json",
-    "results.json",
 }
 _OPENEULER_GITEE_URL_RE = re.compile(
     r"https?://(?:www\.)?gitee\.com/(?:openeuler|src-openeuler)"
@@ -60,9 +58,17 @@ _VERSION_INFO_FIELDS = {
     "python_version",
     "numpy_version",
 }
-NATIVE_REQUIRED_CHECKS = frozenset(
-    {"native_build", "dgoss", "shared_tests"}
+NATIVE_REQUIRED_CHECKS = frozenset({"native_build", "runtime_test"})
+
+_ALLOWED_TEST_ASSETS = frozenset({"test.sh", "test_helpers.sh"})
+_RESERVED_CONTROL_ASSETS = frozenset(
+    {
+        "wait_ready.sh",
+        "mode.yml",
+    }
 )
+_AGENT_CONTROL_NAMES = frozenset({"agents.md", "claude.md"})
+_AGENT_CONTROL_DIRECTORIES = frozenset({".agents", ".codex"})
 
 
 def native_checks_pass(checks: object) -> bool:
@@ -547,7 +553,7 @@ def _lint_shell_file(
         _test_finding(
             "tests.shell_syntax",
             f"{path.name} is not valid Bash: {detail}",
-            check="shared_tests",
+            check="runtime_test",
         )
     )
 
@@ -558,121 +564,65 @@ def _validate_tests(
     findings: list[dict[str, str]],
 ) -> None:
     shared = repo / app_root / "tests"
-    goss_path = shared / "goss.yaml"
-    if goss_path.is_file() and goss_path.stat().st_size:
-        try:
-            goss_data = yaml.safe_load(goss_path.read_text())
-        except yaml.YAMLError:
-            goss_data = None
-            findings.append(
-                _test_finding(
-                    "tests.goss_yaml",
-                    "goss.yaml must be valid YAML",
-                    check="dgoss",
+    if shared.is_dir():
+        for path in sorted(shared.rglob("*")):
+            if not path.is_file():
+                continue
+            relative = path.relative_to(shared)
+            if len(relative.parts) != 1 or path.name not in _ALLOWED_TEST_ASSETS:
+                findings.append(
+                    _test_finding(
+                        "tests.forbidden_control_asset",
+                        "generated tests may contain only test.sh and the "
+                        f"optional test_helpers.sh: {path.relative_to(repo)}",
+                        check="runtime_test",
+                    )
                 )
-            )
-        if isinstance(goss_data, dict):
-            commands = goss_data.get("command", {})
-            if isinstance(commands, dict):
-                for name, assertion in commands.items():
-                    if not isinstance(assertion, dict) or "stdout" not in assertion:
-                        continue
-                    if not isinstance(assertion["stdout"], (str, list)):
-                        findings.append(
-                            _test_finding(
-                                "tests.goss_stdout_schema",
-                                f"goss command {name} stdout must be a string or YAML list",
-                                check="dgoss",
-                            )
-                        )
-        elif goss_data is not None:
-            findings.append(
-                _test_finding(
-                    "tests.goss_schema",
-                    "goss.yaml must contain a YAML mapping",
-                    check="dgoss",
-                )
-            )
 
-    goss_wait_path = shared / "goss_wait.yaml"
-    if goss_wait_path.is_file():
-        if not goss_wait_path.stat().st_size:
-            findings.append(
-                _test_finding(
-                    "tests.wait_empty",
-                    "goss_wait.yaml must define at least one readiness resource",
-                    check="dgoss",
-                )
-            )
-            goss_wait_data = None
-        else:
-            try:
-                goss_wait_data = yaml.safe_load(goss_wait_path.read_text())
-            except yaml.YAMLError:
-                goss_wait_data = None
-                findings.append(
-                    _test_finding(
-                        "tests.wait_yaml",
-                        "goss_wait.yaml must be valid YAML",
-                        check="dgoss",
-                    )
-                )
-        if isinstance(goss_wait_data, dict) and not goss_wait_data:
-            findings.append(
-                _test_finding(
-                    "tests.wait_empty",
-                    "goss_wait.yaml must define at least one readiness resource",
-                    check="dgoss",
-                )
-            )
-        if isinstance(goss_wait_data, dict):
-            port = goss_wait_data.get("port", {})
-            if port and not isinstance(port, dict):
-                findings.append(
-                    _test_finding(
-                        "tests.wait_port_schema",
-                        "goss_wait.yaml port resource must be a YAML mapping",
-                        check="dgoss",
-                    )
-                )
-            elif isinstance(port, dict):
-                for name, assertion in port.items():
-                    if not isinstance(assertion, dict):
-                        findings.append(
-                            _test_finding(
-                                "tests.wait_port_schema",
-                                f"goss_wait.yaml port {name} must be a YAML mapping",
-                                check="dgoss",
-                            )
-                        )
-                    elif "timeout" in assertion:
-                        findings.append(
-                            _test_finding(
-                                "tests.wait_timeout",
-                                f"goss_wait.yaml port {name} does not support timeout; the native harness controls the readiness retry",
-                                check="dgoss",
-                            )
-                        )
-        elif goss_wait_data is not None:
-            findings.append(
-                _test_finding(
-                    "tests.wait_schema",
-                    "goss_wait.yaml must contain a YAML mapping",
-                    check="dgoss",
-                )
-            )
     shared_entry = shared / "test.sh"
     if shared_entry.is_file() and not shared_entry.stat().st_mode & 0o111:
         findings.append(
             _test_finding(
                 "tests.entrypoint_executable",
                 f"{shared_entry.relative_to(repo)} must be executable",
-                check="shared_tests",
+                check="runtime_test",
             )
         )
 
     for shell_path in (shared_entry, shared / "test_helpers.sh"):
         _lint_shell_file(shell_path, findings=findings)
+
+
+def _validate_reserved_control_assets(
+    repo: Path,
+    app_root: str,
+    findings: list[dict[str, str]],
+    *,
+    include_tests: bool,
+) -> None:
+    """Keep production control data out of the generated application tree."""
+    app = repo / app_root
+    if not app.is_dir():
+        return
+    for path in sorted(app.rglob("*")):
+        relative = path.relative_to(app)
+        if relative.parts[0] == "tests" and not include_tests:
+            continue
+        lowered_parts = {part.lower() for part in relative.parts}
+        if not (
+            path.name.lower() in _RESERVED_CONTROL_ASSETS
+            or path.name.lower() in _AGENT_CONTROL_NAMES
+            or lowered_parts & _AGENT_CONTROL_DIRECTORIES
+        ):
+            continue
+        findings.append(
+            _delivery_finding(
+                "scope.reserved_control_asset",
+                "generated candidate must not contain workflow control "
+                f"content: {path.relative_to(repo)}",
+                owner="image_creator",
+            )
+        )
 
 
 def validate_test_contract(
@@ -685,8 +635,7 @@ def validate_test_contract(
     app_root = f"{task.domain}/{task.app}"
     findings: list[dict[str, str]] = []
     for relative, check in (
-        (f"{app_root}/tests/goss.yaml", "dgoss"),
-        (f"{app_root}/tests/test.sh", "shared_tests"),
+        (f"{app_root}/tests/test.sh", "runtime_test"),
     ):
         path = repo / relative
         if not path.is_file() or path.stat().st_size == 0:
@@ -704,13 +653,11 @@ def validate_test_contract(
         if finding["level"] == "delivery_stop"
     ]
     blocked_checks = {finding["check"] for finding in blocking}
-    goss_allowed = "dgoss" not in blocked_checks
-    shared_tests_allowed = "shared_tests" not in blocked_checks
+    runtime_test_allowed = "runtime_test" not in blocked_checks
     return {
         "status": "passed" if not blocking else "failed",
-        "test_allowed": goss_allowed and shared_tests_allowed,
-        "goss_allowed": goss_allowed,
-        "shared_tests_allowed": shared_tests_allowed,
+        "test_allowed": runtime_test_allowed,
+        "runtime_test_allowed": runtime_test_allowed,
         "findings": findings,
         "errors": [finding["message"] for finding in blocking],
     }
@@ -986,6 +933,12 @@ def validate_generated_target(
                     f"generated symlink is forbidden: {path.relative_to(repo)}",
                 )
             )
+    _validate_reserved_control_assets(
+        repo,
+        app_root,
+        findings,
+        include_tests=phase == "image",
+    )
 
     dockerfile = repo / required[-1]
     if dockerfile.is_file():
@@ -1032,9 +985,8 @@ def validate_generated_target(
         test_contract = validate_test_contract(repo=repo, task=task)
         findings.extend(test_contract["findings"])
         test_permissions = {
-            "goss_allowed": test_contract["goss_allowed"] is True,
-            "shared_tests_allowed": (
-                test_contract["shared_tests_allowed"] is True
+            "runtime_test_allowed": (
+                test_contract["runtime_test_allowed"] is True
             ),
         }
 
@@ -1078,10 +1030,7 @@ def validate_final_target(
     repo: Path,
     task: TaskSpec,
     base_sha: str,
-    expected_run_id: str,
 ) -> dict[str, object]:
-    if not _RUN_ID_RE.fullmatch(expected_run_id):
-        raise TargetContractError("expected_run_id must be a positive integer")
     generated = validate_generated_target(
         repo=repo,
         task=task,
@@ -1138,9 +1087,8 @@ def validate_final_target(
 
     try:
         version_info = json.loads((result_dir / "version_info.json").read_text())
-        results = json.loads((result_dir / "results.json").read_text())
     except (OSError, json.JSONDecodeError) as error:
-        raise TargetContractError("final JSON result evidence is invalid") from error
+        raise TargetContractError("final version_info evidence is invalid") from error
     if (
         not isinstance(version_info, dict)
         or set(version_info) != _VERSION_INFO_FIELDS
@@ -1151,32 +1099,8 @@ def validate_final_target(
         raise TargetContractError(
             "version_info.json must contain the 11-field dual-architecture evidence"
         )
-    if (
-        not isinstance(results, dict)
-        or results.get("status") != "passed"
-        or results.get("task_id") != task.task_id
-        or results.get("validated_run_id") != expected_run_id
-        or not str(results.get("artifact_url", "")).startswith("https://")
-    ):
-        raise TargetContractError("results.json does not match the validated run")
-    architectures = results.get("architectures")
-    if not isinstance(architectures, dict) or set(architectures) != {
-        "x86_64",
-        "aarch64",
-    }:
-        raise TargetContractError(
-            "results.json must contain x86_64 and aarch64 evidence"
-        )
-    for architecture, evidence in architectures.items():
-        checks = evidence.get("checks") if isinstance(evidence, dict) else None
-        if not native_checks_pass(checks):
-            raise TargetContractError(
-                f"results.json {architecture} checks did not all pass"
-            )
-
     return {
         **generated,
-        "validated_run_id": expected_run_id,
         "result_dir": result_dir.relative_to(repo).as_posix(),
         "result_bytes": total_bytes,
     }

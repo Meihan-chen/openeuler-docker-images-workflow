@@ -136,15 +136,12 @@ def _format_checker_commit(report: Mapping[str, object]) -> str:
 
 
 def _native_gate_ready(gate: Mapping[str, object]) -> bool:
-    """Build when the image is safe and at least one test can add evidence."""
-    some_test_allowed = gate.get("test_allowed") is True or any(
-        gate.get(name) is True
-        for name in ("goss_allowed", "shared_tests_allowed")
-    )
+    """Build only when the image and its single runtime test are valid."""
     return (
         gate.get("status") == "passed"
         and gate.get("build_allowed") is True
-        and some_test_allowed
+        and gate.get("test_allowed") is True
+        and gate.get("runtime_test_allowed") is True
     )
 
 
@@ -175,7 +172,11 @@ def _raise_for_invalid_gate(gate: Mapping[str, object]) -> None:
         raise NativeRepairError("target contract hard stop: " + ", ".join(reasons))
     missing = [
         key
-        for key in ("build_allowed", "test_allowed")
+        for key in (
+            "build_allowed",
+            "test_allowed",
+            "runtime_test_allowed",
+        )
         if gate.get(key) is not True and gate.get(key) is not False
     ]
     if missing:
@@ -524,8 +525,7 @@ def decide_round(
         raise NativeRepairError("DEEPSEEK_API_KEY is required to repair")
     # One Fixer sees both architectures, so a fix for one cannot silently
     # regress the other — and for the same reason one category cannot speak
-    # for both. A Goss config fault on x86 next to a build failure on ARM must
-    # not be handed over as "do not change the Dockerfile".
+    # for both.
     if all(
         _all_failures_are_infra(result)
         for result in per_architecture.values()
@@ -633,8 +633,6 @@ def validate_native_with_repairs(
     base_sha: str,
     architecture: str,
     run_id: str,
-    dgoss: Path,
-    goss: Path,
     report_path: Path,
     junit_path: Path,
     repair_report_dir: Path,
@@ -693,8 +691,6 @@ def validate_native_with_repairs(
                     task=task,
                     architecture=architecture,
                     run_id=run_id,
-                    dgoss=dgoss,
-                    goss=goss,
                     report_path=report_path,
                     junit_path=junit_path,
                 )

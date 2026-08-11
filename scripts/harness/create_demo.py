@@ -117,20 +117,6 @@ upstream:
         b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc\xf8\x0f\x00\x00\x01\x01\x00\x05\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82'
     )
 
-    # tests/goss.yaml - runtime assertions (per DESIGN §5.3)
-    (tests_dir / "goss.yaml").write_text(f"""file:
-  /usr/sbin/{app}:
-    exists: true
-    mode: "0755"
-package:
-  {app}:
-    installed: true
-port:
-  tcp:80:
-    listening: true
-    timeout: 15000
-""")
-
     # tests/test_helpers.sh
     (tests_dir / "test_helpers.sh").write_text("""wait_for_port() {
     local port=$1 timeout=${2:-30}
@@ -191,7 +177,6 @@ main "$@"
                 f"{domain}/{app}/README.md",
                 f"{domain}/{app}/doc/image-info.yml",
                 f"{domain}/{app}/doc/picture/logo.png",
-                f"{domain}/{app}/tests/goss.yaml",
                 f"{domain}/{app}/tests/test_helpers.sh",
                 f"{domain}/{app}/tests/test.sh",
             ],

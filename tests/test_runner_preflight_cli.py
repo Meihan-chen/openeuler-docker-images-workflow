@@ -15,8 +15,8 @@ def test_collect_snapshot_reads_linux_runner_capabilities(tmp_path):
         json.dumps(
             {
                 "tools": {
-                    "goss": {
-                        "path": "/opt/oe-image-tools/goss/0.4.10/x86_64/goss"
+                    "hadolint": {
+                        "path": "/opt/oe-image-tools/hadolint/2.14.0/x86_64/hadolint"
                     }
                 }
             }
@@ -42,8 +42,8 @@ def test_collect_snapshot_reads_linux_runner_capabilities(tmp_path):
     assert snapshot.memory_available_bytes == 14680064 * 1024
     assert snapshot.disk_free_bytes == 32 * GIB
     assert snapshot.docker_server_version == "27.5.1"
-    assert snapshot.tools["goss"] == Path(
-        "/opt/oe-image-tools/goss/0.4.10/x86_64/goss"
+    assert snapshot.tools["hadolint"] == Path(
+        "/opt/oe-image-tools/hadolint/2.14.0/x86_64/hadolint"
     )
 
 
@@ -52,7 +52,7 @@ def test_preflight_cli_writes_passed_report(tmp_path, monkeypatch):
     from scripts.lib.toolchain import RunnerSnapshot
 
     tools = {}
-    for name in ("dgoss", "goss", "hadolint", "jq", "opencode"):
+    for name in ("hadolint", "jq", "opencode"):
         path = tmp_path / name
         path.write_text("#!/bin/sh\n")
         path.chmod(0o755)

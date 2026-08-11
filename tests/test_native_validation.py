@@ -2,137 +2,9 @@ import json
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
+from pathlib import Path
 
 import pytest
-
-
-class DockerRunner:
-    def __init__(
-        self,
-        *,
-        fail_build=False,
-        failure_text="source compilation failed",
-        fail_dgoss=False,
-        fail_shared_tests=False,
-        container_logs="",
-        container_logs_returncode=0,
-        container_state="exited 1 kvrocks refused to start",
-        container_probe="",
-        container_probe_returncode=0,
-    ):
-        self.fail_build = fail_build
-        self.failure_text = failure_text
-        self.fail_dgoss = fail_dgoss
-        self.fail_shared_tests = fail_shared_tests
-        self.container_logs = container_logs
-        self.container_logs_returncode = container_logs_returncode
-        self.container_state = container_state
-        self.container_probe = container_probe
-        self.container_probe_returncode = container_probe_returncode
-        self.builders = set()
-        self.calls = []
-
-    def __call__(self, command, cwd, env, timeout):
-        command = list(command)
-        self.calls.append(
-            {
-                "command": command,
-                "cwd": cwd,
-                "env": dict(env),
-                "timeout": timeout,
-            }
-        )
-        if command[:2] == ["docker", "logs"]:
-            return subprocess.CompletedProcess(
-                command, self.container_logs_returncode, self.container_logs, ""
-            )
-        if command[:2] == ["docker", "inspect"]:
-            return subprocess.CompletedProcess(
-                command, 0, f"{self.container_state}\n", ""
-            )
-        if (
-            self.fail_dgoss
-            and command[0] != "docker"
-            and command[1:2] == ["run"]
-        ):
-            return subprocess.CompletedProcess(
-                command, 1, "", self.failure_text
-            )
-        if command[:2] == ["docker", "exec"] and "### processes" in command[-1]:
-            return subprocess.CompletedProcess(
-                command, self.container_probe_returncode, self.container_probe, ""
-            )
-        if self.fail_shared_tests and command[:2] == ["docker", "exec"]:
-            return subprocess.CompletedProcess(
-                command, 1, "", "shared test assertion failed"
-            )
-        if command[:3] == ["docker", "buildx", "inspect"]:
-            present = command[3] in self.builders
-            return subprocess.CompletedProcess(
-                command, 0 if present else 1, "", ""
-            )
-        if command[:3] == ["docker", "buildx", "ls"]:
-            output = "\n".join(sorted(self.builders))
-            return subprocess.CompletedProcess(
-                command, 0, f"{output}\n" if output else "", ""
-            )
-        if command[:3] == ["docker", "buildx", "create"]:
-            self.builders.add(command[command.index("--name") + 1])
-            return subprocess.CompletedProcess(command, 0, "", "")
-        if command[:4] == ["docker", "buildx", "rm", "--force"]:
-            self.builders.discard(command[4])
-            return subprocess.CompletedProcess(command, 0, "", "")
-        if self.fail_build and "build" in command:
-            return subprocess.CompletedProcess(
-                command, 1, "", self.failure_text
-            )
-        if command[:3] == ["docker", "image", "inspect"]:
-            return subprocess.CompletedProcess(command, 0, "sha256:image-id\n", "")
-        if "PING" in command:
-            return subprocess.CompletedProcess(command, 0, "PONG\n", "")
-        if "GET" in command:
-            return subprocess.CompletedProcess(command, 0, "run-123456\n", "")
-        return subprocess.CompletedProcess(command, 0, "", "")
-
-
-def test_infrastructure_failure_evidence_preserves_clone_error(tmp_path):
-    from scripts.lib.native_validation import (
-        write_infrastructure_failure_evidence,
-    )
-
-    report_path = tmp_path / "round" / "aarch64.json"
-    junit_path = tmp_path / "round" / "aarch64.junit.xml"
-    failure = (
-        "error: RPC failed; curl 18 transfer closed with outstanding read "
-        "data remaining\nfatal: early EOF"
-    )
-
-    report = write_infrastructure_failure_evidence(
-        task=_task(),
-        architecture="aarch64",
-        failed_stage="target_clone",
-        failure=failure,
-        report_path=report_path,
-        junit_path=junit_path,
-        attempts=2,
-    )
-
-    assert json.loads(report_path.read_text()) == report
-    assert report["status"] == "failed"
-    assert report["failed_stage"] == "target_clone"
-    assert report["failure"] == failure
-    assert report["failure_details"] == {
-        "attempts": 2,
-        "retryable": True,
-    }
-    assert report["checks"] == {
-        "native_build": None,
-        "dgoss": None,
-        "shared_tests": None,
-    }
-    suite = ET.parse(junit_path).getroot()
-    assert suite.attrib["failures"] == "1"
-    assert failure in suite.find("testcase/failure").text
 
 
 def _task():
@@ -149,22 +21,7 @@ def _task():
     )
 
 
-def _generic_task(*, app, domain="Others"):
-    from scripts.lib.task_spec import TaskSpec
-
-    return TaskSpec.from_workflow_dispatch(
-        {
-            "app": app,
-            "version": "1.2.3",
-            "os_version": "24.03-lts-sp4",
-            "domain": domain,
-            "source_url": f"https://github.com/example/{app}/tree/v1.2.3",
-        }
-    )
-
-
 def _git_init(workspace):
-    """A validated workspace is a checkout at base SHA with the patch applied."""
     subprocess.run(["git", "init", "-q", str(workspace)], check=True)
     for key, value in (("user.email", "t@example.com"), ("user.name", "T")):
         subprocess.run(
@@ -187,782 +44,1364 @@ def _workspace(tmp_path):
     image.mkdir(parents=True)
     tests.mkdir(parents=True)
     (image / "Dockerfile").write_text("FROM scratch\n")
-    (tests / "goss.yaml").write_text("{}\n")
-    (tests / "goss_wait.yaml").write_text(
-        "process:\n  sleep:\n    running: true\n"
-    )
-    (tests / "test.sh").write_text("#!/bin/bash\n")
-    (tests / "test.sh").chmod(0o755)
+    test_sh = tests / "test.sh"
+    test_sh.write_text("#!/bin/bash\nexit 0\n")
+    test_sh.chmod(0o755)
     return _git_init(workspace)
 
 
-def _generic_workspace(tmp_path, task, *, service):
-    workspace = tmp_path / "target"
-    image = (
-        workspace
-        / task.domain
-        / task.app
-        / task.version
-        / task.os_version
+def test_infrastructure_failure_evidence_preserves_clone_error(tmp_path):
+    from scripts.lib.native_validation import write_infrastructure_failure_evidence
+
+    report_path = tmp_path / "round" / "aarch64.json"
+    junit_path = tmp_path / "round" / "aarch64.junit.xml"
+    failure = "error: RPC failed; curl 18 transfer closed\nfatal: early EOF"
+
+    report = write_infrastructure_failure_evidence(
+        task=_task(),
+        architecture="aarch64",
+        failed_stage="target_clone",
+        failure=failure,
+        report_path=report_path,
+        junit_path=junit_path,
+        attempts=2,
     )
-    tests = workspace / task.domain / task.app / "tests"
-    image.mkdir(parents=True)
-    tests.mkdir(parents=True)
-    (image / "Dockerfile").write_text("FROM scratch\n")
-    (tests / "goss.yaml").write_text("{}\n")
-    if service:
-        (tests / "goss_wait.yaml").write_text(
-            "process:\n  sleep:\n    running: true\n"
+
+    assert json.loads(report_path.read_text()) == report
+    assert report["checks"] == {
+        "native_build": None,
+        "runtime_test": None,
+    }
+    assert report["failure_details"] == {"attempts": 2, "retryable": True}
+    suite = ET.parse(junit_path).getroot()
+    assert suite.attrib["failures"] == "1"
+    assert failure in suite.find("testcase/failure").text
+
+
+class RuntimeStateRunner:
+    """Small Docker boundary fake for the runtime state-machine contract."""
+
+    def __init__(
+        self,
+        *,
+        healthcheck=None,
+        exposed_ports=None,
+        wait_status="READY_HEALTH",
+        states=None,
+        test_returncode=0,
+        create_returncode=0,
+        start_returncode=0,
+        image_inspect_returncode=0,
+        wait_returncode=None,
+        wait_exception=None,
+        fail_build=False,
+        failure_text="source compilation failed",
+        container_logs="",
+        container_logs_returncode=0,
+        container_state="exited 1 application failed",
+        container_probe="",
+        container_probe_returncode=0,
+        docker_api_version="1.44",
+        docker_api_returncode=0,
+    ):
+        self.healthcheck = healthcheck
+        self.exposed_ports = exposed_ports or {}
+        self.wait_status = wait_status
+        self.states = list(
+            states
+            or [
+                {
+                    "Status": "running",
+                    "ExitCode": 0,
+                    "OOMKilled": False,
+                    "Error": "",
+                    "Health": {"Status": "healthy"},
+                },
+                {
+                    "Status": "running",
+                    "ExitCode": 0,
+                    "OOMKilled": False,
+                    "Error": "",
+                    "Health": {"Status": "healthy"},
+                },
+            ]
         )
-    (tests / "test.sh").write_text("#!/bin/sh\nexit 0\n")
-    (tests / "test.sh").chmod(0o755)
-    return _git_init(workspace)
+        self.test_returncode = test_returncode
+        self.create_returncode = create_returncode
+        self.start_returncode = start_returncode
+        self.image_inspect_returncode = image_inspect_returncode
+        self.wait_returncode = wait_returncode
+        self.wait_exception = wait_exception
+        self.fail_build = fail_build
+        self.failure_text = failure_text
+        self.container_logs = container_logs
+        self.container_logs_returncode = container_logs_returncode
+        self.container_state = container_state
+        self.container_probe = container_probe
+        self.container_probe_returncode = container_probe_returncode
+        self.docker_api_version = docker_api_version
+        self.docker_api_returncode = docker_api_returncode
+        self.builders = set()
+        self.calls = []
+
+    def __call__(self, command, cwd, env, timeout):
+        command = list(command)
+        self.calls.append(command)
+        if command[:2] == ["docker", "logs"]:
+            return subprocess.CompletedProcess(
+                command,
+                self.container_logs_returncode,
+                self.container_logs,
+                "",
+            )
+        if command[:3] == ["docker", "buildx", "inspect"]:
+            return subprocess.CompletedProcess(
+                command, 0 if command[3] in self.builders else 1, "", ""
+            )
+        if command[:3] == ["docker", "buildx", "create"]:
+            self.builders.add(command[command.index("--name") + 1])
+            return subprocess.CompletedProcess(command, 0, "", "")
+        if command[:3] == ["docker", "buildx", "ls"]:
+            output = "\n".join(sorted(self.builders))
+            return subprocess.CompletedProcess(command, 0, output, "")
+        if command[:4] == ["docker", "buildx", "rm", "--force"]:
+            self.builders.discard(command[4])
+            return subprocess.CompletedProcess(command, 0, "", "")
+        if command[:3] == ["docker", "version", "--format"]:
+            return subprocess.CompletedProcess(
+                command,
+                self.docker_api_returncode,
+                self.docker_api_version + "\n"
+                if self.docker_api_returncode == 0
+                else "",
+                "cannot query Docker API" if self.docker_api_returncode else "",
+            )
+        if self.fail_build and command[:3] == ["docker", "buildx", "build"]:
+            return subprocess.CompletedProcess(
+                command, 1, "", self.failure_text
+            )
+        if command[:3] == ["docker", "image", "inspect"]:
+            if "--format" in command:
+                return subprocess.CompletedProcess(
+                    command, 0, "sha256:candidate\n", ""
+                )
+            if self.image_inspect_returncode:
+                return subprocess.CompletedProcess(
+                    command,
+                    self.image_inspect_returncode,
+                    "",
+                    "cannot inspect image",
+                )
+            config = {
+                "Healthcheck": self.healthcheck,
+                "ExposedPorts": self.exposed_ports,
+            }
+            return subprocess.CompletedProcess(
+                command, 0, json.dumps([{"Config": config}]), ""
+            )
+        if command[:3] == ["docker", "inspect", "--format"]:
+            if command[3] != "{{json .State}}":
+                return subprocess.CompletedProcess(
+                    command, 0, self.container_state + "\n", ""
+                )
+            state = self.states.pop(0)
+            if state is None:
+                return subprocess.CompletedProcess(
+                    command, 1, "", "docker inspect unavailable"
+                )
+            return subprocess.CompletedProcess(command, 0, json.dumps(state), "")
+        if command[0].endswith("wait_ready.sh"):
+            if self.wait_exception is not None:
+                raise self.wait_exception
+            returncode = (
+                self.wait_returncode
+                if self.wait_returncode is not None
+                else {"PROBE_TIMEOUT": 2, "RUNTIME_ERROR": 3}.get(
+                    self.wait_status, 0
+                )
+            )
+            return subprocess.CompletedProcess(
+                command, returncode, self.wait_status + "\n", ""
+            )
+        if command[:2] == ["docker", "create"]:
+            return subprocess.CompletedProcess(
+                command,
+                self.create_returncode,
+                "",
+                "cannot create container" if self.create_returncode else "",
+            )
+        if command[:2] == ["docker", "start"]:
+            return subprocess.CompletedProcess(
+                command,
+                self.start_returncode,
+                "",
+                "cannot start container" if self.start_returncode else "",
+            )
+        if command[:2] == ["docker", "exec"]:
+            if "### processes" in command[-1]:
+                return subprocess.CompletedProcess(
+                    command,
+                    self.container_probe_returncode,
+                    self.container_probe,
+                    "",
+                )
+            return subprocess.CompletedProcess(
+                command, self.test_returncode, "test output\n", ""
+            )
+        if command[:2] == ["docker", "run"]:
+            return subprocess.CompletedProcess(
+                command, self.test_returncode, "test output\n", ""
+            )
+        return subprocess.CompletedProcess(command, 0, "", "")
 
 
-def _tools(tmp_path):
-    dgoss = tmp_path / "dgoss"
-    goss = tmp_path / "goss"
-    dgoss.write_text("#!/bin/sh\n")
-    goss.write_text("#!/bin/sh\n")
-    dgoss.chmod(0o755)
-    goss.chmod(0o755)
-    return dgoss, goss
+def _runtime_paths(tmp_path):
+    tests_root = tmp_path / "tests"
+    tests_root.mkdir()
+    waiter = tmp_path / "wait_ready.sh"
+    waiter.write_text("#!/bin/bash\n")
+    waiter.chmod(0o755)
+    return tests_root, waiter
 
 
-def test_native_validation_uses_dedicated_builder_and_generated_runtime_checks(
+def test_runtime_health_api_144_uses_temporary_fast_health_and_tests_once(tmp_path):
+    from scripts.lib.native_validation import _run_runtime_test
+
+    tests_root = tmp_path / "tests"
+    tests_root.mkdir()
+    waiter = tmp_path / "wait_ready.sh"
+    waiter.write_text("#!/bin/bash\n")
+    waiter.chmod(0o755)
+    runner = RuntimeStateRunner(
+        healthcheck={"Test": ["CMD", "true"]},
+        wait_status="READY_HEALTH",
+    )
+
+    result = _run_runtime_test(
+        runner,
+        workspace=tmp_path,
+        image_id="sha256:candidate",
+        tests_root=tests_root,
+        version="1.2.3",
+        container="candidate-default",
+        test_container="candidate-test",
+        run_id="123",
+        waiter=waiter,
+        wait_timeout=90,
+    )
+
+    assert result == {
+        "wait_status": "READY_HEALTH",
+        "carrier": "default",
+        "state": {
+            "Status": "running",
+            "ExitCode": 0,
+            "OOMKilled": False,
+            "Error": "",
+            "Health": {"Status": "healthy"},
+        },
+    }
+    create = next(call for call in runner.calls if call[:2] == ["docker", "create"])
+    assert ["docker", "version", "--format", "{{.Client.APIVersion}}"] in runner.calls
+    assert "--health-interval=1s" in create
+    assert "--health-start-interval=1s" in create
+    assert create[-1] == "sha256:candidate"
+    wait = next(call for call in runner.calls if call[0] == str(waiter))
+    assert wait == [str(waiter), "candidate-default", "90", "health"]
+    test_calls = [
+        call
+        for call in runner.calls
+        if "/opt/oe-tests/test.sh" in call
+    ]
+    assert test_calls == [
+        [
+            "docker",
+            "exec",
+            "--env",
+            "EXPECTED_VERSION=1.2.3",
+            "candidate-default",
+            "/bin/bash",
+            "/opt/oe-tests/test.sh",
+        ]
+    ]
+
+
+def test_runtime_health_api_143_omits_start_interval(tmp_path):
+    from scripts.lib.native_validation import _run_runtime_test
+
+    tests_root, waiter = _runtime_paths(tmp_path)
+    runner = RuntimeStateRunner(
+        healthcheck={"Test": ["CMD", "true"]},
+        docker_api_version="1.43",
+    )
+
+    _run_runtime_test(
+        runner,
+        workspace=tmp_path,
+        image_id="sha256:candidate",
+        tests_root=tests_root,
+        version="1.2.3",
+        container="candidate-default",
+        test_container="candidate-test",
+        run_id="123",
+        waiter=waiter,
+    )
+
+    create = next(call for call in runner.calls if call[:2] == ["docker", "create"])
+    assert ["docker", "version", "--format", "{{.Client.APIVersion}}"] in runner.calls
+    assert "--health-interval=1s" in create
+    assert "--health-start-interval=1s" not in create
+
+
+@pytest.mark.parametrize(
+    ("docker_api_version", "docker_api_returncode"),
+    (("1.44", 1), ("not-a-version", 0)),
+    ids=("query-failed", "unparseable-version"),
+)
+def test_runtime_health_api_unavailable_omits_start_interval(
     tmp_path,
-    capsys,
+    docker_api_version,
+    docker_api_returncode,
 ):
+    from scripts.lib.native_validation import _run_runtime_test
+
+    tests_root, waiter = _runtime_paths(tmp_path)
+    runner = RuntimeStateRunner(
+        healthcheck={"Test": ["CMD", "true"]},
+        docker_api_version=docker_api_version,
+        docker_api_returncode=docker_api_returncode,
+    )
+
+    _run_runtime_test(
+        runner,
+        workspace=tmp_path,
+        image_id="sha256:candidate",
+        tests_root=tests_root,
+        version="1.2.3",
+        container="candidate-default",
+        test_container="candidate-test",
+        run_id="123",
+        waiter=waiter,
+    )
+
+    create = next(call for call in runner.calls if call[:2] == ["docker", "create"])
+    assert ["docker", "version", "--format", "{{.Client.APIVersion}}"] in runner.calls
+    assert "--health-interval=1s" in create
+    assert "--health-start-interval=1s" not in create
+
+
+@pytest.mark.parametrize("default_exit_code", [0, 17])
+def test_runtime_terminal_exit_uses_fresh_test_as_semantic_authority(
+    tmp_path,
+    default_exit_code,
+):
+    from scripts.lib.native_validation import _run_runtime_test
+
+    tests_root, waiter = _runtime_paths(tmp_path)
+    terminal = {
+        "Status": "exited",
+        "ExitCode": default_exit_code,
+        "OOMKilled": False,
+        "Error": "",
+    }
+    runner = RuntimeStateRunner(
+        wait_status="TERMINAL",
+        states=[terminal, terminal],
+    )
+
+    result = _run_runtime_test(
+        runner,
+        workspace=tmp_path,
+        image_id="sha256:candidate",
+        tests_root=tests_root,
+        version="1.2.3",
+        container="candidate-default",
+        test_container="candidate-test",
+        run_id="123",
+        waiter=waiter,
+    )
+
+    assert result["carrier"] == "fresh"
+    test_calls = [
+        call for call in runner.calls if "/opt/oe-tests/test.sh" in call
+    ]
+    assert len(test_calls) == 1
+    assert test_calls[0][:2] == ["docker", "run"]
+
+
+def test_runtime_terminal_fresh_test_failure_fails_validation(tmp_path):
+    from scripts.lib.native_validation import (
+        NativeValidationError,
+        _run_runtime_test,
+    )
+
+    tests_root, waiter = _runtime_paths(tmp_path)
+    terminal = {
+        "Status": "exited",
+        "ExitCode": 0,
+        "OOMKilled": False,
+        "Error": "",
+    }
+    runner = RuntimeStateRunner(
+        wait_status="TERMINAL",
+        states=[terminal, terminal],
+        test_returncode=12,
+    )
+
+    with pytest.raises(NativeValidationError) as raised:
+        _run_runtime_test(
+            runner,
+            workspace=tmp_path,
+            image_id="sha256:candidate",
+            tests_root=tests_root,
+            version="1.2.3",
+            container="candidate-default",
+            test_container="candidate-test",
+            run_id="123",
+            waiter=waiter,
+        )
+
+    assert [item["stage"] for item in raised.value.details["failures"]] == [
+        "test_sh"
+    ]
+
+
+def test_runtime_no_probe_allows_clean_exit_after_test(tmp_path):
+    from scripts.lib.native_validation import _run_runtime_test
+
+    tests_root, waiter = _runtime_paths(tmp_path)
+    runner = RuntimeStateRunner(
+        wait_status="RUNNING_NO_PROBE",
+        states=[
+            {
+                "Status": "running",
+                "ExitCode": 0,
+                "OOMKilled": False,
+                "Error": "",
+            },
+            {
+                "Status": "exited",
+                "ExitCode": 0,
+                "OOMKilled": False,
+                "Error": "",
+            },
+        ],
+    )
+
+    result = _run_runtime_test(
+        runner,
+        workspace=tmp_path,
+        image_id="sha256:candidate",
+        tests_root=tests_root,
+        version="1.2.3",
+        container="candidate-default",
+        test_container="candidate-test",
+        run_id="123",
+        waiter=waiter,
+    )
+
+    assert result["state"]["Status"] == "exited"
+    assert result["state"]["ExitCode"] == 0
+
+
+def test_runtime_health_ready_rejects_post_test_unhealthy_state(tmp_path):
+    from scripts.lib.native_validation import (
+        NativeValidationError,
+        _run_runtime_test,
+    )
+
+    tests_root, waiter = _runtime_paths(tmp_path)
+    runner = RuntimeStateRunner(
+        healthcheck={"Test": ["CMD", "true"]},
+        wait_status="READY_HEALTH",
+        states=[
+            {
+                "Status": "running",
+                "ExitCode": 0,
+                "OOMKilled": False,
+                "Error": "",
+                "Health": {"Status": "healthy"},
+            },
+            {
+                "Status": "running",
+                "ExitCode": 0,
+                "OOMKilled": False,
+                "Error": "",
+                "Health": {"Status": "unhealthy"},
+            },
+        ],
+    )
+
+    with pytest.raises(NativeValidationError) as raised:
+        _run_runtime_test(
+            runner,
+            workspace=tmp_path,
+            image_id="sha256:candidate",
+            tests_root=tests_root,
+            version="1.2.3",
+            container="candidate-default",
+            test_container="candidate-test",
+            run_id="123",
+            waiter=waiter,
+        )
+
+    assert raised.value.details["failures"][-1]["stage"] == "post_inspect"
+
+
+def test_runtime_does_not_retry_when_container_exits_during_same_container_test(
+    tmp_path,
+):
+    from scripts.lib.native_validation import (
+        NativeValidationError,
+        _run_runtime_test,
+    )
+
+    tests_root, waiter = _runtime_paths(tmp_path)
+    runner = RuntimeStateRunner(
+        wait_status="RUNNING_NO_PROBE",
+        states=[
+            {
+                "Status": "running",
+                "ExitCode": 0,
+                "OOMKilled": False,
+                "Error": "",
+            },
+            {
+                "Status": "exited",
+                "ExitCode": 0,
+                "OOMKilled": False,
+                "Error": "",
+            },
+        ],
+        test_returncode=1,
+    )
+
+    with pytest.raises(NativeValidationError):
+        _run_runtime_test(
+            runner,
+            workspace=tmp_path,
+            image_id="sha256:candidate",
+            tests_root=tests_root,
+            version="1.2.3",
+            container="candidate-default",
+            test_container="candidate-test",
+            run_id="123",
+            waiter=waiter,
+        )
+
+    test_calls = [
+        call for call in runner.calls if "/opt/oe-tests/test.sh" in call
+    ]
+    assert len(test_calls) == 1
+    assert test_calls[0][:2] == ["docker", "exec"]
+
+
+def test_runtime_explicit_probe_timeout_tests_once_but_cannot_pass(tmp_path):
+    from scripts.lib.native_validation import (
+        NativeValidationError,
+        _run_runtime_test,
+    )
+
+    tests_root = tmp_path / "tests"
+    tests_root.mkdir()
+    waiter = tmp_path / "wait_ready.sh"
+    waiter.write_text("#!/bin/bash\n")
+    waiter.chmod(0o755)
+    runner = RuntimeStateRunner(
+        healthcheck={"Test": ["CMD-SHELL", "check-ready"]},
+        wait_status="PROBE_TIMEOUT",
+        states=[
+            {
+                "Status": "running",
+                "ExitCode": 0,
+                "OOMKilled": False,
+                "Error": "",
+                "Health": {"Status": "starting"},
+            },
+            {
+                "Status": "running",
+                "ExitCode": 0,
+                "OOMKilled": False,
+                "Error": "",
+                "Health": {"Status": "starting"},
+            },
+        ],
+    )
+
+    with pytest.raises(NativeValidationError) as raised:
+        _run_runtime_test(
+            runner,
+            workspace=tmp_path,
+            image_id="sha256:candidate",
+            tests_root=tests_root,
+            version="1.2.3",
+            container="candidate-default",
+            test_container="candidate-test",
+            run_id="123",
+            waiter=waiter,
+            wait_timeout=90,
+        )
+
+    assert raised.value.details["failures"][0]["stage"] == "wait_healthcheck"
+    assert raised.value.details["wait_status"] == "PROBE_TIMEOUT"
+    assert raised.value.details["test_attempted"] is True
+    assert len(
+        [call for call in runner.calls if "/opt/oe-tests/test.sh" in call]
+    ) == 1
+
+
+@pytest.mark.parametrize(
+    ("oom_killed", "state_error"),
+    [(True, ""), (False, "failed to create task")],
+)
+def test_runtime_oom_or_state_error_is_hard_failure_after_test_attempt(
+    tmp_path,
+    oom_killed,
+    state_error,
+):
+    from scripts.lib.native_validation import (
+        NativeValidationError,
+        _run_runtime_test,
+    )
+
+    tests_root = tmp_path / "tests"
+    tests_root.mkdir()
+    waiter = tmp_path / "wait_ready.sh"
+    waiter.write_text("#!/bin/bash\n")
+    waiter.chmod(0o755)
+    failed_state = {
+        "Status": "exited",
+        "ExitCode": 137 if oom_killed else 1,
+        "OOMKilled": oom_killed,
+        "Error": state_error,
+    }
+    runner = RuntimeStateRunner(
+        healthcheck={"Test": ["CMD", "true"]},
+        wait_status="RUNTIME_ERROR",
+        states=[failed_state, failed_state],
+    )
+
+    with pytest.raises(NativeValidationError) as raised:
+        _run_runtime_test(
+            runner,
+            workspace=tmp_path,
+            image_id="sha256:candidate",
+            tests_root=tests_root,
+            version="1.2.3",
+            container="candidate-default",
+            test_container="candidate-test",
+            run_id="123",
+            waiter=waiter,
+        )
+
+    stages = [failure["stage"] for failure in raised.value.details["failures"]]
+    assert "post_inspect" in stages
+    assert len(
+        [call for call in runner.calls if "/opt/oe-tests/test.sh" in call]
+    ) == 1
+
+
+def test_runtime_preserves_wait_test_and_post_inspect_failures(tmp_path):
+    from scripts.lib.native_validation import (
+        NativeValidationError,
+        _run_runtime_test,
+    )
+
+    tests_root = tmp_path / "tests"
+    tests_root.mkdir()
+    waiter = tmp_path / "wait_ready.sh"
+    waiter.write_text("#!/bin/bash\n")
+    waiter.chmod(0o755)
+    runner = RuntimeStateRunner(
+        healthcheck={"Test": ["CMD", "true"]},
+        wait_status="PROBE_TIMEOUT",
+        states=[
+            {
+                "Status": "running",
+                "ExitCode": 0,
+                "OOMKilled": False,
+                "Error": "",
+                "Health": {"Status": "starting"},
+            },
+            None,
+        ],
+        test_returncode=23,
+    )
+
+    with pytest.raises(NativeValidationError) as raised:
+        _run_runtime_test(
+            runner,
+            workspace=tmp_path,
+            image_id="sha256:candidate",
+            tests_root=tests_root,
+            version="1.2.3",
+            container="candidate-default",
+            test_container="candidate-test",
+            run_id="123",
+            waiter=waiter,
+        )
+
+    assert [
+        failure["stage"] for failure in raised.value.details["failures"]
+    ] == ["wait_healthcheck", "test_sh", "post_inspect"]
+
+
+def test_runtime_create_error_still_attempts_one_fresh_test(tmp_path):
+    from scripts.lib.native_validation import (
+        NativeValidationError,
+        _run_runtime_test,
+    )
+
+    tests_root = tmp_path / "tests"
+    tests_root.mkdir()
+    waiter = tmp_path / "wait_ready.sh"
+    waiter.write_text("#!/bin/bash\n")
+    waiter.chmod(0o755)
+    runner = RuntimeStateRunner(
+        healthcheck=None,
+        wait_status="RUNTIME_ERROR",
+        create_returncode=125,
+    )
+
+    with pytest.raises(NativeValidationError) as raised:
+        _run_runtime_test(
+            runner,
+            workspace=tmp_path,
+            image_id="sha256:candidate",
+            tests_root=tests_root,
+            version="1.2.3",
+            container="candidate-default",
+            test_container="candidate-test",
+            run_id="123",
+            waiter=waiter,
+        )
+
+    assert raised.value.details["failures"][0]["stage"] == "default_start"
+    assert raised.value.details["carrier"] == "fresh"
+    test_calls = [
+        call for call in runner.calls if "/opt/oe-tests/test.sh" in call
+    ]
+    assert len(test_calls) == 1
+    assert test_calls[0][:2] == ["docker", "run"]
+
+
+def test_runtime_tcp_ready_requires_default_container_to_remain_running(tmp_path):
+    from scripts.lib.native_validation import (
+        NativeValidationError,
+        _run_runtime_test,
+    )
+
+    tests_root = tmp_path / "tests"
+    tests_root.mkdir()
+    waiter = tmp_path / "wait_ready.sh"
+    waiter.write_text("#!/bin/bash\n")
+    waiter.chmod(0o755)
+    runner = RuntimeStateRunner(
+        exposed_ports={"8443/tcp": {}, "8080/tcp": {}, "53/udp": {}},
+        wait_status="READY_TCP",
+        states=[
+            {
+                "Status": "running",
+                "ExitCode": 0,
+                "OOMKilled": False,
+                "Error": "",
+            },
+            {
+                "Status": "exited",
+                "ExitCode": 0,
+                "OOMKilled": False,
+                "Error": "",
+            },
+        ],
+    )
+
+    with pytest.raises(NativeValidationError) as raised:
+        _run_runtime_test(
+            runner,
+            workspace=tmp_path,
+            image_id="sha256:candidate",
+            tests_root=tests_root,
+            version="1.2.3",
+            container="candidate-default",
+            test_container="candidate-test",
+            run_id="123",
+            waiter=waiter,
+        )
+
+    assert raised.value.details["failures"][-1]["stage"] == "post_inspect"
+    wait = next(call for call in runner.calls if call[0] == str(waiter))
+    assert wait == [
+        str(waiter),
+        "candidate-default",
+        "90",
+        "tcp",
+        "8080",
+        "8443",
+    ]
+
+
+def test_runtime_no_probe_rejects_nonzero_exit_after_test(tmp_path):
+    from scripts.lib.native_validation import (
+        NativeValidationError,
+        _run_runtime_test,
+    )
+
+    tests_root = tmp_path / "tests"
+    tests_root.mkdir()
+    waiter = tmp_path / "wait_ready.sh"
+    waiter.write_text("#!/bin/bash\n")
+    waiter.chmod(0o755)
+    runner = RuntimeStateRunner(
+        wait_status="RUNNING_NO_PROBE",
+        states=[
+            {
+                "Status": "running",
+                "ExitCode": 0,
+                "OOMKilled": False,
+                "Error": "",
+            },
+            {
+                "Status": "exited",
+                "ExitCode": 9,
+                "OOMKilled": False,
+                "Error": "",
+            },
+        ],
+    )
+
+    with pytest.raises(NativeValidationError) as raised:
+        _run_runtime_test(
+            runner,
+            workspace=tmp_path,
+            image_id="sha256:candidate",
+            tests_root=tests_root,
+            version="1.2.3",
+            container="candidate-default",
+            test_container="candidate-test",
+            run_id="123",
+            waiter=waiter,
+        )
+
+    assert raised.value.details["failures"][-1]["stage"] == "post_inspect"
+
+
+def test_runtime_image_inspect_error_still_attempts_one_fresh_test(tmp_path):
+    from scripts.lib.native_validation import (
+        NativeValidationError,
+        _run_runtime_test,
+    )
+
+    tests_root = tmp_path / "tests"
+    tests_root.mkdir()
+    waiter = tmp_path / "wait_ready.sh"
+    waiter.write_text("#!/bin/bash\n")
+    waiter.chmod(0o755)
+    runner = RuntimeStateRunner(image_inspect_returncode=125)
+
+    with pytest.raises(NativeValidationError) as raised:
+        _run_runtime_test(
+            runner,
+            workspace=tmp_path,
+            image_id="sha256:candidate",
+            tests_root=tests_root,
+            version="1.2.3",
+            container="candidate-default",
+            test_container="candidate-test",
+            run_id="123",
+            waiter=waiter,
+        )
+
+    assert raised.value.details["failures"][0]["stage"] == "default_start"
+    assert raised.value.details["carrier"] == "fresh"
+    test_calls = [
+        call for call in runner.calls if "/opt/oe-tests/test.sh" in call
+    ]
+    assert len(test_calls) == 1
+    assert test_calls[0][:2] == ["docker", "run"]
+
+
+def test_runtime_waiter_process_timeout_still_tests_once(tmp_path):
+    from scripts.lib.native_validation import (
+        NativeValidationError,
+        _run_runtime_test,
+    )
+
+    tests_root = tmp_path / "tests"
+    tests_root.mkdir()
+    waiter = tmp_path / "wait_ready.sh"
+    waiter.write_text("#!/bin/bash\n")
+    waiter.chmod(0o755)
+    runner = RuntimeStateRunner(
+        healthcheck={"Test": ["CMD", "true"]},
+        wait_exception=subprocess.TimeoutExpired([str(waiter)], 100),
+    )
+
+    with pytest.raises(NativeValidationError) as raised:
+        _run_runtime_test(
+            runner,
+            workspace=tmp_path,
+            image_id="sha256:candidate",
+            tests_root=tests_root,
+            version="1.2.3",
+            container="candidate-default",
+            test_container="candidate-test",
+            run_id="123",
+            waiter=waiter,
+        )
+
+    assert raised.value.details["failures"][0]["stage"] == "wait_healthcheck"
+    assert len(
+        [call for call in runner.calls if "/opt/oe-tests/test.sh" in call]
+    ) == 1
+
+
+def test_runtime_rejects_ready_output_from_failed_waiter_process(tmp_path):
+    from scripts.lib.native_validation import (
+        NativeValidationError,
+        _run_runtime_test,
+    )
+
+    tests_root = tmp_path / "tests"
+    tests_root.mkdir()
+    waiter = tmp_path / "wait_ready.sh"
+    waiter.write_text("#!/bin/bash\n")
+    waiter.chmod(0o755)
+    runner = RuntimeStateRunner(
+        healthcheck={"Test": ["CMD", "true"]},
+        wait_status="READY_HEALTH",
+        wait_returncode=3,
+    )
+
+    with pytest.raises(NativeValidationError) as raised:
+        _run_runtime_test(
+            runner,
+            workspace=tmp_path,
+            image_id="sha256:candidate",
+            tests_root=tests_root,
+            version="1.2.3",
+            container="candidate-default",
+            test_container="candidate-test",
+            run_id="123",
+            waiter=waiter,
+        )
+
+    assert raised.value.details["failures"][0]["stage"] == "wait_healthcheck"
+    assert raised.value.details["wait_status"] == "RUNTIME_ERROR"
+    assert len(
+        [call for call in runner.calls if "/opt/oe-tests/test.sh" in call]
+    ) == 1
+
+
+def test_native_validation_reports_only_build_and_runtime_test(tmp_path):
     from scripts.lib.native_validation import validate_native_image
 
     workspace = _workspace(tmp_path)
-    dgoss, goss = _tools(tmp_path)
-    report_path = tmp_path / "reports" / "x86_64.json"
-    junit_path = tmp_path / "reports" / "x86_64.junit.xml"
-    runner = DockerRunner()
+    runner = RuntimeStateRunner(
+        wait_status="RUNNING_NO_PROBE",
+        states=[
+            {
+                "Status": "running",
+                "ExitCode": 0,
+                "OOMKilled": False,
+                "Error": "",
+            },
+            {
+                "Status": "running",
+                "ExitCode": 0,
+                "OOMKilled": False,
+                "Error": "",
+            },
+        ],
+    )
 
     report = validate_native_image(
         workspace=workspace,
         task=_task(),
         architecture="x86_64",
         run_id="123456",
-        dgoss=dgoss,
-        goss=goss,
-        report_path=report_path,
-        junit_path=junit_path,
-        runner=runner,
-        sleep=lambda _: None,
-    )
-
-    assert report["status"] == "passed"
-    assert report["architecture"] == "x86_64"
-    assert report["platform"] == "linux/amd64"
-    assert report["image_id"] == "sha256:image-id"
-    assert set(report["environment"]) == {
-        "test_time",
-        "Model",
-        "architecture",
-        "kernel",
-        "os",
-        "cpu_model",
-        "cpu_cores",
-        "software_name",
-        "software_version",
-        "python_version",
-        "numpy_version",
-    }
-    assert report["environment"]["architecture"] == "x86_64"
-    assert report["environment"]["software_version"] == "2.16.0"
-    assert json.loads(report_path.read_text()) == report
-    suite = ET.parse(junit_path).getroot()
-    assert suite.attrib["failures"] == "0"
-
-    commands = [call["command"] for call in runner.calls]
-    flattened = "\n".join(" ".join(command) for command in commands)
-    assert "docker buildx create" in flattened
-    assert "--driver docker-container" in flattened
-    assert "docker buildx build" in flattened
-    assert "--platform linux/amd64" in flattened
-    dgoss_call = runner.calls[
-        [command[0] for command in commands].index(str(dgoss))
-    ]
-    assert str(dgoss) in dgoss_call["command"][0]
-    assert dgoss_call["env"]["GOSS_FILES_PATH"] == str(
-        workspace / "Database" / "kvrocks" / "tests"
-    )
-    assert dgoss_call["env"]["GOSS_FILE"] == "goss.yaml"
-    assert dgoss_call["env"]["GOSS_WAIT_OPTS"] == "-r 30s -s 1s"
-    assert "GOSS_WAIT_FILE" not in dgoss_call["env"]
-    assert dgoss_call["command"][-3:] == [
-        "--env",
-        "EXPECTED_VERSION=2.16.0",
-        "oe-autopilot/kvrocks:2.16.0-123456-x86-64",
-    ]
-    assert "docker image rm" in flattened
-    assert "system prune" not in flattened
-    assert "setup-qemu" not in flattened
-    # The builder carries this run's layer cache, so it must survive until
-    # release_run_builders runs; --use would also leak it as the runner-wide
-    # default once it is no longer torn down here.
-    assert "docker buildx rm" not in flattened
-    assert "--use" not in flattened
-    output = capsys.readouterr().out
-    markers = [
-        "[flow][native:x86_64] START validation",
-        "[flow][native:x86_64] START build",
-        "[flow][native:x86_64] PASS build",
-        "[flow][native:x86_64] START dgoss",
-        "[flow][native:x86_64] PASS dgoss",
-        "[flow][native:x86_64] PASS validation",
-    ]
-    positions = [output.index(marker) for marker in markers]
-    assert positions == sorted(positions)
-
-
-def test_native_service_uses_test_assets_without_application_hardcoding(
-    tmp_path,
-):
-    from scripts.lib.native_validation import validate_native_image
-
-    task = _generic_task(app="echo-server")
-    workspace = _generic_workspace(tmp_path, task, service=True)
-    dgoss, goss = _tools(tmp_path)
-    runner = DockerRunner()
-
-    report = validate_native_image(
-        workspace=workspace,
-        task=task,
-        architecture="x86_64",
-        run_id="123456",
-        dgoss=dgoss,
-        goss=goss,
         report_path=tmp_path / "reports/x86_64.json",
         junit_path=tmp_path / "reports/x86_64.junit.xml",
         runner=runner,
-        sleep=lambda _: None,
-    )
-
-    assert report["checks"] == {
-        "native_build": True,
-        "dgoss": True,
-        "shared_tests": True,
-    }
-    commands = "\n".join(
-        " ".join(call["command"]) for call in runner.calls
-    ).lower()
-    for application_literal in (
-        "kvrocks",
-        "redis-cli",
-        "6666",
-        "/var/lib/kvrocks",
-    ):
-        assert application_literal not in commands
-    assert "docker run --detach" in commands
-    assert "docker exec" in commands
-
-
-def test_native_cli_runs_shared_tests_without_a_detached_service(tmp_path):
-    from scripts.lib.native_validation import validate_native_image
-
-    task = _generic_task(app="batch-tool", domain="HPC")
-    workspace = _generic_workspace(tmp_path, task, service=False)
-    dgoss, goss = _tools(tmp_path)
-    runner = DockerRunner()
-
-    report = validate_native_image(
-        workspace=workspace,
-        task=task,
-        architecture="aarch64",
-        run_id="123456",
-        dgoss=dgoss,
-        goss=goss,
-        report_path=tmp_path / "reports/aarch64.json",
-        junit_path=tmp_path / "reports/aarch64.junit.xml",
-        runner=runner,
-        sleep=lambda _: None,
     )
 
     assert report["status"] == "passed"
-    assert report["checks"]["shared_tests"] is True
-    commands = [call["command"] for call in runner.calls]
-    assert not any(
-        command[:3] == ["docker", "run", "--detach"]
-        for command in commands
+    assert report["checks"] == {
+        "native_build": True,
+        "runtime_test": True,
+    }
+    runtime_evidence = report["container_evidence"][
+        "oe-e2e-123456-x86-64-runtime"
+    ]
+    assert runtime_evidence["probe"] == (
+        "wait_status=RUNNING_NO_PROBE carrier=default"
     )
-    assert not any(
-        command[:2] == ["docker", "exec"] for command in commands
-    )
-    cli_run = next(
-        command
-        for command in commands
-        if command[:2] == ["docker", "run"]
-        and "--volume" in command
-    )
-    assert cli_run[cli_run.index("--entrypoint") + 1] == "/bin/sh"
-    assert cli_run[cli_run.index("--label") + 1] == (
-        "oe.autopilot.run=123456"
-    )
-    # An explicit command follows the image, so Docker cannot append the
-    # image's original CMD as positional arguments to test.sh.
-    assert cli_run[-2:] == ["-c", "exec /opt/oe-tests/test.sh"]
+    assert runtime_evidence["state"] == "running 0"
+    assert "failures" not in report
+    assert len(
+        [call for call in runner.calls if "/opt/oe-tests/test.sh" in call]
+    ) == 1
 
 
-def test_invalid_goss_contract_skips_only_dgoss(
-    tmp_path,
-):
+def test_native_validation_reports_each_runtime_substage_failure(tmp_path):
     from scripts.lib.native_validation import (
         NativeValidationError,
         validate_native_image,
     )
 
-    task = _generic_task(app="broken-tests")
-    workspace = _generic_workspace(tmp_path, task, service=True)
-    tests = workspace / task.domain / task.app / "tests"
-    (tests / "goss.yaml").write_text("command: [\n")
-    dgoss, goss = _tools(tmp_path)
-    runner = DockerRunner()
+    workspace = _workspace(tmp_path)
     report_path = tmp_path / "reports/x86_64.json"
+    runner = RuntimeStateRunner(
+        healthcheck={"Test": ["CMD", "true"]},
+        wait_status="PROBE_TIMEOUT",
+        states=[
+            {
+                "Status": "running",
+                "ExitCode": 0,
+                "OOMKilled": False,
+                "Error": "",
+                "Health": {"Status": "starting"},
+            },
+            {
+                "Status": "running",
+                "ExitCode": 0,
+                "OOMKilled": False,
+                "Error": "",
+                "Health": {"Status": "starting"},
+            },
+        ],
+        test_returncode=9,
+    )
 
-    with pytest.raises(NativeValidationError, match="test contract"):
+    with pytest.raises(NativeValidationError):
         validate_native_image(
             workspace=workspace,
-            task=task,
+            task=_task(),
             architecture="x86_64",
             run_id="123456",
-            dgoss=dgoss,
-            goss=goss,
             report_path=report_path,
             junit_path=tmp_path / "reports/x86_64.junit.xml",
             runner=runner,
-            sleep=lambda _: None,
         )
 
     report = json.loads(report_path.read_text())
-    assert report["failed_stage"] == "test_contract"
     assert report["checks"] == {
         "native_build": True,
-        "dgoss": False,
-        "shared_tests": True,
+        "runtime_test": False,
     }
-    assert report["failures"][0]["check"] == "dgoss"
-    commands = "\n".join(
-        " ".join(call["command"]) for call in runner.calls
+    assert [failure["stage"] for failure in report["failures"]] == [
+        "wait_healthcheck",
+        "test_sh",
+    ]
+    assert all(
+        failure["check"] == "runtime_test" for failure in report["failures"]
     )
-    assert "docker buildx build" in commands
-    assert str(dgoss) not in commands
-    assert "docker exec" in commands
 
 
-def test_native_validation_failure_still_cleans_exact_resources(tmp_path):
+def test_native_validation_failure_cleans_only_owned_resources(tmp_path):
     from scripts.lib.native_validation import (
         NativeValidationError,
         validate_native_image,
     )
 
-    workspace = _workspace(tmp_path)
-    dgoss, goss = _tools(tmp_path)
-    report_path = tmp_path / "reports" / "aarch64.json"
-    junit_path = tmp_path / "reports" / "aarch64.junit.xml"
-    runner = DockerRunner(fail_build=True)
+    report_path = tmp_path / "reports/aarch64.json"
+    runner = RuntimeStateRunner(fail_build=True)
 
     with pytest.raises(NativeValidationError, match="source compilation failed"):
         validate_native_image(
-            workspace=workspace,
+            workspace=_workspace(tmp_path),
             task=_task(),
             architecture="aarch64",
             run_id="123456",
-            dgoss=dgoss,
-            goss=goss,
             report_path=report_path,
-            junit_path=junit_path,
+            junit_path=tmp_path / "reports/aarch64.junit.xml",
             runner=runner,
-            sleep=lambda _: None,
         )
 
     report = json.loads(report_path.read_text())
-    assert report["status"] == "failed"
-    assert report["architecture"] == "aarch64"
-    suite = ET.parse(junit_path).getroot()
-    assert suite.attrib["failures"] == "1"
-    flattened = "\n".join(
-        " ".join(call["command"]) for call in runner.calls
-    )
-    assert "docker image rm" in flattened
-    assert "system prune" not in flattened
-    # A failed round is exactly when the next round needs the cached builder.
-    assert "docker buildx rm" not in flattened
+    assert report["checks"] == {
+        "native_build": False,
+        "runtime_test": None,
+    }
+    commands = [" ".join(command) for command in runner.calls]
+    assert "docker rm --force oe-e2e-123456-aarch64-runtime" in commands
+    assert "docker rm --force oe-e2e-123456-aarch64-runtime-test" in commands
+    assert any(command.startswith("docker image rm --force") for command in commands)
+    assert not any("system prune" in command for command in commands)
+    assert not any(command.startswith("docker buildx rm") for command in commands)
 
 
-def test_native_validation_failure_keeps_both_ends_of_a_long_log(tmp_path):
-    """The Fixer prompt asks for the earliest error, so a tail is not enough.
-
-    Keeping only the tail hid exactly what the Fixer is told to look for, and
-    a bare string hid the exit code that separates a missing command from a
-    real compile failure.
-    """
+def test_native_build_failure_keeps_both_ends_of_long_output(tmp_path):
     from scripts.lib.native_validation import (
         NativeValidationError,
         validate_native_image,
     )
 
-    workspace = _workspace(tmp_path)
-    dgoss, goss = _tools(tmp_path)
-    report_path = tmp_path / "reports" / "x86_64.json"
     first_error = "CMake Error: could not find libstdc++.a"
     root_cause = "groupadd: GID '999' already exists"
-    runner = DockerRunner(
+    runner = RuntimeStateRunner(
         fail_build=True,
-        failure_text=(
-            first_error + "\n" + ("package progress\n" * 500) + root_cause
-        ),
+        failure_text=first_error + "\n" + ("package progress\n" * 500) + root_cause,
     )
+    report_path = tmp_path / "reports/x86_64.json"
 
     with pytest.raises(NativeValidationError, match="GID '999'"):
         validate_native_image(
-            workspace=workspace,
+            workspace=_workspace(tmp_path),
             task=_task(),
             architecture="x86_64",
             run_id="123456",
-            dgoss=dgoss,
-            goss=goss,
             report_path=report_path,
-            junit_path=tmp_path / "reports" / "x86_64.junit.xml",
+            junit_path=tmp_path / "reports/x86_64.junit.xml",
             runner=runner,
-            sleep=lambda _: None,
         )
 
-    report = json.loads(report_path.read_text())
-    failure = report["failure"]
-    assert first_error in failure
-    assert root_cause in failure
-    details = report["failure_details"]
+    details = json.loads(report_path.read_text())["failure_details"]
     assert first_error in details["stdout_head"]
     assert root_cause in details["stdout_tail"]
     assert details["returncode"] == 1
-    assert "docker buildx build" in " ".join(details["command"])
 
 
-def test_dgoss_failure_does_not_skip_shared_tests(
-    tmp_path,
-):
+def test_format_failure_is_recorded_after_runtime_validation_runs(tmp_path):
     from scripts.lib.native_validation import (
         NativeValidationError,
         validate_native_image,
     )
-
-    workspace = _workspace(tmp_path)
-    dgoss, goss = _tools(tmp_path)
-    report_path = tmp_path / "reports" / "x86_64.json"
-    runner = DockerRunner(fail_dgoss=True, failure_text="goss: invalid Attribute")
-
-    with pytest.raises(NativeValidationError, match="invalid Attribute"):
-        validate_native_image(
-            workspace=workspace,
-            task=_task(),
-            architecture="x86_64",
-            run_id="123456",
-            dgoss=dgoss,
-            goss=goss,
-            report_path=report_path,
-            junit_path=tmp_path / "reports" / "x86_64.junit.xml",
-            runner=runner,
-            sleep=lambda _: None,
-        )
-
-    report = json.loads(report_path.read_text())
-    assert report["failed_stage"] == "dgoss"
-    assert report["checks"] == {
-        "native_build": True,
-        "dgoss": False,
-        "shared_tests": True,
-    }
-    assert [failure["stage"] for failure in report["failures"]] == ["dgoss"]
-    assert any(
-        call["command"][:2] == ["docker", "exec"] for call in runner.calls
-    )
-
-
-def test_native_validation_aggregates_dgoss_and_shared_test_failures(tmp_path):
-    from scripts.lib.native_validation import (
-        NativeValidationError,
-        validate_native_image,
-    )
-
-    workspace = _workspace(tmp_path)
-    dgoss, goss = _tools(tmp_path)
-    report_path = tmp_path / "reports" / "x86_64.json"
-    runner = DockerRunner(
-        fail_dgoss=True,
-        fail_shared_tests=True,
-        failure_text="goss assertion failed",
-    )
-
-    with pytest.raises(NativeValidationError, match="goss assertion failed"):
-        validate_native_image(
-            workspace=workspace,
-            task=_task(),
-            architecture="x86_64",
-            run_id="123456",
-            dgoss=dgoss,
-            goss=goss,
-            report_path=report_path,
-            junit_path=tmp_path / "reports" / "x86_64.junit.xml",
-            runner=runner,
-            sleep=lambda _: None,
-        )
-
-    report = json.loads(report_path.read_text())
-    assert report["checks"] == {
-        "native_build": True,
-        "dgoss": False,
-        "shared_tests": False,
-    }
-    assert [failure["stage"] for failure in report["failures"]] == [
-        "dgoss",
-        "shared_tests",
-    ]
-    assert "goss assertion failed" in report["failures"][0]["failure"]
-    assert "shared test assertion failed" in report["failures"][1]["failure"]
-
-
-def test_invalid_shared_test_contract_does_not_skip_goss(tmp_path):
-    from scripts.lib.native_validation import (
-        NativeValidationError,
-        validate_native_image,
-    )
-
-    workspace = _workspace(tmp_path)
-    (workspace / "Database" / "kvrocks" / "tests" / "test.sh").write_text(
-        "#!/bin/bash\nif true; then\n"
-    )
-    dgoss, goss = _tools(tmp_path)
-    report_path = tmp_path / "reports" / "x86_64.json"
-    runner = DockerRunner()
-
-    with pytest.raises(NativeValidationError, match="test.sh is not valid Bash"):
-        validate_native_image(
-            workspace=workspace,
-            task=_task(),
-            architecture="x86_64",
-            run_id="123456",
-            dgoss=dgoss,
-            goss=goss,
-            report_path=report_path,
-            junit_path=tmp_path / "reports" / "x86_64.junit.xml",
-            runner=runner,
-            sleep=lambda _: None,
-        )
-
-    report = json.loads(report_path.read_text())
-    assert report["checks"] == {
-        "native_build": True,
-        "dgoss": True,
-        "shared_tests": False,
-    }
-    assert report["failures"][0]["check"] == "shared_tests"
-    assert report["failures"][0]["stage"] == "test_contract"
-    assert any(call["command"][0] == str(dgoss) for call in runner.calls)
-
-
-def test_format_failure_is_recorded_but_native_validation_still_runs(tmp_path):
-    from scripts.lib.native_validation import (
-        NativeValidationError,
-        validate_native_image,
-    )
-
-    workspace = _workspace(tmp_path)
-    dgoss, goss = _tools(tmp_path)
-    runner = DockerRunner()
-    report_path = tmp_path / "reports" / "aarch64.json"
 
     def failing_format_check(**_):
         return {
             "status": "failed",
             "kind": "candidate",
             "stage": "execute",
-            "repository": "https://gitcode.com/openeuler/eulerpublisher.git",
             "commit_sha": "a" * 40,
-            "runner_architecture": "aarch64",
-            "compatibility_override": True,
-            "fail_count": 1,
-            "output": "image-info.yml is missing environment",
             "failure": "upstream format check reported 1 failure",
         }
 
+    runner = RuntimeStateRunner(wait_status="RUNNING_NO_PROBE")
+    report_path = tmp_path / "reports/aarch64.json"
+
     with pytest.raises(NativeValidationError, match="format check"):
         validate_native_image(
-            workspace=workspace,
+            workspace=_workspace(tmp_path),
             task=_task(),
             architecture="aarch64",
             run_id="123456",
-            dgoss=dgoss,
-            goss=goss,
             report_path=report_path,
-            junit_path=tmp_path / "reports" / "aarch64.junit.xml",
+            junit_path=tmp_path / "reports/aarch64.junit.xml",
             runner=runner,
-            sleep=lambda _: None,
             format_validator=failing_format_check,
         )
 
     report = json.loads(report_path.read_text())
-    assert report["status"] == "failed"
     assert report["failed_stage"] == "upstream_format"
-    assert report["format_check"]["kind"] == "candidate"
-    assert report["format_check"]["commit_sha"] == "a" * 40
     assert report["checks"] == {
         "native_build": True,
-        "dgoss": True,
-        "shared_tests": True,
+        "runtime_test": True,
     }
-    commands = "\n".join(" ".join(call["command"]) for call in runner.calls)
-    assert "docker buildx build" in commands
-    assert str(dgoss) in commands
-    assert "docker exec" in commands
-
-
-def test_native_validation_failure_captures_container_state_before_cleanup(
-    tmp_path,
-):
-    """When the app dies on startup its own log is the only root-cause source."""
-    from scripts.lib.native_validation import (
-        NativeValidationError,
-        validate_native_image,
+    assert any(
+        command[:3] == ["docker", "buildx", "build"] for command in runner.calls
     )
+    assert len(
+        [command for command in runner.calls if "/opt/oe-tests/test.sh" in command]
+    ) == 1
+
+
+def test_repeated_validation_reuses_run_builder_cache(tmp_path):
+    from scripts.lib.native_validation import validate_native_image
 
     workspace = _workspace(tmp_path)
-    dgoss, goss = _tools(tmp_path)
-    report_path = tmp_path / "reports" / "x86_64.json"
-    runner = DockerRunner(
-        fail_dgoss=True,
-        failure_text="dgoss failed",
-        container_logs="FATAL: cannot bind 0.0.0.0:6666\n",
+    runner = RuntimeStateRunner(
+        wait_status="RUNNING_NO_PROBE",
+        states=[
+            {
+                "Status": "running",
+                "ExitCode": 0,
+                "OOMKilled": False,
+                "Error": "",
+            }
+            for _ in range(4)
+        ],
     )
 
-    with pytest.raises(NativeValidationError):
+    for attempt in (1, 2):
         validate_native_image(
             workspace=workspace,
             task=_task(),
             architecture="x86_64",
             run_id="123456",
-            dgoss=dgoss,
-            goss=goss,
-            report_path=report_path,
-            junit_path=tmp_path / "reports" / "x86_64.junit.xml",
+            report_path=tmp_path / f"reports/{attempt}.json",
+            junit_path=tmp_path / f"reports/{attempt}.xml",
             runner=runner,
-            sleep=lambda _: None,
         )
 
-    evidence = json.loads(report_path.read_text())["container_evidence"]
-    collected = "\n".join(
-        f"{entry['state']}\n{entry['logs']}" for entry in evidence.values()
+    creates = [
+        command
+        for command in runner.calls
+        if command[:3] == ["docker", "buildx", "create"]
+    ]
+    assert len(creates) == 1
+    assert "--use" not in creates[0]
+
+
+def test_report_records_digest_of_validated_candidate(tmp_path):
+    from scripts.lib.native_validation import (
+        validate_native_image,
+        validated_patch_digest,
     )
-    assert "cannot bind 0.0.0.0:6666" in collected
-    assert "kvrocks refused to start" in collected
-    ordered = [" ".join(call["command"]) for call in runner.calls]
-    logs_at = next(i for i, c in enumerate(ordered) if c.startswith("docker logs"))
-    removed_at = next(
-        i for i, c in enumerate(ordered) if c.startswith("docker rm --force")
+
+    workspace = _workspace(tmp_path)
+    dockerfile = (
+        workspace
+        / "Database"
+        / "kvrocks"
+        / "2.16.0"
+        / "24.03-lts-sp4"
+        / "Dockerfile"
     )
-    assert logs_at < removed_at
+    dockerfile.write_text("FROM scratch\nLABEL candidate=yes\n")
+    expected = validated_patch_digest(workspace)
+
+    report = validate_native_image(
+        workspace=workspace,
+        task=_task(),
+        architecture="x86_64",
+        run_id="123456",
+        report_path=tmp_path / "reports/x86_64.json",
+        junit_path=tmp_path / "reports/x86_64.xml",
+        runner=RuntimeStateRunner(wait_status="RUNNING_NO_PROBE"),
+    )
+
+    assert report["validated_patch_sha256"] == expected
 
 
-def test_native_validation_failure_probes_inside_the_container(tmp_path):
-    """docker logs can carry the symptom while the cause stays in the image.
+def _failing_runtime_runner(**overrides):
+    options = {
+        "healthcheck": {"Test": ["CMD", "true"]},
+        "wait_status": "PROBE_TIMEOUT",
+        "states": [
+            {
+                "Status": "running",
+                "ExitCode": 0,
+                "OOMKilled": False,
+                "Error": "",
+                "Health": {"Status": "starting"},
+            },
+            {
+                "Status": "running",
+                "ExitCode": 0,
+                "OOMKilled": False,
+                "Error": "",
+                "Health": {"Status": "starting"},
+            },
+        ],
+    }
+    options.update(overrides)
+    return RuntimeStateRunner(**options)
 
-    Run 31106121623 got two lines -- "export properties error" and a missing
-    kylin.out -- and the Fixer then spent 22 minutes rebuilding Kylin locally
-    to read a shell.stderr the container already held.
-    """
+
+def _run_expected_runtime_failure(tmp_path, runner):
     from scripts.lib.native_validation import (
         NativeValidationError,
         validate_native_image,
     )
 
-    workspace = _workspace(tmp_path)
-    dgoss, goss = _tools(tmp_path)
-    report_path = tmp_path / "reports" / "x86_64.json"
-    runner = DockerRunner(
-        fail_dgoss=True,
-        failure_text="dgoss failed",
-        container_logs="export properties error\n",
+    report_path = tmp_path / "reports/x86_64.json"
+    with pytest.raises(NativeValidationError):
+        validate_native_image(
+            workspace=_workspace(tmp_path),
+            task=_task(),
+            architecture="x86_64",
+            run_id="123456",
+            report_path=report_path,
+            junit_path=tmp_path / "reports/x86_64.junit.xml",
+            runner=runner,
+        )
+    return report_path, json.loads(report_path.read_text())
+
+
+def test_runtime_failure_captures_state_logs_and_probe_before_cleanup(tmp_path):
+    runner = _failing_runtime_runner(
+        container_state="exited 1 application refused to start",
+        container_logs="FATAL: cannot bind 0.0.0.0:6666\n",
         container_probe=(
             "### processes\n"
-            "UID  PID  CMD\n"
-            "### /home/kylin/apache-kylin-5.0.3-bin/logs/shell.stderr\n"
-            "java.lang.ClassNotFoundException: org.apache.commons.io.FileUtils\n"
+            "UID PID CMD\n"
+            "### /app/logs/service.stderr\n"
+            "ClassNotFoundException: missing dependency\n"
         ),
     )
 
-    with pytest.raises(NativeValidationError):
-        validate_native_image(
-            workspace=workspace,
-            task=_task(),
-            architecture="x86_64",
-            run_id="123456",
-            dgoss=dgoss,
-            goss=goss,
-            report_path=report_path,
-            junit_path=tmp_path / "reports" / "x86_64.junit.xml",
-            runner=runner,
-            sleep=lambda _: None,
-        )
+    report_path, report = _run_expected_runtime_failure(tmp_path, runner)
 
-    evidence = json.loads(report_path.read_text())["container_evidence"]
-    probes = "\n".join(str(entry["probe"]) for entry in evidence.values())
-    assert "shell.stderr" in probes
-    assert "ClassNotFoundException" in probes
-
-    runtime = next(name for name in evidence if name.endswith("runtime"))
-    saved = report_path.parent / evidence[runtime]["full_probe"]["path"]
-    assert saved.name == f"{runtime}.probe.log"
-    assert "ClassNotFoundException" in saved.read_text()
-    assert evidence[runtime]["full_probe"]["capture_status"] == "complete"
-
-    probe_at = next(
-        index
-        for index, call in enumerate(runner.calls)
-        if call["command"][:2] == ["docker", "exec"]
-        and "### processes" in call["command"][-1]
+    evidence = report["container_evidence"]
+    combined = "\n".join(
+        f"{entry['state']}\n{entry['logs']}\n{entry['probe']}"
+        for entry in evidence.values()
     )
-    removed_at = next(
-        index
-        for index, call in enumerate(runner.calls)
-        if " ".join(call["command"]).startswith("docker rm --force")
-    )
-    assert probe_at < removed_at
-
-
-def test_container_probe_searches_by_shape_not_by_application(tmp_path):
-    """The probe cannot know an image's log layout, so it must not assume one."""
-    from scripts.lib.native_validation import _probe_script
-
-    script = _probe_script()
-
-    for root in ("/opt", "/home", "/var/log"):
-        assert root in script
-    for pattern in ("*.log", "*.stderr"):
-        assert pattern in script
-    assert "kylin" not in script.lower()
-    # Best-effort throughout: an unusual image still returns what it could.
-    assert "2>/dev/null" in script
-
-
-def test_container_probe_bounds_its_walk_on_a_bigdata_image():
-    """A Spark tree holds tens of thousands of files the probe must not walk."""
-    from scripts.lib.native_validation import _probe_script
-
-    script = _probe_script()
-
-    assert "-xdev" in script
-    assert "-maxdepth 6" in script
-    assert "-mmin -180" in script
-    # head closes the pipe, which ends find once the quota is met.
-    assert "head -n 20" in script
-
-
-def test_native_validation_failure_saves_complete_container_evidence_artifacts(
-    tmp_path,
-):
-    from scripts.lib.native_validation import (
-        NativeValidationError,
-        validate_native_image,
-    )
-
-    workspace = _workspace(tmp_path)
-    dgoss, goss = _tools(tmp_path)
-    report_path = tmp_path / "reports" / "x86_64.json"
-    container_logs = "".join(f"line-{index:03d}\n" for index in range(250))
-    runner = DockerRunner(
-        fail_dgoss=True,
-        failure_text="dgoss failed",
-        container_logs=container_logs,
-    )
-
-    with pytest.raises(NativeValidationError):
-        validate_native_image(
-            workspace=workspace,
-            task=_task(),
-            architecture="x86_64",
-            run_id="123456",
-            dgoss=dgoss,
-            goss=goss,
-            report_path=report_path,
-            junit_path=tmp_path / "reports" / "x86_64.junit.xml",
-            runner=runner,
-            sleep=lambda _: None,
-        )
-
-    report = json.loads(report_path.read_text())
+    assert "application refused to start" in combined
+    assert "cannot bind 0.0.0.0:6666" in combined
+    assert "ClassNotFoundException" in combined
     runtime = "oe-e2e-123456-x86-64-runtime"
-    evidence = report["container_evidence"][runtime]
-    log_metadata = evidence["full_logs"]
-    log_path = report_path.parent / log_metadata["path"]
-    assert log_path.read_text() == container_logs
-    assert log_metadata["size_bytes"] == len(container_logs.encode())
-    assert log_metadata["capture_status"] == "complete"
-    assert set(log_metadata) == {"path", "size_bytes", "capture_status"}
+    probe_path = report_path.parent / evidence[runtime]["full_probe"]["path"]
+    assert "ClassNotFoundException" in probe_path.read_text()
+    logs_at = next(
+        index
+        for index, command in enumerate(runner.calls)
+        if command[:2] == ["docker", "logs"]
+    )
+    cleanup_at = next(
+        index
+        for index, command in enumerate(runner.calls)
+        if command[:3] == ["docker", "rm", "--force"]
+    )
+    assert logs_at < cleanup_at
+
+
+def test_runtime_failure_saves_complete_logs_but_reports_bounded_summary(tmp_path):
+    container_logs = "".join(f"line-{index:03d}\n" for index in range(250))
+    runner = _failing_runtime_runner(container_logs=container_logs)
+    report_path, report = _run_expected_runtime_failure(tmp_path, runner)
+
+    evidence = report["container_evidence"]["oe-e2e-123456-x86-64-runtime"]
+    metadata = evidence["full_logs"]
+    saved = report_path.parent / metadata["path"]
+    assert saved.read_text() == container_logs
+    assert metadata == {
+        "path": metadata["path"],
+        "size_bytes": len(container_logs.encode()),
+        "capture_status": "complete",
+    }
     assert "line-000" not in evidence["logs"]
     assert "line-249" in evidence["logs"]
-
-    assert "full_inspect" not in evidence
-    docker_log_commands = [
-        call["command"]
-        for call in runner.calls
-        if call["command"][:2] == ["docker", "logs"]
+    log_commands = [
+        command for command in runner.calls if command[:2] == ["docker", "logs"]
     ]
-    assert docker_log_commands
-    assert all("--tail" not in command for command in docker_log_commands)
+    assert log_commands
+    assert all("--tail" not in command for command in log_commands)
 
 
-def test_native_validation_marks_timed_out_container_logs_as_incomplete(tmp_path):
-    from scripts.lib.native_validation import (
-        NativeValidationError,
-        validate_native_image,
+def test_runtime_failure_marks_timed_out_log_capture_incomplete(tmp_path):
+    _, report = _run_expected_runtime_failure(
+        tmp_path,
+        _failing_runtime_runner(
+            container_logs="partial log\n",
+            container_logs_returncode=124,
+        ),
     )
 
-    workspace = _workspace(tmp_path)
-    dgoss, goss = _tools(tmp_path)
-    report_path = tmp_path / "reports" / "x86_64.json"
-    runner = DockerRunner(
-        fail_dgoss=True,
-        container_logs="partial log\n",
-        container_logs_returncode=124,
-    )
-
-    with pytest.raises(NativeValidationError):
-        validate_native_image(
-            workspace=workspace,
-            task=_task(),
-            architecture="x86_64",
-            run_id="123456",
-            dgoss=dgoss,
-            goss=goss,
-            report_path=report_path,
-            junit_path=tmp_path / "reports" / "x86_64.junit.xml",
-            runner=runner,
-            sleep=lambda _: None,
-        )
-
-    runtime = "oe-e2e-123456-x86-64-runtime"
-    metadata = json.loads(report_path.read_text())["container_evidence"][runtime][
-        "full_logs"
-    ]
+    metadata = report["container_evidence"][
+        "oe-e2e-123456-x86-64-runtime"
+    ]["full_logs"]
     assert metadata["capture_status"] == "timeout"
     assert set(metadata) == {"path", "size_bytes", "capture_status"}
 
 
-def test_container_evidence_failure_does_not_replace_native_report(
+def test_evidence_capture_failure_does_not_replace_runtime_report(
     tmp_path,
     monkeypatch,
 ):
     from scripts.lib import native_validation
 
-    workspace = _workspace(tmp_path)
-    dgoss, goss = _tools(tmp_path)
-    report_path = tmp_path / "reports" / "x86_64.json"
-    runner = DockerRunner(fail_dgoss=True, container_logs="application failed\n")
-
-    def fail_evidence_write(**kwargs):
+    def fail_evidence_write(**_):
         raise OSError("diagnostics unavailable")
 
     monkeypatch.setattr(
@@ -970,27 +1409,31 @@ def test_container_evidence_failure_does_not_replace_native_report(
         "_write_full_evidence",
         fail_evidence_write,
     )
-
-    with pytest.raises(native_validation.NativeValidationError):
-        native_validation.validate_native_image(
-            workspace=workspace,
-            task=_task(),
-            architecture="x86_64",
-            run_id="123456",
-            dgoss=dgoss,
-            goss=goss,
-            report_path=report_path,
-            junit_path=tmp_path / "reports" / "x86_64.junit.xml",
-            runner=runner,
-            sleep=lambda _: None,
-        )
-
-    report = json.loads(report_path.read_text())
-    assert report["status"] == "failed"
-    assert report["failed_stage"] == "dgoss"
-    assert report["container_evidence"]["capture_error"] == (
-        "diagnostics unavailable"
+    _, report = _run_expected_runtime_failure(
+        tmp_path,
+        _failing_runtime_runner(container_logs="application failed\n"),
     )
+
+    assert report["status"] == "failed"
+    assert report["failed_stage"] == "wait_healthcheck"
+    assert report["container_evidence"] == {
+        "capture_error": "diagnostics unavailable"
+    }
+
+
+def test_container_probe_is_generic_and_bounded():
+    from scripts.lib.native_validation import _probe_script
+
+    script = _probe_script()
+    for root in ("/opt", "/home", "/var/log"):
+        assert root in script
+    for pattern in ("*.log", "*.stderr"):
+        assert pattern in script
+    assert "-xdev" in script
+    assert "-maxdepth 6" in script
+    assert "-mmin -180" in script
+    assert "head -n 20" in script
+    assert "kvrocks" not in script.lower()
 
 
 def test_full_evidence_metadata_is_minimal(tmp_path):
@@ -1010,20 +1453,16 @@ def test_full_evidence_metadata_is_minimal(tmp_path):
     }
 
 
-def test_streamed_command_evidence_writes_output_directly_to_file(tmp_path):
-    from scripts.lib import native_validation
+def test_streamed_command_evidence_writes_directly_to_file(tmp_path):
+    from scripts.lib.native_validation import _stream_command_evidence
 
-    capture = getattr(native_validation, "_stream_command_evidence", None)
-    assert callable(capture)
-    path = tmp_path / "diagnostics" / "runtime.docker.log"
-    command = [
-        sys.executable,
-        "-c",
-        "for index in range(10000): print(f'line-{index:05d}')",
-    ]
-
-    metadata, summary = capture(
-        command=command,
+    path = tmp_path / "diagnostics/runtime.docker.log"
+    metadata, summary = _stream_command_evidence(
+        command=[
+            sys.executable,
+            "-c",
+            "for index in range(10000): print(f'line-{index:05d}')",
+        ],
         cwd=tmp_path,
         artifact_root=tmp_path,
         path=path,
@@ -1035,238 +1474,51 @@ def test_streamed_command_evidence_writes_output_directly_to_file(tmp_path):
     assert payload.endswith(b"line-09999\n")
     assert metadata["size_bytes"] == len(payload)
     assert metadata["capture_status"] == "complete"
-    assert set(metadata) == {"path", "size_bytes", "capture_status"}
     assert "line-00000" not in summary
     assert "line-09999" in summary
 
 
-def test_native_pipeline_smoke_builds_and_runs_dgoss_without_ai(
-    tmp_path,
-):
-    from scripts.lib.native_validation import validate_native_smoke
-
-    workspace = _git_init(tmp_path / "target")
-    dgoss, goss = _tools(tmp_path)
-    runner = DockerRunner()
-    report_path = tmp_path / "reports" / "x86_64.json"
-    junit_path = tmp_path / "reports" / "x86_64.junit.xml"
-    repair_dir = tmp_path / "reports" / "agents"
-
-    report = validate_native_smoke(
-        workspace=workspace,
-        task=_task(),
-        architecture="x86_64",
-        run_id="123456",
-        dgoss=dgoss,
-        goss=goss,
-        report_path=report_path,
-        junit_path=junit_path,
-        repair_report_dir=repair_dir,
-        runner=runner,
-    )
-
-    assert report["status"] == "passed"
-    assert report["checks"] == {
-        "native_build": True,
-        "dgoss": True,
-        "shared_tests": True,
-    }
-    commands = "\n".join(
-        " ".join(call["command"]) for call in runner.calls
-    )
-    assert "docker buildx build" in commands
-    assert str(dgoss) in commands
-    assert "docker image inspect" in commands
-    assert "docker image rm" in commands
-    assert "docker buildx rm" not in commands
-    assert "docker exec" in commands
-    dgoss_calls = [
-        call for call in runner.calls if call["command"][0] == str(dgoss)
-    ]
-    assert len(dgoss_calls) == 2
-    assert {
-        call["env"]["GOSS_FILES_PATH"].rsplit("/", 1)[-1]
-        for call in dgoss_calls
-    } == {"service", "cli"}
-    assert all(call["env"]["GOSS_FILE"] == "goss.yaml" for call in dgoss_calls)
-    cli_shared_test = next(
-        call["command"]
-        for call in runner.calls
-        if call["command"][:2] == ["docker", "run"]
-        and "exec /opt/oe-tests/test.sh" in call["command"]
-    )
-    assert cli_shared_test[-2:] == ["-c", "exec /opt/oe-tests/test.sh"]
-    assert (
-        repair_dir / "native-repair-x86_64.json"
-    ).is_file()
-
-
-def test_smoke_format_failure_does_not_skip_native_plumbing(tmp_path):
-    from scripts.lib.native_validation import (
-        NativeValidationError,
-        validate_native_smoke,
-    )
-
-    workspace = _git_init(tmp_path / "target")
-    dgoss, goss = _tools(tmp_path)
-    runner = DockerRunner()
-    report_path = tmp_path / "reports" / "x86_64.json"
-
-    def failing_format_check(**_):
-        return {
-            "status": "failed",
-            "kind": "candidate",
-            "stage": "execute",
-            "commit_sha": "a" * 40,
-            "failure": "upstream format check reported 1 failure",
-        }
-
-    with pytest.raises(NativeValidationError, match="format check"):
-        validate_native_smoke(
-            workspace=workspace,
-            task=_task(),
-            architecture="x86_64",
-            run_id="123456",
-            dgoss=dgoss,
-            goss=goss,
-            report_path=report_path,
-            junit_path=tmp_path / "reports" / "x86_64.junit.xml",
-            repair_report_dir=tmp_path / "reports" / "agents",
-            runner=runner,
-            format_validator=failing_format_check,
-        )
-
-    report = json.loads(report_path.read_text())
-    assert report["failed_stage"] == "upstream_format"
-    assert report["format_check"]["commit_sha"] == "a" * 40
-    assert report["checks"] == {
-        "native_build": True,
-        "dgoss": True,
-        "shared_tests": True,
-    }
-
-
-def test_repeated_validation_reuses_the_run_builder_and_its_layer_cache(
-    tmp_path,
-):
-    from scripts.lib.native_validation import validate_native_image
-
-    workspace = _workspace(tmp_path)
-    dgoss, goss = _tools(tmp_path)
-    runner = DockerRunner()
-
-    for attempt in range(2):
-        validate_native_image(
-            workspace=workspace,
-            task=_task(),
-            architecture="x86_64",
-            run_id="123456",
-            dgoss=dgoss,
-            goss=goss,
-            report_path=tmp_path / f"reports/{attempt}/x86_64.json",
-            junit_path=tmp_path / f"reports/{attempt}/x86_64.junit.xml",
-            runner=runner,
-            sleep=lambda _: None,
-        )
-
-    commands = [call["command"] for call in runner.calls]
-    creates = [command for command in commands if command[:3] == [
-        "docker", "buildx", "create",
-    ]]
-    inspects = [command for command in commands if command[:3] == [
-        "docker", "buildx", "inspect",
-    ]]
-    # A repair round re-enters validation; recreating the builder would throw
-    # away the cached builder stage and rebuild from source every round.
-    assert len(inspects) == 2
-    assert len(creates) == 1
-    assert creates[0][creates[0].index("--name") + 1] == (
-        "oe-e2e-123456-x86-64-builder"
-    )
-
-
-def test_report_records_the_candidate_content_that_was_validated(tmp_path):
-    from scripts.lib.native_validation import validate_native_image
-
-    workspace = _workspace(tmp_path)
-    dgoss, goss = _tools(tmp_path)
-
-    def _validate(attempt):
-        return validate_native_image(
-            workspace=workspace,
-            task=_task(),
-            architecture="x86_64",
-            run_id="123456",
-            dgoss=dgoss,
-            goss=goss,
-            report_path=tmp_path / f"reports/{attempt}/x86_64.json",
-            junit_path=tmp_path / f"reports/{attempt}/x86_64.junit.xml",
-            runner=DockerRunner(),
-            sleep=lambda _: None,
-        )
-
-    before = _validate(0)["validated_patch_sha256"]
-    dockerfile = (
-        workspace / "Database" / "kvrocks" / "2.16.0" / "24.03-lts-sp4"
-        / "Dockerfile"
-    )
-    dockerfile.write_text("FROM scratch\nRUN true\n")
-    after = _validate(1)["validated_patch_sha256"]
-
-    assert len(before) == 64
-    # A Fixer edit between rounds must be visible in the recorded digest,
-    # otherwise the digest cannot prove what each architecture validated.
-    assert before != after
-
-
-def test_release_run_builders_frees_exactly_this_run_on_one_architecture(
-    tmp_path,
-):
+def test_release_run_builders_removes_only_current_run_and_architecture(tmp_path):
     from scripts.lib.native_validation import release_run_builders
 
-    runner = DockerRunner()
+    runner = RuntimeStateRunner()
+    owned = {
+        "oe-e2e-123456-x86-64-builder",
+        "oe-smoke-123456-x86-64-builder",
+    }
     runner.builders.update(
-        {
+        owned
+        | {
+            "oe-e2e-999999-x86-64-builder",
             "oe-e2e-123456-aarch64-builder",
-            "oe-smoke-123456-aarch64-builder",
         }
     )
 
-    report = release_run_builders(
+    result = release_run_builders(
         run_id="123456",
-        architecture="aarch64",
+        architecture="x86_64",
         workspace=tmp_path,
         runner=runner,
     )
 
-    removed = [
-        call["command"][4]
-        for call in runner.calls
-        if call["command"][:4] == ["docker", "buildx", "rm", "--force"]
-    ]
-    assert removed == [
-        "oe-e2e-123456-aarch64-builder",
-        "oe-smoke-123456-aarch64-builder",
-    ]
-    assert report["released_builders"] == removed
-    assert report["status"] == "passed"
+    assert set(result["released_builders"]) == owned
+    assert owned.isdisjoint(runner.builders)
+    assert "oe-e2e-999999-x86-64-builder" in runner.builders
+    assert "oe-e2e-123456-aarch64-builder" in runner.builders
 
 
 @pytest.mark.parametrize("failure", ["list", "remove"])
-def test_release_run_builders_reports_buildx_failures(tmp_path, failure):
+def test_release_run_builders_propagates_buildx_failures(tmp_path, failure):
     from scripts.lib.native_validation import (
         NativeValidationError,
         release_run_builders,
     )
 
-    class FailingReleaseRunner(DockerRunner):
+    class FailingReleaseRunner(RuntimeStateRunner):
         def __call__(self, command, cwd, env, timeout):
             command = list(command)
-            if failure == "list" and command[:3] == [
-                "docker",
-                "buildx",
-                "ls",
-            ]:
+            if failure == "list" and command[:3] == ["docker", "buildx", "ls"]:
+                self.calls.append(command)
                 return subprocess.CompletedProcess(
                     command, 1, "", "cannot connect to Docker daemon"
                 )
@@ -1276,6 +1528,7 @@ def test_release_run_builders_reports_buildx_failures(tmp_path, failure):
                 "rm",
                 "--force",
             ]:
+                self.calls.append(command)
                 return subprocess.CompletedProcess(
                     command, 1, "", "failed to remove builder"
                 )
@@ -1300,21 +1553,21 @@ def test_release_run_builders_reports_buildx_failures(tmp_path, failure):
         )
 
 
-def test_release_run_builders_allows_missing_run_builders(tmp_path):
+def test_release_run_builders_allows_missing_owned_builders(tmp_path):
     from scripts.lib.native_validation import release_run_builders
 
-    report = release_run_builders(
+    result = release_run_builders(
         run_id="123456",
         architecture="x86_64",
         workspace=tmp_path,
-        runner=DockerRunner(),
+        runner=RuntimeStateRunner(),
     )
 
-    assert report["released_builders"] == []
+    assert result["released_builders"] == []
 
 
 @pytest.mark.parametrize("run_id", ["", "0", "abc", "12x"])
-def test_release_run_builders_rejects_an_unusable_run_id(tmp_path, run_id):
+def test_release_run_builders_rejects_invalid_run_id(tmp_path, run_id):
     from scripts.lib.native_validation import (
         NativeValidationError,
         release_run_builders,
@@ -1325,34 +1578,176 @@ def test_release_run_builders_rejects_an_unusable_run_id(tmp_path, run_id):
             run_id=run_id,
             architecture="x86_64",
             workspace=tmp_path,
-            runner=DockerRunner(),
+            runner=RuntimeStateRunner(),
         )
 
 
 @pytest.mark.parametrize("architecture", ["amd64", "arm64", "../x86_64"])
 def test_native_validation_rejects_non_runner_architecture_names(
-    tmp_path, architecture
+    tmp_path,
+    architecture,
 ):
     from scripts.lib.native_validation import (
         NativeValidationError,
         validate_native_image,
     )
 
-    workspace = _workspace(tmp_path)
-    dgoss, goss = _tools(tmp_path)
-    runner = DockerRunner()
-
+    runner = RuntimeStateRunner()
     with pytest.raises(NativeValidationError, match="architecture"):
         validate_native_image(
-            workspace=workspace,
+            workspace=tmp_path,
             task=_task(),
             architecture=architecture,
             run_id="123456",
-            dgoss=dgoss,
-            goss=goss,
             report_path=tmp_path / "report.json",
             junit_path=tmp_path / "report.xml",
             runner=runner,
         )
 
     assert runner.calls == []
+
+
+class RuntimeSmokeRunner:
+    def __init__(self):
+        self.calls = []
+
+    @staticmethod
+    def _mode(value):
+        for mode in (
+            "health-ready",
+            "terminal",
+            "no-probe",
+            "probe-timeout",
+        ):
+            if mode in value:
+                return mode
+        return ""
+
+    def __call__(self, command, cwd, env, timeout):
+        command = list(command)
+        self.calls.append(command)
+        if command[:3] == ["docker", "buildx", "inspect"]:
+            return subprocess.CompletedProcess(command, 0, "", "")
+        if command[:3] == ["docker", "image", "inspect"]:
+            mode = self._mode(" ".join(command))
+            if "--format" in command:
+                return subprocess.CompletedProcess(command, 0, f"sha256:{mode}\n", "")
+            healthcheck = (
+                {"Test": ["CMD", "true"]}
+                if mode in {"health-ready", "probe-timeout"}
+                else None
+            )
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                json.dumps(
+                    [
+                        {
+                            "Config": {
+                                "Healthcheck": healthcheck,
+                                "ExposedPorts": {},
+                            }
+                        }
+                    ]
+                ),
+                "",
+            )
+        if command[0].endswith("wait_ready.sh"):
+            mode = self._mode(command[1])
+            status = {
+                "health-ready": "READY_HEALTH",
+                "terminal": "TERMINAL",
+                "no-probe": "RUNNING_NO_PROBE",
+                "probe-timeout": "PROBE_TIMEOUT",
+            }[mode]
+            return subprocess.CompletedProcess(
+                command, 2 if status == "PROBE_TIMEOUT" else 0, status + "\n", ""
+            )
+        if command[:3] == ["docker", "inspect", "--format"]:
+            mode = self._mode(command[-1])
+            state = {
+                "Status": "exited" if mode == "terminal" else "running",
+                "ExitCode": 7 if mode == "terminal" else 0,
+                "OOMKilled": False,
+                "Error": "",
+            }
+            if mode in {"health-ready", "probe-timeout"}:
+                state["Health"] = {
+                    "Status": "healthy" if mode == "health-ready" else "starting"
+                }
+            return subprocess.CompletedProcess(command, 0, json.dumps(state), "")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+
+def test_native_smoke_covers_all_runtime_carriers_without_external_tools(tmp_path):
+    from scripts.lib.native_validation import validate_native_smoke
+
+    workspace = _workspace(tmp_path)
+    runner = RuntimeSmokeRunner()
+
+    report = validate_native_smoke(
+        workspace=workspace,
+        task=_task(),
+        architecture="x86_64",
+        run_id="123456",
+        report_path=tmp_path / "reports/smoke.json",
+        junit_path=tmp_path / "reports/smoke.junit.xml",
+        repair_report_dir=tmp_path / "repairs",
+        runner=runner,
+    )
+
+    assert report["status"] == "passed"
+    assert report["checks"] == {
+        "native_build": True,
+        "runtime_test": True,
+    }
+    waiter_calls = [call for call in runner.calls if call[0].endswith("wait_ready.sh")]
+    assert {RuntimeSmokeRunner._mode(call[1]) for call in waiter_calls} == {
+        "health-ready",
+        "terminal",
+        "no-probe",
+        "probe-timeout",
+    }
+    assert {
+        RuntimeSmokeRunner._mode(call[1]): call[2] for call in waiter_calls
+    } == {
+        "health-ready": "5",
+        "terminal": "5",
+        "no-probe": "0",
+        "probe-timeout": "0",
+    }
+    assert len(
+        [call for call in runner.calls if "/opt/oe-tests/test.sh" in call]
+    ) == 4
+
+
+def test_native_smoke_does_not_accept_waiter_crash_as_expected_timeout(tmp_path):
+    from scripts.lib.native_validation import (
+        NativeValidationError,
+        validate_native_smoke,
+    )
+
+    class CrashedWaiterRunner(RuntimeSmokeRunner):
+        def __call__(self, command, cwd, env, timeout):
+            if (
+                command
+                and str(command[0]).endswith("wait_ready.sh")
+                and "probe-timeout" in command[1]
+            ):
+                self.calls.append(list(command))
+                return subprocess.CompletedProcess(
+                    command, 3, "RUNTIME_ERROR\n", "waiter crashed"
+                )
+            return super().__call__(command, cwd, env, timeout)
+
+    with pytest.raises(NativeValidationError):
+        validate_native_smoke(
+            workspace=_workspace(tmp_path),
+            task=_task(),
+            architecture="x86_64",
+            run_id="123456",
+            report_path=tmp_path / "reports/smoke.json",
+            junit_path=tmp_path / "reports/smoke.junit.xml",
+            repair_report_dir=tmp_path / "repairs",
+            runner=CrashedWaiterRunner(),
+        )

@@ -17,19 +17,15 @@ _SCOPE_ERROR_RE = re.compile(
 # modified or deleted tracked file because it looked unfamiliar would destroy
 # real content, so anything but an addition rules hygiene out.
 _ADDED_STATUS = "A"
-# Goss and YAML reject a malformed file before any assertion runs, so these
-# never mean the image misbehaved. The same text can appear while a build step
-# processes upstream YAML, which is a build failure, so the stage has to agree.
-_CONFIG_PARSE_MARKERS = (
-    "invalid attribute for",
-    "error unmarshalling",
-    "yaml: line",
-    "yaml: unmarshal errors",
-    "cannot unmarshal",
-)
-_CONFIG_PARSE_STAGE = "dgoss"
 _TIMEOUT_RETURNCODE = 124
-_RUNTIME_STAGES = ("dgoss", "shared_tests", "restart_persistence")
+_RUNTIME_STAGES = (
+    "runtime_test",
+    "default_start",
+    "wait_healthcheck",
+    "wait_tcp",
+    "test_sh",
+    "post_inspect",
+)
 _INFRA_STAGES = ("target_clone",)
 
 _GUIDANCE = {
@@ -53,11 +49,6 @@ _GUIDANCE = {
     "test-contract": (
         "The deterministic test contract assigned these findings to "
         "Testcase Creator. Repair only the listed test-owned content."
-    ),
-    "config-parse": (
-        "A Goss or YAML file failed to parse before any assertion ran, so the "
-        "image behaviour is still unknown. Fix the test configuration syntax "
-        "and do not change the Dockerfile for this failure."
     ),
     "lint-advisory": (
         "Hadolint produced advisory diagnostics. Record them for review; do "
@@ -179,7 +170,6 @@ def classify_failure(
     elif report is not None and report.get("status") != "passed":
         details = report.get("failure_details")
         details = details if isinstance(details, Mapping) else {}
-        failure = str(report.get("failure", "")).lower()
         stage = str(report.get("failed_stage", ""))
         if stage == "upstream_format":
             format_check = report.get("format_check")
@@ -199,10 +189,6 @@ def classify_failure(
             category = "infra"
         elif stage == "test_contract":
             category = "test-contract"
-        elif stage == _CONFIG_PARSE_STAGE and any(
-            marker in failure for marker in _CONFIG_PARSE_MARKERS
-        ):
-            category = "config-parse"
         elif stage == "native_build":
             category = "build-error"
         elif stage in _RUNTIME_STAGES:

@@ -63,8 +63,7 @@ def _candidate(
                     "duration_seconds": 12,
                     "checks": {
                         "native_build": True,
-                        "dgoss": True,
-                        "shared_tests": True,
+                        "runtime_test": True,
                     },
                 }
             )
@@ -80,6 +79,26 @@ def _candidate(
         json.dumps({"status": "passed", "delivery_allowed": True})
     )
     (root / "reports" / "hadolint.txt").write_text(hadolint_output)
+    (root / "reports" / "results.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "status": "passed",
+                "task_id": _task().task_id,
+                "validated_run_id": "123456",
+                "artifact_url": "https://example.test/actions/runs/123456",
+                "architectures": {
+                    architecture: {
+                        "checks": {
+                            "native_build": True,
+                            "runtime_test": True,
+                        }
+                    }
+                    for architecture in ("x86_64", "aarch64")
+                },
+            }
+        )
+    )
     if testcase_repaired or testcase_qa_status == "needs_fix":
         (root / "reports" / "agents" / "testcase-qa-round1.json").write_text(
             json.dumps(
@@ -234,12 +253,16 @@ def test_pr_content_contains_candidate_and_dual_architecture_evidence(tmp_path):
     ) in content.body
     assert "x86_64" in content.body
     assert "aarch64" in content.body
-    assert "shared_tests" in content.body
+    assert "runtime_test" in content.body
     assert bundle.manifest.content_sha256 in content.body
     assert "validated run `123456`" in content.body
     assert "Final result: `approved` after 1 round." in content.body
     assert "### Image review" not in content.body
-    assert "Result evidence: `results.json`, `version_info.json`" in content.body
+    assert (
+        "Target evidence: `version_info.json`, `x86_64.junit.xml`, "
+        "`aarch64.junit.xml`" in content.body
+    )
+    assert "Production candidate evidence: `reports/results.json`" in content.body
     assert "https://github.com/apache/kvrocks/tree/v2.16.0" in content.body
     assert "### Confidence Score" in content.body
     assert "`1.0` (`auto-merge`)" in content.body

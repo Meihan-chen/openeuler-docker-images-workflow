@@ -135,17 +135,16 @@ def test_image_creator_restricts_only_open_euler_owned_gitee_links():
     assert "`gitee.com` 是 openeuler 迁移前的旧域名，一律禁止" not in image_creator
 
 
-def test_testcase_prompts_make_wait_and_helper_files_conditional():
+def test_testcase_prompts_keep_only_the_helper_optional():
     testcase_creator = (AGENTS_DIR / "testcase-creator.md").read_text().lower()
     testcase_qa = (AGENTS_DIR / "testcase-qa.md").read_text().lower()
 
-    assert "goss_wait.yaml 可选" in testcase_creator
-    assert "test_helpers.sh 可选" in testcase_creator
-    assert "goss_wait.yaml is optional" in testcase_qa
-    assert "test_helpers.sh is optional" in testcase_qa
+    assert "`test_helpers.sh`：可选" in testcase_creator
+    assert "optional `test_helpers.sh`" in testcase_qa
+    assert "只允许" in testcase_creator
 
 
-def test_testcase_prompts_define_service_and_cli_native_modes():
+def test_testcase_prompts_leave_lifecycle_selection_to_native_harness():
     testcase_creator = " ".join(
         (AGENTS_DIR / "testcase-creator.md").read_text().lower().split()
     )
@@ -153,10 +152,10 @@ def test_testcase_prompts_define_service_and_cli_native_modes():
         (AGENTS_DIR / "testcase-qa.md").read_text().lower().split()
     )
 
-    assert "缺省该文件即声明为 cli／one-shot运行模式" in testcase_creator
-    assert "有上限的就绪等待" in testcase_creator
-    assert "absence declares cli/one-shot mode" in testcase_qa
-    assert "bounded readiness" in testcase_qa
+    assert "harness 自动判断" in testcase_creator
+    assert "不实现通用 readiness 循环" in testcase_creator
+    assert "automatically selects the execution container" in testcase_qa
+    assert "executes `test.sh` once" in testcase_qa
     assert "read back after restart by the harness" not in testcase_qa
 
 
@@ -204,6 +203,84 @@ def test_testcase_qa_cannot_report_image_only_defects():
     assert "image-only defect" in testcase_qa
 
 
+def test_testcase_prompts_define_native_runtime_quality():
+    creator = " ".join(
+        (AGENTS_DIR / "testcase-creator.md").read_text().lower().split()
+    )
+    reviewer = " ".join(
+        (AGENTS_DIR / "testcase-qa.md").read_text().lower().split()
+    )
+
+    for prompt in (creator, reviewer):
+        assert "runtime_test" in prompt
+        assert "test.sh" in prompt
+        assert "真实" in prompt or "real" in prompt
+        assert "协议" in prompt or "protocol" in prompt
+        assert "数据路径" in prompt or "data path" in prompt
+
+
+def test_testcase_creator_preserves_the_established_generation_workflow():
+    """Removing one runtime backend must not erase unrelated test guidance."""
+    creator = (AGENTS_DIR / "testcase-creator.md").read_text()
+
+    for fragment in (
+        "## 工作目录",
+        "## 输入上下文",
+        "### 步骤 1：分析 Dockerfile",
+        "### 步骤 2：确定测试策略",
+        "### 步骤 2b：核对每条应用命令的语义",
+        "命令名相同不等于语义相同",
+        "核对不通过或找不到权威出处时",
+        "### 步骤 3：生成测试文件",
+        "### 步骤 4：生成共享 test.sh",
+        "### 步骤 5：返回结构化结果",
+        "证据元数据不完整不会阻断 QA",
+        '"package_name"',
+        '"test_script_path"',
+        '"binary_name"',
+        '"expected_version"',
+        '"exposed_ports"',
+    ):
+        assert fragment in creator
+    assert '"test_type"' not in creator
+
+
+def test_testcase_qa_preserves_the_established_adversarial_review_surfaces():
+    """Lifecycle migration must retain the QA dimensions that catch bad tests."""
+    reviewer = (AGENTS_DIR / "testcase-qa.md").read_text()
+
+    for fragment in (
+        "### Command Semantics (check this first)",
+        "### Coverage Gaps",
+        "### False Positive Risk",
+        "### Missing Attack Surfaces",
+        "### Test Correctness",
+        "Are all attack angles covered?",
+        "Could any test pass when the image is actually broken?",
+        "What would break the image that these tests would NOT catch?",
+        "Do file paths exist in the Dockerfile?",
+        "SO_REUSEPORT",
+        "dual-stack",
+    ):
+        assert fragment in reviewer
+
+
+def test_fixer_forbids_runtime_and_test_false_passes():
+    fixer = " ".join(
+        (AGENTS_DIR / "code-fixer.md").read_text().lower().split()
+    )
+
+    for fragment in (
+        "恒真 healthcheck",
+        "sleep",
+        "tail -f",
+        "后台进程",
+        "删除已声明端口",
+        "弱化功能测试",
+    ):
+        assert fragment in fixer
+
+
 def test_design_matches_the_advisory_testcase_evidence_model():
     design = (ROOT / "DESIGN.md").read_text()
 
@@ -240,39 +317,42 @@ def test_image_creator_does_not_require_one_dockerfile_spelling_or_package_black
     assert "version_filter 完整" not in image_creator
 
 
-def test_testcase_prompts_keep_goss_order_independent_and_tests_in_sync():
+def test_testcase_prompts_keep_stateful_sequences_and_tests_in_sync():
     testcase_creator = (AGENTS_DIR / "testcase-creator.md").read_text().lower()
     testcase_qa = (AGENTS_DIR / "testcase-qa.md").read_text().lower()
 
     for prompt in (testcase_creator, testcase_qa):
         normalized = " ".join(prompt.split())
-        assert "order-independent" in normalized
         assert "final dockerfile" in normalized
         assert "test.sh" in normalized
-    assert "stateful sequence" in " ".join(testcase_creator.split())
-    assert "cross-resource ordering" in " ".join(testcase_qa.split())
+    assert "按顺序" in " ".join(testcase_creator.split())
+    assert "stateful flow" in " ".join(testcase_qa.split())
 
 
-def test_testcase_guidance_avoids_scalar_goss_port_ip_assertions():
+def test_testcase_guidance_requires_real_protocol_quality():
     testcase_creator = (AGENTS_DIR / "testcase-creator.md").read_text().lower()
     testcase_qa = (AGENTS_DIR / "testcase-qa.md").read_text().lower()
-    goss_template = (ROOT / "templates" / "test" / "goss.yaml.j2").read_text()
-
-    for content in (testcase_creator, goss_template.lower()):
-        assert 'ip: "0.0.0.0"' not in content
-
-    # The Creator states the general criterion — confirm the value type before
-    # asserting on it — with `port.*.ip` as the worked example.
     creator = " ".join(testcase_creator.split())
-    assert "port.*.ip" in creator
-    assert "标量" in creator
-    assert "集合" in creator
-    assert "listening: true" in creator
+    assert "真实 http/应用协议" in creator
+    assert "写入再读回" in creator
+    assert "进程、端口、版本或文件存在" in creator
 
     reviewer = " ".join(testcase_qa.split())
-    assert "multiple listening sockets" in reviewer
-    assert "scalar" in reviewer
-    assert "functional" in reviewer
+    assert "real endpoint and meaningful response" in reviewer
+    assert "real application protocol and data path" in reviewer
+    assert "false-positive" in reviewer
+
+
+def test_testcase_creator_example_emits_actionable_failure_diagnostics():
+    creator = (AGENTS_DIR / "testcase-creator.md").read_text()
+    example = creator.split("```bash", 1)[1].split("```", 1)[0]
+
+    assert "version command exited" in example
+    assert "version mismatch: expected=<%s> actual=<%s>" in example
+    assert "core command exited" in example
+    assert "core result mismatch: expected=<%s> actual=<%s>" in example
+    assert "TESTS_FAILED" in example
+    assert "|| true" not in example
 
 
 def test_fixer_prompt_synchronizes_observable_runtime_contract_consumers():
@@ -380,14 +460,13 @@ def test_fixer_does_not_repair_evidence_metadata():
 
 
 def test_testcase_prompts_only_defer_shell_syntax_to_the_generation_gate():
-    """Goss schema is exercised by native dgoss, not a generation sandbox."""
+    """Static checks own syntax; QA owns semantics and false positives."""
     creator = " ".join((AGENTS_DIR / "testcase-creator.md").read_text().split())
     reviewer = " ".join((AGENTS_DIR / "testcase-qa.md").read_text().split())
 
-    assert "tests.goss_render" not in creator
-    assert "tests.shell_syntax" in creator
-    assert "tests.goss_render" not in reviewer
-    assert "pinned Goss" in reviewer
+    assert "bash -n" in creator
+    assert "Bash syntax" in reviewer
+    assert "Review semantics and false-positive risk" in reviewer
 
 
 def test_image_creator_can_report_unconfirmed_facts():

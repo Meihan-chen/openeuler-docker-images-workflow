@@ -179,8 +179,6 @@ def _candidate_paths(
         app_root / "doc" / "image-info.yml",
         app_root / "doc" / "picture" / "logo.png",
         image_root / "Dockerfile",
-        app_root / "tests" / "goss.yaml",
-        app_root / "tests" / "goss_wait.yaml",
         app_root / "tests" / "test_helpers.sh",
         app_root / "tests" / "test.sh",
     }
@@ -238,8 +236,6 @@ def _bounded_candidate_snapshot(
             "meta.yml",
             "README.md",
             "test.sh",
-            "goss.yaml",
-            "goss_wait.yaml",
         }
         return (0 if critical else 1, str(path))
 
@@ -399,24 +395,25 @@ def build_role_prompt(
         "- Derive application-specific build and runtime behavior from the "
         "official upstream and the candidate files; do not assume a fixed "
         "user, port, health command, build command or persistence path.",
+        "- Do not create workflow control assets, lifecycle mode files, or "
+        "target-side readiness scripts.",
         "- Do not modify any other path.",
     ]
     if role in {"testcase_creator", "testcase_qa", "fixer"}:
         contract_lines.extend(
             (
-                "- Every in-container readiness probe must use commands "
-                "available in the runtime image; infer availability from "
-                "the Dockerfile and do not assume host diagnostic tools.",
                 "- Derive application-specific tests from the Dockerfile and "
                 "official upstream behavior; do not copy another "
                 "application's commands, ports or user assertions.",
-                "- In service mode, the native harness executes shared tests "
-                "inside an already-running container. In CLI/one-shot mode, "
-                "it runs test.sh as the container entrypoint. Test scripts "
-                "must not invoke Docker or own the container lifecycle.",
-                "- Every Goss resource must be order-independent. Put any "
-                "stateful sequence in the shared test.sh instead of relying "
-                "on ordering between Goss resources.",
+                "- The native `runtime_test` harness automatically chooses "
+                "the test container from image runtime events and executes "
+                "the shared test.sh exactly once. Test scripts must not "
+                "invoke Docker, manage the service lifecycle, or implement "
+                "a generic readiness loop.",
+                "- A service test must exercise a real protocol or data path; "
+                "a CLI or batch test must exercise a real command and verify "
+                "its output. Process, port, version, or file existence alone "
+                "is not a complete functional test.",
                 "- Identity, port, path, binary and command expectations must "
                 "match the final Dockerfile, not an earlier candidate.",
                 f"- Shared tests: `{app_root}/tests/`",
@@ -438,8 +435,6 @@ def build_role_prompt(
                 f"{app_root}/doc/image-info.yml",
                 f"{app_root}/doc/picture/logo.png",
                 f"{image_root}/Dockerfile",
-                f"{app_root}/tests/goss.yaml",
-                f"{app_root}/tests/goss_wait.yaml",
                 f"{app_root}/tests/test_helpers.sh",
                 f"{app_root}/tests/test.sh",
             )
@@ -530,8 +525,6 @@ def _qa_prompt(
     tests_root = app_root / "tests"
     paths = [
         image_root / "Dockerfile",
-        tests_root / "goss.yaml",
-        tests_root / "goss_wait.yaml",
         tests_root / "test_helpers.sh",
         tests_root / "test.sh",
     ]
@@ -1703,39 +1696,23 @@ def write_smoke_candidate(
         "HEALTHCHECK CMD redis-cli -p 6666 PING | grep PONG\n"
         'ENTRYPOINT ["kvrocks", "--bind", "0.0.0.0"]\n'
     )
-    (tests / "goss.yaml").write_text(
-        "port:\n"
-        "  tcp:6666:\n"
-        "    listening: true\n"
-        "command:\n"
-        "  version:\n"
-        "    exec: kvrocks --version\n"
-        "    stdout:\n"
-        '      - "{{.Env.EXPECTED_VERSION}}"\n'
-        "  ping:\n"
-        "    exec: redis-cli -p 6666 PING\n"
-        "    stdout:\n"
-        "      - PONG\n"
-    )
-    (tests / "goss_wait.yaml").write_text(
-        "port:\n  tcp:6666:\n    listening: true\n"
-    )
-    helpers = tests / "test_helpers.sh"
-    helpers.write_text(
-        "#!/bin/bash\n"
-        "wait_for_kvrocks() { redis-cli -p 6666 PING; }\n"
-    )
     shared = tests / "test.sh"
     shared.write_text(
         "#!/bin/bash\n"
         "set -euo pipefail\n"
         ': "${EXPECTED_VERSION:?}"\n'
-        'kvrocks --version | grep -F "${EXPECTED_VERSION}"\n'
-        "redis-cli -p 6666 PING | grep -F PONG\n"
+        'version_output="$(kvrocks --version)"\n'
+        "read -r binary label reported_version details "
+        '<<< "${version_output}"\n'
+        'test "${binary}" = "kvrocks"\n'
+        'test "${label}" = "version"\n'
+        'test "${reported_version}" = "${EXPECTED_VERSION}"\n'
+        'test -n "${details}"\n'
+        'ping="$(redis-cli -p 6666 PING)"\n'
+        'test "${ping}" = "PONG"\n'
         'test "$(id -u)" != 0\n'
     )
-    for script in (helpers, shared):
-        script.chmod(0o755)
+    shared.chmod(0o755)
 
     log("smoke", "PASS deterministic candidate")
     return {"status": "passed", "mode": "pipeline_smoke"}

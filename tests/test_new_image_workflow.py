@@ -626,6 +626,19 @@ def test_sealed_candidate_preserves_both_junit_reports():
     assert "candidate/reports/aarch64.junit.xml" in seal["run"]
 
 
+def test_package_keeps_results_json_inside_the_candidate_only():
+    steps = {
+        step["name"]: step
+        for step in _workflow()["jobs"]["package-candidate"]["steps"]
+    }
+
+    aggregate = steps["Aggregate dual-architecture result evidence"]["run"]
+    final_gate = steps["Enforce final target gates and lint"]["run"]
+    assert "--results-output" in aggregate
+    assert "${RUNNER_TEMP}/candidate/reports/results.json" in aggregate
+    assert "--expected-run-id" not in final_gate
+
+
 def test_validate_only_jobs_have_no_gitcode_credential_or_write_command():
     jobs = _workflow()["jobs"]
 

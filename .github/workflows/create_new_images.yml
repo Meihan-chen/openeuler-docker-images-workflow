@@ -619,7 +619,9 @@ jobs:
             --run-id "${{ github.run_id }}" \
             --run-url \
               "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
-            --report-dir "${RUNNER_TEMP}/native-reports"
+            --report-dir "${RUNNER_TEMP}/native-reports" \
+            --results-output \
+              "${RUNNER_TEMP}/candidate/reports/results.json"
 
       - name: Enforce final target gates and lint
         run: |
@@ -648,7 +650,6 @@ jobs:
             --workspace "${RUNNER_TEMP}/phase1-target" \
             --task-spec "${RUNNER_TEMP}/arm/task-spec.json" \
             --base-sha "${base_sha}" \
-            --expected-run-id "${{ github.run_id }}" \
             > "${RUNNER_TEMP}/candidate/reports/gates.json"
 
       - name: Seal immutable candidate bundle

@@ -113,14 +113,16 @@ def aggregate_native_results(
     run_id: str,
     run_url: str,
     report_dir: Path,
+    results_output: Path,
 ) -> dict[str, object]:
-    """Aggregate two native reports into bounded in-repository evidence."""
+    """Aggregate native reports into target evidence and a production result."""
     if not _RUN_ID_RE.fullmatch(run_id):
         raise ResultAggregationError("run_id must be a positive integer")
     if not run_url.startswith("https://"):
         raise ResultAggregationError("run_url must be an HTTPS URL")
     workspace = Path(workspace)
     report_dir = Path(report_dir)
+    results_output = Path(results_output)
     app_root = workspace / task.domain / task.app
     if not app_root.is_dir():
         raise ResultAggregationError("generated application directory is missing")
@@ -128,6 +130,10 @@ def aggregate_native_results(
     if result_dir.exists():
         raise ResultAggregationError(
             f"result directory already exists and cannot be overwritten: {result_dir}"
+        )
+    if results_output.exists():
+        raise ResultAggregationError(
+            f"production results already exist and cannot be overwritten: {results_output}"
         )
 
     reports = {
@@ -207,7 +213,6 @@ def aggregate_native_results(
         "x86_64.junit.xml": junit["x86_64"],
         "aarch64.junit.xml": junit["aarch64"],
         "version_info.json": _json_bytes(version_info),
-        "results.json": _json_bytes(results),
     }
     total_bytes = sum(len(content) for content in files.values())
     if total_bytes > _MAX_RESULT_BYTES:
@@ -218,10 +223,13 @@ def aggregate_native_results(
     result_dir.mkdir(parents=True, exist_ok=False)
     for name, content in files.items():
         (result_dir / name).write_bytes(content)
+    results_output.parent.mkdir(parents=True, exist_ok=True)
+    results_output.write_bytes(_json_bytes(results))
     return {
         "status": "passed",
         "task_id": task.task_id,
         "result_dir": result_dir.relative_to(workspace).as_posix(),
         "files": sorted(files),
         "total_bytes": total_bytes,
+        "results_file": str(results_output),
     }

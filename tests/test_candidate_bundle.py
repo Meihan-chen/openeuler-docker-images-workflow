@@ -28,8 +28,7 @@ def _payload(root: Path):
         "status": "passed",
         "checks": {
             "native_build": True,
-            "dgoss": True,
-            "shared_tests": True,
+            "runtime_test": True,
         },
     }
     (root / "reports" / "x86_64.json").write_text(json.dumps(report) + "\n")
@@ -42,6 +41,24 @@ def _payload(root: Path):
     (root / "reports" / "gates.json").write_text(gate)
     (root / "reports" / "generation-gates.json").write_text(gate)
     (root / "reports" / "hadolint.txt").write_text("")
+    (root / "reports" / "results.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "status": "passed",
+                "task_id": _task().task_id,
+                "validated_run_id": "123456",
+                "artifact_url": "https://example.test/actions/runs/123456",
+                "architectures": {
+                    architecture: {
+                        "checks": report["checks"],
+                    }
+                    for architecture in ("x86_64", "aarch64")
+                },
+            }
+        )
+        + "\n"
+    )
 
 
 def test_candidate_bundle_records_task_base_run_and_checksums(tmp_path):
@@ -66,6 +83,7 @@ def test_candidate_bundle_records_task_base_run_and_checksums(tmp_path):
         "reports/gates.json",
         "reports/generation-gates.json",
         "reports/hadolint.txt",
+        "reports/results.json",
         "reports/x86_64.json",
         "reports/x86_64.junit.xml",
         "task-spec.json",
@@ -143,6 +161,49 @@ def test_candidate_bundle_requires_hadolint_evidence_even_when_clean(tmp_path):
     (tmp_path / "reports" / "hadolint.txt").unlink()
 
     with pytest.raises(CandidateBundleError, match="hadolint"):
+        CandidateBundle.create(
+            tmp_path,
+            task=_task(),
+            base_sha=BASE_SHA,
+            validated_run_id="123456",
+        )
+
+
+def test_candidate_bundle_requires_internal_schema_v1_results(tmp_path):
+    from scripts.lib.candidate_bundle import CandidateBundle, CandidateBundleError
+
+    _payload(tmp_path)
+    (tmp_path / "reports" / "results.json").unlink()
+
+    with pytest.raises(CandidateBundleError, match="results.json"):
+        CandidateBundle.create(
+            tmp_path,
+            task=_task(),
+            base_sha=BASE_SHA,
+            validated_run_id="123456",
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    (
+        ("schema_version", 2, "schema"),
+        ("task_id", "another-task", "task"),
+        ("validated_run_id", "999999", "run ID"),
+    ),
+)
+def test_candidate_bundle_validates_internal_results_identity(
+    tmp_path, field, value, message
+):
+    from scripts.lib.candidate_bundle import CandidateBundle, CandidateBundleError
+
+    _payload(tmp_path)
+    path = tmp_path / "reports" / "results.json"
+    payload = json.loads(path.read_text())
+    payload[field] = value
+    path.write_text(json.dumps(payload))
+
+    with pytest.raises(CandidateBundleError, match=message):
         CandidateBundle.create(
             tmp_path,
             task=_task(),

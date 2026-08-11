@@ -28,11 +28,13 @@ official upstream 源码或文档中推导，不得假设固定运行身份、�
 
 ### 步骤 2：确定测试策略
 
-**Go 服务类：** 精确版本验证（`--version` 或 `version`）、端口监听验证、真实协议请求验证
-**预编译二进制类：** 二进制存在验证、精确版本验证（如果支持）、进程持续运行验证
-**CLI 工具类：** 精确版本验证、帮助信息（`--help` 输出非空）、基本命令执行
+**Go 服务类：** 精确版本验证（`--version` 或 `version`）、真实协议请求验证、核心数据路径验证
+**预编译二进制类：** 二进制存在性辅助验证、精确版本验证（如果支持）、真实核心功能验证
+**CLI 工具类：** 精确版本验证、真实子命令执行、有意义的输出或结果验证
 
-对服务类应用，不能只验证“进程存在”或“端口监听”；至少覆盖一条真实核心功能路径。如果镜像和上游运行模型包含非 root 或持久化设计，还必须验证运行身份、数据目录可写以及写入/读取行为。
+对服务类应用，不能只验证“进程存在”或“端口监听”；至少覆盖一条真实核心功能路径。如果镜像和上游运行模型明确包含非 root 或持久化设计，还必须验证运行身份、数据目录可写以及写入/读取行为。
+
+服务应用必须调用真实 HTTP/应用协议，必要时完成写入再读回等有序数据路径。仅检查进程、端口、版本或文件存在不能证明服务可用。CLI 或批处理应用不能只用 `--help`、`command -v` 或二进制存在性作为完整功能测试。
 
 ### 步骤 2b：核对每条应用命令的语义
 
@@ -56,113 +58,106 @@ claim、source、每段 excerpt 分别不超过 512、1024、512 个字符。同
 
 ### 步骤 3：生成测试文件
 
-在 `{category}/{package_name}/tests/` 下创建：
+只允许在 `{category}/{package_name}/tests/` 下创建：
 
-**goss.yaml** — 运行时断言：
-```yaml
-port:
-  tcp:{port}:
-    listening: true
-process:
-  "{binary_name}":
-    running: true
-http:
-  http://localhost:{port}/:
-    status: 200
-    timeout: 10000
-file:
-  /usr/local/bin/{binary_name}:
-    exists: true
-    mode: "0755"
-```
+- `test.sh`：必需、可执行的唯一功能测试入口；
+- `test_helpers.sh`：可选，仅当 `test.sh` 确实需要复用断言逻辑时生成；简单测试直接写在唯一入口中，不得创建空 helper。
 
-断言的期望值只能来自 Dockerfile 或固定版本的上游证据，写下之前必须确认该属性的**取值
-类型**是标量还是集合。`port.*.ip` 即属于集合：当应用通过 worker sharding、`SO_REUSEPORT`、
-dual-stack 或多网卡打开多个监听 socket 时，它会返回多个地址，与单个标量地址比较必然
-失败，因此默认使用 `listening: true`。只有绑定地址确属应用契约时，才使用已在 pinned Goss
-版本上验证过的集合匹配器，或改用有上限的功能可达性检查。
+不得创建其他测试资产、就绪等待脚本、生命周期模式文件或 Agent 控制文件。断言中的运行身份、端口、路径、二进制名与命令必须来自 Dockerfile 或固定版本的上游证据，并与 final Dockerfile 一致，不得沿用中间候选版本的取值。
 
-属性名以 pinned Goss 版本的 resource schema 为准，不要凭印象拼写。生成期门禁只检查
-Goss YAML 的基础结构；完整 schema 和运行结果由后续 Native Validation 中的 `dgoss`
-验证。`test.sh` 与 `test_helpers.sh` 会经过 `bash -n`（finding code
-`tests.shell_syntax`）。
-
-**goss_wait.yaml 可选** — 但它同时是 Native Harness 判定运行模式的标记：长驻服务必须
-生成该文件；缺省该文件即声明为 CLI／one-shot运行模式。文件内容只描述从 Dockerfile 与上游
-证据可确认的就绪条件，不得写入应用本身不存在的端口或命令：
-```yaml
-port:
-  tcp:{port}:
-    listening: true
-```
-
-**test_helpers.sh 可选** — 仅当 `test.sh` 或 Goss 命令确实需要复用同一段辅助逻辑时才生成；
-简单测试直接写在唯一入口中，不得创建空的 helper 文件：
-```bash
-retry() {
-    local timeout=$1
-    shift
-    for _ in $(seq 1 $timeout); do
-        if "$@" >/dev/null 2>&1; then return 0; fi
-        sleep 1
-    done
-    return 1
-}
-```
-
-以上均为通用示例，具体断言必须按 Dockerfile 和任务契约重新推导，非 HTTP 应用不得照搬 HTTP 断言。容器内的就绪探测只能使用 runtime image 中已确认安装的命令，并优先调用应用自身的协议客户端，不得假设 `ss`、`netstat` 或 `curl` 存在。
-
-每条 Goss resource 都必须是 order-independent 的。Goss 不保证 resource 之间的执行先后，
-因此不能把 write-then-read 这类 stateful sequence 拆分到多条 resource 上；存在顺序依赖
-的流程一律放进 `test.sh`。断言中的运行身份、端口、路径、二进制名与命令，都必须与
-final Dockerfile 一致，不得沿用中间候选版本的取值。
+容器何时可以开始测试由生产侧 `runtime_test` Harness 自动判断；目标仓测试不实现通用 readiness 循环，也不声明 service/CLI lifecycle mode。存在状态依赖的 write-then-read 或 request-then-result 流程必须在 `test.sh` 中按顺序执行。
 
 ### 步骤 4：生成共享 test.sh
 
-在 `{category}/{package_name}/tests/test.sh` 创建唯一的功能测试入口。原生验证流程会将该目录挂载到已经启动的容器内，注入 `EXPECTED_VERSION` 后执行脚本。脚本不得自行 build、run、stop 或删除容器。
+在 `{category}/{package_name}/tests/test.sh` 创建唯一的功能测试入口。原生验证流程会挂载测试目录，注入 `EXPECTED_VERSION`，根据镜像运行事件选择执行容器，并且只执行脚本一次。
 
-service 模式下 Harness 不执行应用专用探针，因此 `test.sh` 必须在功能断言前执行
-有上限的就绪等待，并在超时时输出可操作证据；CLI／one-shot模式下 Harness 直接把
-`test.sh` 作为容器入口运行。
+`test.sh` 必须：
+
+- 使用 Bash shebang，通过 `bash -n`，并具有可执行权限；
+- 使用 `set -euo pipefail` 或等价的严格失败传播；
+- 要求 `EXPECTED_VERSION` 存在，且版本匹配不能接受其他版本；
+- 在失败时输出可操作诊断；
+- 不自行 build、run、stop、restart 或删除容器；
+- 不调用 Docker，不下载网络内容，不启动或重启被测服务；
+- 不用 fallback、`|| true`、吞退出码或弱化匹配把失败变成成功。
+
+每一条容器内命令都必须确认存在于 runtime image，不得假设 `ss`、`netstat`、`curl` 或其他宿主诊断工具存在。可能阻塞的功能命令必须使用经固定版本上游证据确认的应用或客户端超时参数；不得假设 runtime image 安装了 `timeout`。下面只展示脚本结构，实际命令和断言必须根据当前应用重新推导：
 
 ```bash
 #!/bin/bash
-set -e; set -o pipefail
+set -euo pipefail
 
-BINARY="{binary_name}"
 : "${EXPECTED_VERSION:?EXPECTED_VERSION is required}"
+BINARY="application"  # 按 Dockerfile 和固定版本上游证据替换
 
 test_version() {
-    local output
-    output="$("${BINARY}" --version 2>&1 || "${BINARY}" version 2>&1 || true)"
-    if printf '%s\n' "${output}" | grep -Fxq "${EXPECTED_VERSION}"; then
-        echo "PASS: exact version check - ${output}"; return 0
+    local output rc
+
+    if ! command -v "${BINARY}" >/dev/null 2>&1; then
+        printf 'FAIL: binary not found: %s\n' "${BINARY}" >&2
+        return 1
     fi
-    echo "FAIL: exact version check - expected ${EXPECTED_VERSION}, got: ${output}"
-    return 1
+
+    if output="$("${BINARY}" version 2>&1)"; then
+        :
+    else
+        rc=$?
+        printf 'FAIL: version command exited %s: %s\n' \
+            "${rc}" "${output}" >&2
+        return 1
+    fi
+
+    # 本例假设上游确认输出恰好是版本号；若含前缀，应按该应用的
+    # 固定格式解析后再做完整相等比较。
+    if [[ "${output}" != "${EXPECTED_VERSION}" ]]; then
+        printf 'FAIL: version mismatch: expected=<%s> actual=<%s>\n' \
+            "${EXPECTED_VERSION}" "${output}" >&2
+        return 1
+    fi
+
+    printf 'PASS: exact version: %s\n' "${output}"
 }
 
-test_binary_exists() {
-    if command -v "${BINARY}" >/dev/null 2>&1; then
-        echo "PASS: binary exists"; return 0
-    fi
-    echo "FAIL: binary not found"; return 1
-}
+test_core_function() {
+    local output rc expected="expected-result"
 
-test_function() {
-    "${BINARY}" --help >/dev/null 2>&1 && \
-        echo "PASS: basic function test" && return 0
-    echo "FAIL: basic function test"; return 1
+    # real-command、输入、期望值及超时参数必须从当前应用证据推导。
+    if output="$("${BINARY}" real-command --input known-value 2>&1)"; then
+        :
+    else
+        rc=$?
+        printf 'FAIL: core command exited %s: %s\n' \
+            "${rc}" "${output}" >&2
+        return 1
+    fi
+
+    if [[ "${output}" != "${expected}" ]]; then
+        printf 'FAIL: core result mismatch: expected=<%s> actual=<%s>\n' \
+            "${expected}" "${output}" >&2
+        return 1
+    fi
+
+    printf 'PASS: core function\n'
 }
 
 main() {
     local failures=0
-    test_binary_exists || failures=$((failures + 1))
-    test_version || failures=$((failures + 1))
-    test_function || failures=$((failures + 1))
-    if [ "$failures" -eq 0 ]; then echo "ALL_TESTS_PASSED"; exit 0; fi
-    echo "TESTS_FAILED: ${failures} failures"; exit 1
+
+    if ! test_version; then
+        failures=$((failures + 1))
+    fi
+    if ! test_core_function; then
+        failures=$((failures + 1))
+    fi
+
+    if (( failures > 0 )); then
+        printf 'TESTS_FAILED: %s failure(s)\n' "${failures}" >&2
+        return 1
+    fi
+
+    printf 'ALL_TESTS_PASSED\n'
 }
+
 main "$@"
 ```
 
@@ -174,12 +169,11 @@ main "$@"
 {
   "success": true,
   "package_name": "...",
-  "test_script_path": ".../test.sh",
+  "test_script_path": ".../tests/test.sh",
   "binary_name": "...",
   "expected_version": "...",
   "exposed_ports": [],
-  "test_type": "go_service|cli_tool|generic",
-  "files_created": [],
+  "files_created": [".../tests/test.sh"],
   "command_evidence": [
     {
       "command": "test.sh 中执行的应用命令",
@@ -210,8 +204,10 @@ Creator 的引用自动视为已验证结论。
 - 测试必须由任务输入注入版本，应用级共享测试不得硬编码单一版本
 - 版本号验证必须精确验证目标应用报告的版本，不能用可能接受其他版本的模糊子串
 - 服务应用必须覆盖核心协议/数据路径，不能用 `--help` 代替功能验证
+- CLI／批处理应用必须执行真实命令并验证有意义的输出或结果
 - `test.sh` 使用的每一条应用命令都必须在 `command_evidence` 中给出语义与证据 ID
-- 等待必须有上限并输出可操作的失败信息
+- 身份、权限、数据目录和持久化断言必须有应用契约依据；没有重启协议时不得声称验证了重启持久化
+- 就绪等待和生命周期选择由生产侧 Harness 负责，目标测试不得重复实现
 - 禁止在 test.sh 中执行 docker build、docker run 或其他容器生命周期操作
 - 测试脚本不得弱化断言或用 fallback 将失败转成成功
 - 只修改任务契约允许的路径，不得运行 Git/API 写操作
