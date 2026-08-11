@@ -424,7 +424,9 @@ def finalize_new_image_issue(
         target_repo=target_repo,
         number=issue_number,
     )
-    target_status = "已完成" if outcome == "success" else "已挂起"
+    # GitCode couples 已完成 to a closed Issue. Keep every terminal outcome
+    # open; a successful generation remains pending while its PR is reviewed.
+    target_status = "已挂起"
     target_state = "open"
     if _issue_status(issue) == target_status:
         return None
@@ -436,7 +438,7 @@ def finalize_new_image_issue(
     if outcome == "success":
         comment = "\n".join(
             (
-                "自动镜像流水线已完成。",
+                "自动镜像流水线已生成 PR，Issue 保持打开等待 PR 处理。",
                 "",
                 f"- Workflow: {run_url}",
                 f"- Pull request: {pr_url}",

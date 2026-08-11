@@ -77,8 +77,8 @@ def test_test_delivery_creates_cross_repo_pr_without_duplicate_lookup():
         "base": "master",
         "body": "Validated on x86_64 and aarch64.",
         "issue": "152212",
+        "close_related_issue": False,
     }
-    assert "close_related_issue" not in request.json_body
 
 
 def test_production_delivery_checks_every_pr_page_before_rejecting_duplicate():

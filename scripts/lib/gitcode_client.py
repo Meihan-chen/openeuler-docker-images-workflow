@@ -339,6 +339,7 @@ class GitCodeClient:
             if not issue_id.isdigit() or int(issue_id) <= 0:
                 raise ValueError("issue_id must be a positive integer")
             json_body["issue"] = issue_id
+            json_body["close_related_issue"] = False
 
         payload = self._request(
             "POST",

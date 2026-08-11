@@ -500,7 +500,7 @@ def test_dispatch_failure_returns_claimed_issue_to_new_state():
         (
             "success",
             "https://gitcode.com/openeuler/openeuler-docker-images/pull/4000",
-            "已完成",
+            "已挂起",
             "open",
         ),
         ("failure", "", "已挂起", "open"),
