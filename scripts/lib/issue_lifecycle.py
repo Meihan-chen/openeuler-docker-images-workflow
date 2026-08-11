@@ -243,10 +243,41 @@ def _fixer_stage_lines(evidence_dir: Path) -> list[str]:
     return lines
 
 
+def _render_prepare_failure_summary(evidence_dir: Path) -> str:
+    generation_dir = evidence_dir / "generation-reports"
+    failure = _load_evidence(
+        generation_dir / "generation-failure.json",
+        "generation failure",
+    )
+    if failure.get("status") != "failed":
+        raise IssueLifecycleError("generation failure evidence is not failed")
+
+    stage_lines = _agent_stage_lines(generation_dir)
+    blockers = (
+        f"- Failed role: `{_brief(failure.get('role'), limit=80)}`.",
+        f"- Failed stage: `{_brief(failure.get('stage'), limit=80)}`.",
+        f"- Error: {_brief(failure.get('error'))}",
+    )
+    return "\n".join(
+        (
+            "## Stage summary",
+            "",
+            *(stage_lines or ["- No completed agent reports were recorded."]),
+            "",
+            "## Blocking error",
+            "",
+            *blockers,
+        )
+    )
+
+
 def render_needs_human_summary(evidence_dir: Path) -> str:
     """Render one concise, auditable terminal report from sealed evidence."""
 
     evidence_dir = Path(evidence_dir)
+    if (evidence_dir / "generation-reports" / "generation-failure.json").is_file():
+        return _render_prepare_failure_summary(evidence_dir)
+
     decision_dir = evidence_dir / "decision" / "agents"
     terminal = _load_evidence(
         decision_dir / "convergence-report.json",
@@ -446,14 +477,18 @@ def finalize_new_image_issue(
         )
     elif outcome == "needs-human-review":
         if failure_evidence_dir is not None:
-            failure_summary = render_needs_human_summary(failure_evidence_dir)
+            try:
+                failure_summary = render_needs_human_summary(failure_evidence_dir)
+            except IssueLifecycleError:
+                if not failure_summary.strip():
+                    raise
         if not failure_summary.strip():
             raise IssueLifecycleError(
                 "needs-human-review requires terminal failure evidence"
             )
         comment = "\n".join(
             (
-                "needs-human-review: 三轮自动修复后候选仍未收敛。",
+                "needs-human-review: 自动镜像流水线未收敛，需要人工处理。",
                 "",
                 failure_summary,
                 "",

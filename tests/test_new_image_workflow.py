@@ -173,6 +173,25 @@ def test_issue_trigger_reuses_scenario_one_and_finalizes_the_source_issue():
     assert "case \"${{ inputs.source_run_id }}\"" not in delivery_step["run"]
 
 
+def test_prepare_failure_uses_generation_evidence_for_human_review():
+    finalizer = _workflow()["jobs"]["finalize-trigger-issue"]
+    steps = {step["name"]: step for step in finalizer["steps"]}
+
+    download = steps["Download prepare failure evidence"]
+    assert "needs.prepare.result == 'failure'" in download["if"]
+    assert download["continue-on-error"] is True
+    assert download["with"]["name"] == (
+        "phase1-generation-${{ github.run_id }}"
+    )
+    assert download["with"]["path"] == "${{ runner.temp }}/needs-human"
+
+    report = steps["Report scenario result to source Issue"]
+    assert report["if"] == "${{ always() }}"
+    assert "needs.prepare.result == 'failure'" in report["env"]["OUTCOME"]
+    assert "needs-human-review" in report["env"]["OUTCOME"]
+    assert "--failure-evidence-dir" in report["run"]
+
+
 def test_repair_budget_terminal_is_preserved_without_emitting_round_five():
     workflow = _workflow(ROUND_PATH)
     call = _trigger(workflow)["workflow_call"]

@@ -961,6 +961,14 @@ jobs:
       - name: Check out workflow source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
+      - name: Download prepare failure evidence
+        if: ${{ needs.prepare.result == 'failure' }}
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: phase1-generation-${{ github.run_id }}
+          path: ${{ runner.temp }}/needs-human
+
       - name: Download needs-human-review evidence
         if: >-
           ${{ (needs.round-1.result == 'success' &&
@@ -977,13 +985,15 @@ jobs:
           path: ${{ runner.temp }}/needs-human
 
       - name: Report scenario result to source Issue
+        if: ${{ always() }}
         env:
           GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
           SOURCE_ISSUE: ${{ inputs.source_run_id }}
           OUTCOME: >-
             ${{ needs.deliver-fork-pr.result == 'success' &&
                 'success' ||
-                ((needs.round-1.result == 'success' &&
+                (needs.prepare.result == 'failure' ||
+                 (needs.round-1.result == 'success' &&
                   needs.round-1.outputs.terminal_status ==
                   'needs-human-review') ||
                  (needs.round-2.result == 'success' &&

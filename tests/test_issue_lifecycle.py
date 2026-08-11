@@ -672,6 +672,68 @@ def test_needs_human_comment_summarizes_stages_fixer_and_blocker(tmp_path):
     assert "libatomic.so.1" in comment
 
 
+def test_prepare_failure_comment_summarizes_completed_agents_and_blocker(tmp_path):
+    from scripts.lib.issue_lifecycle import (
+        finalize_new_image_issue,
+        render_needs_human_summary,
+    )
+
+    generation = tmp_path / "generation-reports"
+    generation.mkdir()
+    (generation / "image-creator.json").write_text(
+        json.dumps({"success": True, "summary": "Created the image files."})
+    )
+    (generation / "testcase-creator.json").write_text(
+        json.dumps({"success": True, "summary": "Created the smoke test."})
+    )
+    (generation / "generation-failure.json").write_text(
+        json.dumps(
+            {
+                "status": "failed",
+                "stage": "agent",
+                "role": "testcase_qa",
+                "error": (
+                    "OpenCode completed without the required JSON contract: "
+                    "issues, summary"
+                ),
+            }
+        )
+    )
+
+    summary = render_needs_human_summary(tmp_path)
+
+    assert "## Stage summary" in summary
+    assert "Image Creator" in summary
+    assert "Created the image files" in summary
+    assert "Testcase Creator" in summary
+    assert "Created the smoke test" in summary
+    assert "## Blocking error" in summary
+    assert "testcase_qa" in summary
+    assert "agent" in summary
+    assert "required JSON contract: issues, summary" in summary
+
+    client = TriggerIssueClient(
+        _new_trigger_issue(
+            issue_state="已接纳",
+            issue_state_detail={"title": "已接纳"},
+        )
+    )
+    finalize_new_image_issue(
+        client=client,
+        target_repo=TARGET_REPO,
+        issue_number=64,
+        outcome="needs-human-review",
+        run_url="https://github.com/Meihan-chen/repo/actions/runs/123",
+        failure_evidence_dir=tmp_path,
+    )
+
+    comment = client.calls[1][1]["body"]
+    assert "needs-human-review" in comment
+    assert "三轮自动修复" not in comment
+    assert "testcase_qa" in comment
+    assert "required JSON contract: issues, summary" in comment
+
+
 def test_github_workflow_dispatch_uses_token_only_in_environment():
     from scripts.lib.issue_lifecycle import dispatch_github_workflow
 
