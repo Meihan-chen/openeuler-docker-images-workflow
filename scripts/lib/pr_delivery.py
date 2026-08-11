@@ -724,7 +724,7 @@ def deliver_promoted_candidate(
     title: str,
     body: str,
     client: Any,
-    issue_id: str = "",
+    issue_number: int | None = None,
     push: Callable[..., None] = push_working_branch,
     delete: Callable[..., bool] = delete_working_branch,
 ) -> Any:
@@ -746,8 +746,8 @@ def deliver_promoted_candidate(
             "body": body,
             "branch": promotion.branch,
         }
-        if issue_id:
-            create_args["issue_id"] = issue_id
+        if issue_number is not None:
+            create_args["issue_number"] = issue_number
         return client.create_pull_request(
             **create_args,
         )
@@ -824,15 +824,6 @@ def deliver_validated_candidate(
     )
     content = compose_pull_request(bundle)
     client = client_factory(token=token)
-    issue_id = ""
-    if source_issue_number is not None:
-        source_issue = client.get_issue(
-            target_repo=config.target_repo,
-            number=source_issue_number,
-        )
-        issue_id = str(source_issue.get("id", ""))
-        if not issue_id.isdigit() or int(issue_id) <= 0:
-            raise ForkPRPipelineError("source Issue has no valid global ID")
     return deliver(
         repo=workspace.path,
         config=config,
@@ -842,5 +833,5 @@ def deliver_validated_candidate(
         title=content.title,
         body=content.body,
         client=client,
-        issue_id=issue_id,
+        issue_number=source_issue_number,
     )

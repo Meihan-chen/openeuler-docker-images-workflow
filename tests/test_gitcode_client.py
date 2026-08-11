@@ -50,7 +50,15 @@ def test_test_delivery_creates_cross_repo_pr_without_duplicate_lookup():
                     "number": 42,
                     "html_url": "https://gitcode.com/openeuler/openeuler-docker-images/pull/42",
                 },
-            )
+            ),
+            GitCodeResponse(
+                status=200,
+                payload=[{"number": "72", "title": "source issue"}],
+            ),
+            GitCodeResponse(
+                status=200,
+                payload=[{"number": "72", "title": "source issue"}],
+            ),
         ]
     )
     client = GitCodeClient(token="top-secret", transport=transport)
@@ -61,24 +69,65 @@ def test_test_delivery_creates_cross_repo_pr_without_duplicate_lookup():
         title="[New Image] Add Apache Kvrocks 2.16.0",
         body="Validated on x86_64 and aarch64.",
         branch=BRANCH,
-        issue_id="152212",
+        issue_number=72,
     )
 
     assert result.number == 42
     assert result.url.endswith("/pull/42")
-    assert len(transport.requests) == 1
-    request = transport.requests[0]
-    assert request.method == "POST"
-    assert request.path == "/repos/openeuler/openeuler-docker-images/pulls"
-    assert request.params == {"access_token": "top-secret"}
-    assert request.json_body == {
+    assert len(transport.requests) == 3
+    create, link, verify = transport.requests
+    assert create.method == "POST"
+    assert create.path == "/repos/openeuler/openeuler-docker-images/pulls"
+    assert create.params == {"access_token": "top-secret"}
+    assert create.json_body == {
         "title": "[New Image] Add Apache Kvrocks 2.16.0",
         "head": f"qq_42020325:{BRANCH}",
         "base": "master",
         "body": "Validated on x86_64 and aarch64.",
-        "issue": "152212",
         "close_related_issue": False,
     }
+    assert link.method == "POST"
+    assert link.path == (
+        "/repos/openeuler/openeuler-docker-images/pulls/42/issues"
+    )
+    assert link.params == {"access_token": "top-secret"}
+    assert link.json_body == [72]
+    assert verify.method == "GET"
+    assert verify.path == link.path
+    assert verify.params == {"access_token": "top-secret"}
+    assert verify.json_body is None
+
+
+def test_pr_creation_rejects_a_missing_linked_issue_after_verification():
+    from scripts.utils.gitcode import (
+        GitCodeAPIError,
+        GitCodeClient,
+        GitCodeResponse,
+    )
+
+    transport = RecordingTransport(
+        [
+            GitCodeResponse(
+                status=201,
+                payload={
+                    "number": 42,
+                    "html_url": "https://gitcode.com/example/pull/42",
+                },
+            ),
+            GitCodeResponse(status=200, payload=[]),
+            GitCodeResponse(status=200, payload=[]),
+        ]
+    )
+    client = GitCodeClient(token="top-secret", transport=transport)
+
+    with pytest.raises(GitCodeAPIError, match="Issue #72.*not linked"):
+        client.create_pull_request(
+            config=_delivery_config(),
+            title="[New Image] Add Apache Kvrocks 2.16.0",
+            body="Validated on x86_64 and aarch64.",
+            branch=BRANCH,
+            issue_number=72,
+        )
 
 
 def test_production_delivery_checks_every_pr_page_before_rejecting_duplicate():

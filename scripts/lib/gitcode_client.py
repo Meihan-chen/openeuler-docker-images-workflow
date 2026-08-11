@@ -128,7 +128,7 @@ class GitCodeRequest:
     method: str
     path: str
     params: Mapping[str, object] = field(default_factory=dict)
-    json_body: Mapping[str, object] | None = None
+    json_body: Mapping[str, object] | list[int] | None = None
 
     def __repr__(self) -> str:
         safe_params = {
@@ -217,7 +217,7 @@ class GitCodeClient:
         path: str,
         *,
         params: Mapping[str, object] | None = None,
-        json_body: Mapping[str, object] | None = None,
+        json_body: Mapping[str, object] | list[int] | None = None,
     ) -> object:
         authenticated_params = {"access_token": self._token}
         if params:
@@ -310,7 +310,7 @@ class GitCodeClient:
         title: str,
         body: str,
         branch: str,
-        issue_id: str = "",
+        issue_number: int | None = None,
     ) -> GitCodeResource:
         if not config.allows_pr_create:
             raise GitCodeWriteForbiddenError(
@@ -329,16 +329,15 @@ class GitCodeClient:
                     f"{duplicate.url}"
                 )
 
-        json_body = {
+        json_body: dict[str, object] = {
             "title": title,
             "head": config.pr_head(branch),
             "base": config.target_branch,
             "body": body,
         }
-        if issue_id:
-            if not issue_id.isdigit() or int(issue_id) <= 0:
-                raise ValueError("issue_id must be a positive integer")
-            json_body["issue"] = issue_id
+        if issue_number is not None:
+            if issue_number <= 0:
+                raise ValueError("issue_number must be a positive integer")
             json_body["close_related_issue"] = False
 
         payload = self._request(
@@ -346,7 +345,45 @@ class GitCodeClient:
             f"/repos/{config.target_repo}/pulls",
             json_body=json_body,
         )
-        return self._resource(payload)
+        pull_request = self._resource(payload)
+        if issue_number is not None:
+            if pull_request.number is None or pull_request.number <= 0:
+                raise GitCodeAPIError(
+                    "created Pull Request has no valid number for Issue linking"
+                )
+            self.link_pull_request_issue(
+                target_repo=config.target_repo,
+                pull_number=pull_request.number,
+                issue_number=issue_number,
+            )
+        return pull_request
+
+    def link_pull_request_issue(
+        self,
+        *,
+        target_repo: str,
+        pull_number: int,
+        issue_number: int,
+    ) -> None:
+        if pull_number <= 0:
+            raise ValueError("pull_number must be a positive integer")
+        if issue_number <= 0:
+            raise ValueError("issue_number must be a positive integer")
+        self._split_repo(target_repo)
+        path = f"/repos/{target_repo}/pulls/{pull_number}/issues"
+        self._request("POST", path, json_body=[issue_number])
+        linked = self._request("GET", path)
+        if not isinstance(linked, list):
+            raise GitCodeAPIError("GitCode linked Issue response must be an array")
+        if not any(
+            isinstance(issue, Mapping)
+            and str(issue.get("number", "")) == str(issue_number)
+            for issue in linked
+        ):
+            raise GitCodeAPIError(
+                f"Issue #{issue_number} is not linked to Pull Request "
+                f"#{pull_number} after GitCode API verification"
+            )
 
     def create_issue(
         self,

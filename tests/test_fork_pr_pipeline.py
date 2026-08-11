@@ -123,9 +123,7 @@ def test_replays_exact_validated_base_then_promotes_and_delivers(tmp_path):
     events = []
     workspace = Workspace(tmp_path / "promotion")
     class Client:
-        def get_issue(self, **kwargs):
-            events.append(("get_issue", kwargs))
-            return {"id": 152212, "number": 72}
+        pass
 
     client = Client()
 
@@ -162,7 +160,6 @@ def test_replays_exact_validated_base_then_promotes_and_delivers(tmp_path):
     assert [event[0] for event in events] == [
         "clone",
         "promote",
-        "get_issue",
         "deliver",
     ]
     assert events[0][3] == "master"
@@ -170,16 +167,11 @@ def test_replays_exact_validated_base_then_promotes_and_delivers(tmp_path):
     assert events[1][1]["branch"] == (
         "auto/new-image/kvrocks/2.16.0-oe2403sp4-e2e-654321-a2"
     )
-    issue_lookup = events[2][1]
-    assert issue_lookup == {
-        "target_repo": "openeuler/openeuler-docker-images",
-        "number": 72,
-    }
-    delivery = events[3][1]
+    delivery = events[2][1]
     assert delivery["repo"] == workspace.path
     assert delivery["client"] is client
     assert delivery["promotion"].branch == events[1][1]["branch"]
-    assert delivery["issue_id"] == "152212"
+    assert delivery["issue_number"] == 72
     assert bundle.manifest.content_sha256 in delivery["body"]
     assert delivery["title"].startswith("[New Image] Add kvrocks")
 
