@@ -450,6 +450,14 @@ def test_testcase_qa_issues_must_cite_evidence():
     assert "does not count as a blocker or major" in reviewer
 
 
+def test_testcase_qa_only_requests_repair_for_blocker_or_major_issues():
+    reviewer = " ".join(
+        (AGENTS_DIR / "testcase-qa.md").read_text().lower().split()
+    )
+
+    assert "if blocker or major issues remain after any repair round" in reviewer
+
+
 def test_creator_prompts_keep_evidence_within_harness_bounds():
     prompt = " ".join((AGENTS_DIR / "testcase-creator.md").read_text().split())
     assert "最多 6" in prompt

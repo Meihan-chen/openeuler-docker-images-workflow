@@ -599,6 +599,7 @@ def test_shared_legacy_testcase_pair_records_disagreement_and_continues(
                 "status": "needs_fix",
                 "issues": [
                     {
+                        "severity": "major",
                         "file": "Cloud/example/tests/test.sh",
                         "description": "broken",
                         "evidence": "test.sh",
@@ -612,6 +613,7 @@ def test_shared_legacy_testcase_pair_records_disagreement_and_continues(
                 "status": "needs_fix",
                 "issues": [
                     {
+                        "severity": "major",
                         "file": "Cloud/example/tests/test.sh",
                         "description": "still broken",
                         "evidence": "test.sh",
@@ -718,8 +720,144 @@ class SequenceRunner:
         self.calls = []
 
     def __call__(self, command, cwd, env, timeout):
-        self.calls.append({"command": list(command), "timeout": timeout})
+        self.calls.append(
+            {
+                "command": list(command),
+                "env": dict(env),
+                "timeout": timeout,
+            }
+        )
         return self.results.pop(0)
+
+
+def test_contract_failure_uses_one_tool_free_same_session_recovery(tmp_path):
+    from scripts.lib.agent_runtime import run_agent
+
+    executable = _executable(tmp_path)
+    workspace = tmp_path / "target"
+    workspace.mkdir()
+    session_id = "ses_contract_recovery"
+    malformed = {
+        "type": "text",
+        "sessionID": session_id,
+        "part": {
+            "text": '{"status":"approved","issues":[],"summary":"unterminated}',
+        },
+    }
+    payload = {"status": "approved", "issues": [], "summary": "fine"}
+    recovered = {
+        "type": "text",
+        "sessionID": session_id,
+        "part": {"text": json.dumps(payload)},
+    }
+    runner = SequenceRunner(
+        [
+            _completed(stdout=json.dumps(malformed)),
+            _completed(stdout=json.dumps(recovered)),
+        ]
+    )
+
+    result = run_agent(
+        executable=executable,
+        role="testcase_qa",
+        prompt="Review the testcases.",
+        workspace=workspace,
+        api_key="deepseek-secret",
+        required_keys=("status", "issues", "summary"),
+        response_keys=("status", "issues", "coverage_score", "summary"),
+        runner=runner,
+    )
+
+    assert result.payload == payload
+    assert len(runner.calls) == 2
+    recovery = runner.calls[1]
+    assert recovery["command"][recovery["command"].index("--session") + 1] == session_id
+    assert "--auto" not in recovery["command"]
+    assert "Review the testcases." not in recovery["command"]
+    recovery_prompt = recovery["command"][-1]
+    assert "complete final JSON object" in recovery_prompt
+    assert "do not return a partial object" in recovery_prompt.lower()
+    assert "status, issues, coverage_score, summary" in recovery_prompt
+    assert "JSON decoding failed" in recovery_prompt
+    assert "line 1 column" in recovery_prompt
+    permission = json.loads(recovery["env"]["OPENCODE_CONFIG_CONTENT"])[
+        "permission"
+    ]
+    assert all(value == "deny" for value in permission.values())
+
+
+@pytest.mark.parametrize(
+    ("text", "diagnostic"),
+    [
+        ("No structured result was emitted.", "No valid JSON object"),
+        ('{"issues":[]}', "missing required keys: status, summary"),
+        (
+            json.dumps({"status": "approved", "issues": "none", "summary": "x"}),
+            "issues must be a list",
+        ),
+    ],
+)
+def test_contract_failure_reports_diagnostic_without_a_session(
+    tmp_path,
+    text,
+    diagnostic,
+):
+    from scripts.lib.agent_runtime import AgentContractError, run_agent
+
+    executable = _executable(tmp_path)
+    workspace = tmp_path / "target"
+    workspace.mkdir()
+    event = {"type": "text", "part": {"text": text}}
+    runner = SequenceRunner([_completed(stdout=json.dumps(event))])
+
+    with pytest.raises(AgentContractError) as error:
+        run_agent(
+            executable=executable,
+            role="testcase_qa",
+            prompt="Review.",
+            workspace=workspace,
+            api_key="deepseek-secret",
+            required_keys=("status", "issues", "summary"),
+            runner=runner,
+        )
+
+    assert diagnostic in error.value.diagnostic
+    assert not hasattr(error.value, "kind")
+    assert len(runner.calls) == 1
+
+
+def test_contract_recovery_is_never_retried(tmp_path):
+    from scripts.lib.agent_runtime import AgentContractError, run_agent
+
+    executable = _executable(tmp_path)
+    workspace = tmp_path / "target"
+    workspace.mkdir()
+    malformed = json.dumps(
+        {
+            "type": "text",
+            "sessionID": "ses_once",
+            "part": {"text": '{"status":"approved"'},
+        }
+    )
+    runner = SequenceRunner(
+        [
+            _completed(stdout=malformed),
+            _completed(returncode=124, stdout=""),
+        ]
+    )
+
+    with pytest.raises(AgentContractError):
+        run_agent(
+            executable=executable,
+            role="testcase_qa",
+            prompt="Review.",
+            workspace=workspace,
+            api_key="deepseek-secret",
+            required_keys=("status", "issues", "summary"),
+            runner=runner,
+        )
+
+    assert len(runner.calls) == 2
 
 
 def test_a_silent_timeout_is_retried_instead_of_failing_the_round(tmp_path):

@@ -13,6 +13,7 @@ import yaml
 
 from scripts.lib.agent_runtime import (
     SCRATCH_DIR,
+    AgentContractError,
     AgentResult,
     AgentRuntimeError,
     AgentTimeoutError,
@@ -723,16 +724,19 @@ def _normalize_qa_payload(
                 "effective": len(actionable_issues),
                 "message": (
                     "Out-of-scope or malformed QA issues were ignored; only "
-                    "actionable test-file issues can trigger Creator repair."
+                    "valid in-scope test-file issues were retained."
                 ),
             }
         )
 
     reported_status = normalized.get("status")
+    normalized["status"] = "needs_fix"
+    repair_requested = qa_requests_repair(normalized)
     effective_status = (
         "unavailable"
         if normalized.get("harness_qa_timeout") is True
-        else "needs_fix" if actionable_issues else "approved"
+        or normalized.get("harness_qa_contract_failure") is True
+        else "needs_fix" if repair_requested else "approved"
     )
     normalized["status"] = effective_status
     if reported_status != effective_status:
@@ -873,15 +877,22 @@ def _run(
         else _DEFAULT_AGENT_TIMEOUT_SECONDS
     )
     try:
-        return agent_runner(
+        result = agent_runner(
             executable=executable,
             role=role,
             prompt=prompt,
             workspace=workspace,
             api_key=api_key,
             required_keys=_RUNTIME_REQUIRED_KEYS[role],
+            response_keys=_REQUIRED_KEYS[role],
             timeout=timeout,
         )
+        if role in _QA_ROLES:
+            payload = dict(result.payload)
+            payload.pop("harness_qa_timeout", None)
+            payload.pop("harness_qa_contract_failure", None)
+            return AgentResult(role=role, payload=payload)
+        return result
     except AgentTimeoutError as error:
         if role in _QA_ROLES:
             # QA never held a veto, so an unfinished review is an advisory gap
@@ -908,6 +919,38 @@ def _run(
                         "advisory and left to the deterministic gates."
                     ),
                     "harness_qa_timeout": True,
+                },
+            )
+        raise _agent_failure(
+            report_dir=report_dir,
+            role=role,
+            error=error,
+            api_key=api_key,
+        ) from error
+    except AgentContractError as error:
+        if role in _QA_ROLES:
+            log("review", f"QA_CONTRACT_UNAVAILABLE {role}")
+            _write_report(
+                report_dir,
+                f"{role.replace('_', '-')}-contract-failure.json",
+                {
+                    "status": "contract_unavailable",
+                    "stage": "agent",
+                    "role": role,
+                    "error": error.diagnostic,
+                },
+                api_key,
+            )
+            return AgentResult(
+                role=role,
+                payload={
+                    "status": "unavailable",
+                    "issues": [],
+                    "summary": (
+                        "QA could not provide a valid JSON contract after one "
+                        "bounded recovery; left to the deterministic gates."
+                    ),
+                    "harness_qa_contract_failure": True,
                 },
             )
         raise _agent_failure(

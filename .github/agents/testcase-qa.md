@@ -147,5 +147,5 @@ you suspect: "the Dockerfile healthcheck uses X, so Y is unproven" is evidence;
 - A blocker or major gap means the Creator should repair the suite in the
   bounded review loop
 - If no blocker or major gap is found, approve with `"status": "approved"`
-- If issues remain after any repair round, continue to return `"status": "needs_fix"`; this is not a terminal veto—the Harness records the disagreement and local validation makes the final decision
+- If blocker or major issues remain after any repair round, continue to return `"status": "needs_fix"`; this is not a terminal veto—the Harness records the disagreement and local validation makes the final decision
 - Never inspect, print, copy, or mention environment credentials or secrets

@@ -21,6 +21,14 @@ class AgentRuntimeError(RuntimeError):
     """Raised when OpenCode fails or violates its output contract."""
 
 
+class AgentContractError(AgentRuntimeError):
+    """Raised after a normal run cannot produce a valid required contract."""
+
+    def __init__(self, *, diagnostic: str) -> None:
+        self.diagnostic = diagnostic.strip()[:1000]
+        super().__init__(f"Agent JSON contract failed: {self.diagnostic}")
+
+
 class AgentTimeoutError(AgentRuntimeError):
     """Raised when an Agent overran its budget without completing normally."""
 
@@ -394,24 +402,71 @@ def _parse_contract(
     required_keys: tuple[str, ...],
 ) -> dict[str, object]:
     matches = []
+    objects: list[dict[str, object]] = []
+    decode_errors: list[tuple[int, json.JSONDecodeError]] = []
+    decoder = json.JSONDecoder()
     for event in _scan_json(stdout):
         if not isinstance(event, dict) or event.get("type") != "text":
             continue
         part = event.get("part")
         if not isinstance(part, dict) or not isinstance(part.get("text"), str):
             continue
-        for candidate in _scan_json(part["text"]):
+        text = part["text"]
+        for index, character in enumerate(text):
+            if character not in "[{":
+                continue
+            try:
+                candidate, _ = decoder.raw_decode(text, index)
+            except json.JSONDecodeError as error:
+                decode_errors.append((error.pos - index, error))
+                continue
+            if isinstance(candidate, dict):
+                objects.append(candidate)
             if (
                 isinstance(candidate, dict)
                 and all(key in candidate for key in required_keys)
             ):
                 matches.append(candidate)
     if not matches:
-        raise AgentRuntimeError(
-            "OpenCode completed without the required JSON contract: "
-            + ", ".join(required_keys)
-        )
+        if objects:
+            missing = [key for key in required_keys if key not in objects[-1]]
+            diagnostic = "JSON object is missing required keys: " + ", ".join(
+                missing
+            )
+        elif decode_errors:
+            _, error = max(decode_errors, key=lambda item: item[0])
+            diagnostic = (
+                f"JSON decoding failed at line {error.lineno} column "
+                f"{error.colno}: {error.msg}"
+            )
+        else:
+            diagnostic = "No valid JSON object was found in Agent text output"
+        raise AgentContractError(diagnostic=diagnostic)
     return matches[-1]
+
+
+def _session_id(stdout: str) -> str | None:
+    session_ids = [
+        event["sessionID"]
+        for event in _scan_json(stdout)
+        if isinstance(event, dict)
+        and isinstance(event.get("type"), str)
+        and isinstance(event.get("sessionID"), str)
+        and event["sessionID"].strip()
+    ]
+    return session_ids[-1] if session_ids else None
+
+
+def _validated_contract(
+    stdout: str,
+    required_keys: tuple[str, ...],
+) -> dict[str, object]:
+    payload = _parse_contract(stdout, required_keys)
+    try:
+        validate_agent_payload(payload, required_keys=required_keys)
+    except AgentRuntimeError as error:
+        raise AgentContractError(diagnostic=str(error)) from error
+    return payload
 
 
 _COMMAND_EVIDENCE_FIELDS = ("command", "semantics")
@@ -425,7 +480,11 @@ def qa_requests_repair(payload: Mapping[str, object]) -> bool:
     return (
         payload.get("status") == "needs_fix"
         and isinstance(issues, list)
-        and bool(issues)
+        and any(
+            isinstance(issue, Mapping)
+            and issue.get("severity") in {"blocker", "major"}
+            for issue in issues
+        )
     )
 
 
@@ -532,7 +591,24 @@ def _permission_config(
     role: str,
     *,
     external_read_dirs: Sequence[Path] = (),
+    deny_all: bool = False,
 ) -> str:
+    if deny_all:
+        return json.dumps(
+            {
+                "$schema": "https://opencode.ai/config.json",
+                "permission": {
+                    "*": "deny",
+                    "read": "deny",
+                    "edit": "deny",
+                    "bash": "deny",
+                    "webfetch": "deny",
+                    "task": "deny",
+                    "external_directory": "deny",
+                },
+            },
+            separators=(",", ":"),
+        )
     writable = role in _WRITE_ROLES
     external_patterns = tuple(f"{path.as_posix()}/**" for path in external_read_dirs)
     edit_permission: object = "allow" if writable else "deny"
@@ -571,6 +647,7 @@ def run_agent(
     workspace: Path,
     api_key: str,
     required_keys: tuple[str, ...],
+    response_keys: tuple[str, ...] | None = None,
     runner: AgentRunner = _default_runner,
     timeout: int = 1800,
     external_read_dirs: Sequence[Path] = (),
@@ -591,6 +668,7 @@ def run_agent(
         raise AgentRuntimeError("Agent prompt is required")
     if not required_keys:
         raise AgentRuntimeError("Agent JSON contract must require at least one key")
+    complete_keys = response_keys or required_keys
     if external_read_dirs and role != "fixer":
         raise AgentRuntimeError("external evidence directories are fixer-only")
     normalized_external_dirs: list[Path] = []
@@ -678,11 +756,54 @@ def run_agent(
         detail = str(result.stderr or result.stdout or "OpenCode failed")
         detail = detail.replace(api_key, "REDACTED").strip()[:2000]
         raise AgentRuntimeError(f"OpenCode {role} failed: {detail}")
+    stdout = str(result.stdout or "")
     try:
-        payload = _parse_contract(str(result.stdout or ""), required_keys)
-        validate_agent_payload(payload, required_keys=required_keys)
-    except AgentRuntimeError as error:
-        message = str(error).replace(api_key, "REDACTED")
-        raise AgentRuntimeError(message) from error
+        payload = _validated_contract(stdout, required_keys)
+    except AgentContractError as initial_error:
+        session_id = _session_id(stdout)
+        if session_id is None:
+            raise
+        diagnostic = initial_error.diagnostic.replace(api_key, "REDACTED")[:1000]
+        recovery_prompt = (
+            "Your previous final response failed JSON contract validation.\n\n"
+            f"Validation error:\n{diagnostic}\n\n"
+            "Regenerate and re-emit the complete final JSON object required by "
+            "the original role instructions already present in this session. "
+            "Preserve every completed conclusion, finding, evidence item, "
+            "summary, and other response field. Do not re-analyze the task, "
+            "change the workspace, or use tools. Do not return a partial object "
+            "that contains only the runtime-required keys.\n\n"
+            "The complete response must include these contract fields: "
+            + ", ".join(complete_keys)
+            + ".\nReturn exactly one valid JSON object without Markdown, code "
+            "fences, prose, or commentary."
+        )
+        recovery_command = [
+            str(executable),
+            "run",
+            "--session",
+            session_id,
+            "--model",
+            MODEL,
+            "--format",
+            "json",
+            "--dir",
+            str(workspace),
+            "--",
+            recovery_prompt,
+        ]
+        recovery_env = dict(env)
+        recovery_env["OPENCODE_CONFIG_CONTENT"] = _permission_config(
+            role,
+            deny_all=True,
+        )
+        log(
+            f"agent:{role}",
+            "CONTRACT_RECOVERY session=available",
+        )
+        recovered = runner(recovery_command, workspace, recovery_env, timeout)
+        if recovered.returncode != 0:
+            raise initial_error
+        payload = _validated_contract(str(recovered.stdout or ""), required_keys)
     log(f"agent:{role}", f"PASS elapsed={elapsed:.1f}s")
     return AgentResult(role=role, payload=payload)

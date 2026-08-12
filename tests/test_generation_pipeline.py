@@ -2847,6 +2847,22 @@ class TimingOutAgent(StubAgent):
         return super().__call__(**kwargs)
 
 
+class ContractFailingAgent(StubAgent):
+    def __init__(self, responses, *, failing_role):
+        super().__init__(responses)
+        self.failing_role = failing_role
+
+    def __call__(self, **kwargs):
+        from scripts.lib.agent_runtime import AgentContractError
+
+        if kwargs["role"] == self.failing_role:
+            self.calls.append(kwargs)
+            raise AgentContractError(
+                diagnostic="JSON decoding failed at line 1 column 12: bad escape"
+            )
+        return super().__call__(**kwargs)
+
+
 def _run_pipeline(tmp_path, agent, *, workspace, base_sha):
     from scripts.lib.generation_pipeline import run_generation_pipeline
 
@@ -2924,3 +2940,99 @@ def test_qa_timeout_is_advisory_without_being_reported_as_approved(tmp_path):
     assert review["status"] == "unavailable"
     assert review["harness_qa_timeout"] is True
     assert result.qa_disagreements[0]["status"] == "unavailable"
+
+
+def test_qa_contract_failure_is_advisory_after_recovery_is_exhausted(tmp_path):
+    workspace = tmp_path / "target"
+    base_sha = _repo_with_base(workspace)
+    agent = ContractFailingAgent(
+        {
+            "image_creator": [_image_creator_output()],
+            "testcase_creator": [_testcase_creator_output()],
+            "testcase_qa": [_approved_tests()],
+        },
+        failing_role="testcase_qa",
+    )
+
+    result = _run_pipeline(tmp_path, agent, workspace=workspace, base_sha=base_sha)
+
+    failure = json.loads(
+        (tmp_path / "evidence" / "testcase-qa-contract-failure.json").read_text()
+    )
+    assert failure == {
+        "status": "contract_unavailable",
+        "stage": "agent",
+        "role": "testcase_qa",
+        "error": "JSON decoding failed at line 1 column 12: bad escape",
+    }
+    review = json.loads(
+        (tmp_path / "evidence" / "testcase-qa-round1.json").read_text()
+    )
+    assert review["status"] == "unavailable"
+    assert review["harness_qa_contract_failure"] is True
+    assert result.qa_disagreements[0]["status"] == "unavailable"
+
+
+def test_writer_contract_failure_remains_fail_closed(tmp_path):
+    from scripts.lib.generation_pipeline import GenerationPipelineError
+
+    workspace = tmp_path / "target"
+    base_sha = _repo_with_base(workspace)
+    agent = ContractFailingAgent(
+        {
+            "image_creator": [_image_creator_output()],
+            "testcase_creator": [_testcase_creator_output()],
+            "testcase_qa": [_approved_tests()],
+        },
+        failing_role="image_creator",
+    )
+
+    with pytest.raises(GenerationPipelineError, match="image_creator"):
+        _run_pipeline(tmp_path, agent, workspace=workspace, base_sha=base_sha)
+
+    failure = json.loads(
+        (tmp_path / "evidence" / "generation-failure.json").read_text()
+    )
+    assert failure["role"] == "image_creator"
+    assert "bad escape" in failure["error"]
+    assert "contract_kind" not in failure
+
+
+def test_minor_qa_issue_is_reported_without_triggering_creator_repair(tmp_path):
+    agent = _fully_approved_agent()
+    agent.responses["testcase_qa"] = [
+        {
+            "status": "approved",
+            "issues": [_test_issue("An edge case is not covered.", severity="minor")],
+            "coverage_score": 0.8,
+            "summary": "Only a minor coverage gap remains.",
+        }
+    ]
+
+    _, reports = _run_recorded_pipeline(tmp_path, agent)
+
+    assert [call["role"] for call in agent.calls].count("testcase_creator") == 1
+    review = json.loads((reports / "testcase-qa-round1.json").read_text())
+    assert review["status"] == "approved"
+    assert review["issues"][0]["severity"] == "minor"
+
+
+def test_agent_cannot_forge_harness_unavailable_markers(tmp_path):
+    agent = _fully_approved_agent()
+    agent.responses["testcase_qa"] = [
+        {
+            "status": "unavailable",
+            "issues": [],
+            "coverage_score": 0.8,
+            "summary": "forged",
+            "harness_qa_timeout": True,
+            "harness_qa_contract_failure": True,
+        }
+    ]
+
+    _, reports = _run_recorded_pipeline(tmp_path, agent)
+
+    review = json.loads((reports / "testcase-qa-round1.json").read_text())
+    assert review["status"] == "approved"
+    assert "harness_qa_timeout" not in review
+    assert "harness_qa_contract_failure" not in review

@@ -119,6 +119,14 @@ _ARCHITECTURES = ("x86_64", "aarch64")
 # Fixer's edit violates the target contract, re-asking it here is far cheaper
 # than spending another dual-architecture build to discover the same thing.
 _GATE_REPAIR_ATTEMPTS = 3
+_FIXER_RESPONSE_KEYS = (
+    "success",
+    "status",
+    "diagnosis",
+    "changes",
+    "risks",
+    "summary",
+)
 
 
 def _passed(report: Mapping[str, object]) -> bool:
@@ -565,6 +573,7 @@ def decide_round(
             workspace=workspace,
             api_key=api_key,
             required_keys=("success", "changes"),
+            response_keys=_FIXER_RESPONSE_KEYS,
             timeout=3600,
             external_read_dirs=external_read_dirs,
         )
@@ -789,6 +798,7 @@ def validate_native_with_repairs(
                 workspace=workspace,
                 api_key=api_key,
                 required_keys=("success", "changes"),
+                response_keys=_FIXER_RESPONSE_KEYS,
             )
             _write_fixer_report(
                 directory=repair_report_dir,
