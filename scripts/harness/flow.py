@@ -58,6 +58,12 @@ from scripts.lib.native_validation import (
     validate_native_smoke,
     write_infrastructure_failure_evidence,
 )
+from scripts.lib.oe_upgrade_contract import (
+    UpgradeContractError,
+    UpgradeRequest,
+    parse_upgrade_issue,
+)
+from scripts.lib.oe_upgrade_planner import UpgradePlannerError, plan_upgrade
 from scripts.lib.pr_delivery import (
     ForkPRPipelineError,
     GitDeliveryError,
@@ -91,6 +97,45 @@ def _print_json(value: dict) -> None:
 
 def _load_task(path: Path) -> TaskSpec:
     return TaskSpec.from_json(path.read_text())
+
+
+def _oe_upgrade_request(args: argparse.Namespace) -> None:
+    options = parse_upgrade_issue(
+        args.issue_number,
+        args.title,
+        args.body_file.read_text(),
+        mode=args.mode,
+    )
+    request = UpgradeRequest.create(
+        tracking_issue_number=options.tracking_issue_number,
+        oe_version=options.oe_version,
+        scope=options.scope,
+        base_sha=args.base_sha,
+    )
+    _write_json(args.output, request.to_dict())
+    _print_json(
+        {
+            "mode": options.mode,
+            "output": str(args.output),
+            "request_key": request.request_key,
+        }
+    )
+
+
+def _oe_upgrade_plan(args: argparse.Namespace) -> None:
+    request = UpgradeRequest.from_json(args.request.read_text())
+    plan = plan_upgrade(args.workspace, request)
+    _write_json(args.output, plan.to_dict())
+    if args.summary_output is not None:
+        summary = plan.summary
+        args.summary_output.write_text(
+            "## openEuler upgrade plan\n\n"
+            f"- MDU: {summary['mdu_count']}\n"
+            f"- Tasks: {summary['task_count']}\n"
+            f"- Planning failures: {summary['planning_failed_count']}\n"
+            f"- Warnings: {summary['warning_count']}\n"
+        )
+    _print_json({"output": str(args.output), **plan.summary})
 
 
 def _task_spec(args: argparse.Namespace) -> None:
@@ -580,6 +625,28 @@ def cmd_phase1_native_release(args: argparse.Namespace) -> None:
 
 
 def _add_task_commands(commands: argparse._SubParsersAction) -> None:
+    request = commands.add_parser(
+        "oe-upgrade-request",
+        help="Parse and pin one openEuler upgrade request",
+    )
+    request.add_argument("--issue-number", required=True, type=int)
+    request.add_argument("--title", required=True)
+    request.add_argument("--body-file", required=True, type=Path)
+    request.add_argument("--mode", required=True, choices=("plan", "deliver"))
+    request.add_argument("--base-sha", required=True)
+    request.add_argument("--output", required=True, type=Path)
+    request.set_defaults(handler=_oe_upgrade_request)
+
+    plan = commands.add_parser(
+        "oe-upgrade-plan",
+        help="Generate a deterministic plan from a pinned request",
+    )
+    plan.add_argument("--workspace", required=True, type=Path)
+    plan.add_argument("--request", required=True, type=Path)
+    plan.add_argument("--output", required=True, type=Path)
+    plan.add_argument("--summary-output", type=Path)
+    plan.set_defaults(handler=_oe_upgrade_plan)
+
     task = commands.add_parser("task-spec")
     task.add_argument("--app", required=True)
     task.add_argument("--version", required=True)
@@ -866,6 +933,8 @@ def main(argv: list[str] | None = None) -> int:
         IssueLifecycleError,
         NativeRepairError,
         NativeValidationError,
+        UpgradeContractError,
+        UpgradePlannerError,
         PRDeliveryError,
         TargetContractError,
         TaskSpecError,

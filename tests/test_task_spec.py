@@ -48,10 +48,123 @@ def test_task_spec_preserves_each_supported_scenario(scenario):
     from scripts.lib.task_spec import TaskSpec
 
     raw = {**_kvrocks_input(), "scenario": scenario}
+    if scenario == "oe-upgrade":
+        raw.update(
+            {
+                "schema_version": 2,
+                "source_url": "",
+                "image_name": "kvrocks",
+                "mdu_path": "Database/kvrocks",
+                "derive_from": "2.16.0/24.03-lts-sp4",
+                "architectures": ["x86_64", "aarch64"],
+            }
+        )
     task = TaskSpec.from_workflow_dispatch(raw)
 
     assert task.scenario == scenario
     assert TaskSpec.from_json(task.to_json()).scenario == scenario
+
+
+def test_oe_upgrade_task_spec_v2_supports_nested_mdu_and_stable_identity():
+    from scripts.lib.task_spec import TaskSpec
+
+    task = TaskSpec.from_workflow_dispatch(
+        {
+            "schema_version": 2,
+            "scenario": "oe-upgrade",
+            "app": "agent",
+            "image_name": "kserve-agent",
+            "version": "0.15.2",
+            "os_version": "26.03-LTS",
+            "domain": "AI",
+            "source_url": "",
+            "mdu_path": "AI/kserve/agent",
+            "derive_from": "0.15.2/24.03-lts",
+            "architectures": ["x86_64"],
+        }
+    )
+
+    assert task.schema_version == 2
+    assert task.mdu_path == "AI/kserve/agent"
+    assert task.architectures == ("x86_64",)
+    assert task.task_key == "83022a491afdf5cc"
+    assert task.task_id == "oe-upgrade-83022a491afdf5cc"
+    assert task.branch == (
+        "auto/oe-upgrade/kserve-agent-4d10a832/0.15.2-oe2603lts"
+    )
+    assert TaskSpec.from_json(task.to_json()) == task
+
+
+def test_oe_upgrade_task_key_is_recomputed_instead_of_trusted():
+    from scripts.lib.task_spec import TaskSpec, TaskSpecError
+
+    with pytest.raises(TaskSpecError, match="task_key"):
+        TaskSpec.from_workflow_dispatch(
+            {
+                "schema_version": 2,
+                "scenario": "oe-upgrade",
+                "app": "redis",
+                "image_name": "redis",
+                "version": "8.2.1",
+                "os_version": "26.03-lts",
+                "domain": "Database",
+                "source_url": "",
+                "mdu_path": "Database/redis",
+                "derive_from": "8.2.1/24.03-lts-sp1",
+                "architectures": ["x86_64", "aarch64"],
+                "task_key": "forged",
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "raw",
+    (
+        {**_kvrocks_input(), "scenario": "oe-upgrade"},
+        {
+            **_kvrocks_input(),
+            "schema_version": 2,
+            "scenario": "new-image",
+            "mdu_path": "Database/kvrocks",
+        },
+    ),
+)
+def test_task_spec_rejects_schema_scenario_mismatch(raw):
+    from scripts.lib.task_spec import TaskSpec, TaskSpecError
+
+    with pytest.raises(TaskSpecError, match="schema_version"):
+        TaskSpec.from_workflow_dispatch(raw)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    (
+        ("mdu_path", "/Database/redis"),
+        ("mdu_path", "Database/../Others/redis"),
+        ("derive_from", "../8.2.1/24.03-lts-sp1"),
+        ("architectures", ["linux/amd64"]),
+    ),
+)
+def test_oe_upgrade_task_spec_rejects_unsafe_v2_fields(field, value):
+    from scripts.lib.task_spec import TaskSpec, TaskSpecError
+
+    raw = {
+        "schema_version": 2,
+        "scenario": "oe-upgrade",
+        "app": "redis",
+        "image_name": "redis",
+        "version": "8.2.1",
+        "os_version": "26.03-lts",
+        "domain": "Database",
+        "source_url": "",
+        "mdu_path": "Database/redis",
+        "derive_from": "8.2.1/24.03-lts-sp1",
+        "architectures": ["x86_64", "aarch64"],
+    }
+    raw[field] = value
+
+    with pytest.raises(TaskSpecError, match=field):
+        TaskSpec.from_workflow_dispatch(raw)
 
 
 def test_task_spec_rejects_unknown_scenario():

@@ -740,6 +740,8 @@ def test_target_new_image_precheck_rejects_non_new_image_task(tmp_path):
 
 def test_pipeline_stage_commands_are_exposed():
     for command in (
+        "oe-upgrade-request",
+        "oe-upgrade-plan",
         "fork-deliver",
         "issue-contract-test",
         "target-new-image-precheck",
@@ -765,6 +767,8 @@ def test_pipeline_stage_commands_are_exposed():
 
 def test_flow_is_the_only_phase_one_entry():
     for command in (
+        "oe-upgrade-request",
+        "oe-upgrade-plan",
         "task-spec",
         "candidate-create",
         "candidate-verify",
@@ -786,6 +790,75 @@ def test_flow_is_the_only_phase_one_entry():
         result = _run(command, "--help")
         assert result.returncode == 0, f"{command}: {result.stderr}"
     assert not (ROOT / "scripts" / "harness" / "phase1.py").exists()
+
+
+def test_oe_upgrade_request_and_plan_cli_are_deterministic(tmp_path):
+    repo = tmp_path / "target"
+    mdu = repo / "Database" / "redis"
+    image = mdu / "8.2.1" / "24.03-lts-sp1"
+    image.mkdir(parents=True)
+    (repo / "Database" / "image-list.yml").write_text(
+        "images:\n  redis: redis\n"
+    )
+    (mdu / "meta.yml").write_text(
+        "8.2.1-oe2403sp1:\n"
+        "  path: 8.2.1/24.03-lts-sp1/Dockerfile\n"
+    )
+    (image / "Dockerfile").write_text(
+        "FROM openeuler/openeuler:24.03-lts-sp1\n"
+    )
+    _git(repo, "init", "-b", "master")
+    _git(repo, "config", "user.email", "test@example.com")
+    _git(repo, "config", "user.name", "Test")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "fixture")
+    base_sha = _git(repo, "rev-parse", "HEAD")
+    body = tmp_path / "issue.md"
+    body.write_text(
+        "**openEuler 目标版本（Target openEuler Version）：** 26.03-lts\n"
+        "**Scope：** Database\n"
+    )
+    request = tmp_path / "request.json"
+    plan = tmp_path / "plan.json"
+    summary = tmp_path / "summary.md"
+
+    result = _run(
+        "oe-upgrade-request",
+        "--issue-number",
+        "123",
+        "--title",
+        "【oe-upgrade】upgrade latest application images to openEuler 26.03-LTS",
+        "--body-file",
+        str(body),
+        "--mode",
+        "plan",
+        "--base-sha",
+        base_sha,
+        "--output",
+        str(request),
+    )
+    assert result.returncode == 0, result.stderr
+
+    result = _run(
+        "oe-upgrade-plan",
+        "--workspace",
+        str(repo),
+        "--request",
+        str(request),
+        "--output",
+        str(plan),
+        "--summary-output",
+        str(summary),
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(plan.read_text())
+    assert payload["summary"] == {
+        "mdu_count": 1,
+        "task_count": 1,
+        "planning_failed_count": 0,
+        "warning_count": 0,
+    }
+    assert "MDU: 1" in summary.read_text()
 
 
 def test_fork_delivery_reads_token_only_from_environment():
