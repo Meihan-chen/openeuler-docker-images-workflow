@@ -380,19 +380,31 @@ def build_role_prompt(
         instructions = (_PROMPT_DIR / _PROMPT_FILES[role]).read_text()
     except (KeyError, OSError) as error:
         raise GenerationPipelineError(f"prompt is unavailable for role {role}") from error
-    app_root = f"{task.domain}/{task.app}"
+    app_root = (
+        task.mdu_path
+        if task.schema_version == 2 and task.mdu_path
+        else f"{task.domain}/{task.app}"
+    )
     image_root = f"{app_root}/{task.version}/{task.os_version}"
     contract_lines = [
         "## Immutable task contract",
         "",
         f"- Target base SHA: `{base_sha}`",
         f"- TaskSpec: `{task.to_json()}`",
-        f"- New MDU root: `{app_root}/`",
+        (
+            f"- Existing MDU root: `{app_root}/`"
+            if task.scenario == "oe-upgrade"
+            else f"- New MDU root: `{app_root}/`"
+        ),
         f"- Dockerfile: `{image_root}/Dockerfile`",
         f"- Future result root: `{app_root}/results/{task.version}/{task.os_version}/`",
         f"- Meta tag: `{_tag(task)}`",
         f"- Pinned source URL: `{task.source_url}`",
-        f"- Existing list allowed to change: `{task.domain}/image-list.yml`",
+        (
+            f"- Image list is read-only: `{task.domain}/image-list.yml`"
+            if task.scenario == "oe-upgrade"
+            else f"- Existing list allowed to change: `{task.domain}/image-list.yml`"
+        ),
         "- Derive application-specific build and runtime behavior from the "
         "official upstream and the candidate files; do not assume a fixed "
         "user, port, health command, build command or persistence path.",

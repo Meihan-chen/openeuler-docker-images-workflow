@@ -632,7 +632,11 @@ def validate_test_contract(
 ) -> dict[str, object]:
     """Validate test assets without requiring the full delivery contract."""
     repo = Path(repo)
-    app_root = f"{task.domain}/{task.app}"
+    app_root = (
+        task.mdu_path
+        if task.schema_version == 2 and task.mdu_path
+        else f"{task.domain}/{task.app}"
+    )
     findings: list[dict[str, str]] = []
     for relative, check in (
         (f"{app_root}/tests/test.sh", "runtime_test"),

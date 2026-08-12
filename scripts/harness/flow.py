@@ -68,6 +68,12 @@ from scripts.lib.oe_upgrade_candidate import (
     prepare_upgrade_candidate,
 )
 from scripts.lib.oe_upgrade_planner import UpgradePlannerError, plan_upgrade
+from scripts.lib.oe_upgrade_sanitizer import (
+    SanitizationError,
+    create_checkpoint,
+    load_checkpoint,
+    sanitize_agent_changes,
+)
 from scripts.lib.pr_delivery import (
     ForkPRPipelineError,
     GitDeliveryError,
@@ -162,6 +168,40 @@ def _oe_upgrade_prepare(args: argparse.Namespace) -> None:
             "status": gates["status"],
             "task_key": report.task_key,
             "target_directory": report.target_directory,
+        }
+    )
+
+
+def _oe_upgrade_checkpoint(args: argparse.Namespace) -> None:
+    checkpoint = create_checkpoint(
+        workspace=args.workspace,
+        base_sha=args.base_sha,
+        task=_load_task(args.task_spec),
+        destination=args.destination,
+        round_number=args.round,
+        agent_role=args.agent_role,
+    )
+    _print_json(
+        {
+            "checkpoint_id": checkpoint.checkpoint_id,
+            "destination": str(checkpoint.root),
+        }
+    )
+
+
+def _oe_upgrade_sanitize(args: argparse.Namespace) -> None:
+    report = sanitize_agent_changes(
+        workspace=args.workspace,
+        base_sha=args.base_sha,
+        task=_load_task(args.task_spec),
+        checkpoint=load_checkpoint(args.checkpoint),
+        report_path=args.report,
+    )
+    _print_json(
+        {
+            "clean": report.clean,
+            "checkpoint_id": report.checkpoint_id,
+            "report": str(args.report),
         }
     )
 
@@ -685,6 +725,33 @@ def _add_task_commands(commands: argparse._SubParsersAction) -> None:
     prepare.add_argument("--report-dir", required=True, type=Path)
     prepare.set_defaults(handler=_oe_upgrade_prepare)
 
+    checkpoint = commands.add_parser(
+        "oe-upgrade-checkpoint",
+        help="Snapshot a gated candidate before an Agent modifies it",
+    )
+    checkpoint.add_argument("--workspace", required=True, type=Path)
+    checkpoint.add_argument("--task-spec", required=True, type=Path)
+    checkpoint.add_argument("--base-sha", required=True)
+    checkpoint.add_argument("--destination", required=True, type=Path)
+    checkpoint.add_argument("--round", required=True, type=int)
+    checkpoint.add_argument(
+        "--agent-role",
+        required=True,
+        choices=("code-fixer", "testcase-creator"),
+    )
+    checkpoint.set_defaults(handler=_oe_upgrade_checkpoint)
+
+    sanitize = commands.add_parser(
+        "oe-upgrade-sanitize",
+        help="Restore changes outside an Agent role whitelist",
+    )
+    sanitize.add_argument("--workspace", required=True, type=Path)
+    sanitize.add_argument("--task-spec", required=True, type=Path)
+    sanitize.add_argument("--base-sha", required=True)
+    sanitize.add_argument("--checkpoint", required=True, type=Path)
+    sanitize.add_argument("--report", required=True, type=Path)
+    sanitize.set_defaults(handler=_oe_upgrade_sanitize)
+
     task = commands.add_parser("task-spec")
     task.add_argument("--app", required=True)
     task.add_argument("--version", required=True)
@@ -975,6 +1042,7 @@ def main(argv: list[str] | None = None) -> int:
         UpgradeContractError,
         UpgradePlannerError,
         PRDeliveryError,
+        SanitizationError,
         TargetContractError,
         TaskSpecError,
         json.JSONDecodeError,

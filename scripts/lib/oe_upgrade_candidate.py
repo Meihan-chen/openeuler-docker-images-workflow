@@ -245,7 +245,12 @@ def _copy_tree(source: Path, target: Path) -> tuple[str, ...]:
     return tuple(relative for relative, _mode, _digest in source_inventory)
 
 
-def _source_identity(dockerfile: str, source: Path, version: str) -> dict[str, object]:
+def extract_source_identity(source: Path, version: str) -> dict[str, object]:
+    """Extract application/source identity from one candidate image directory."""
+    dockerfile_path = source / "Dockerfile"
+    if not dockerfile_path.is_file() or dockerfile_path.is_symlink():
+        raise CandidateDerivationError("candidate Dockerfile is missing or unsafe")
+    dockerfile = dockerfile_path.read_text()
     version_args: dict[str, str] = {}
     for match in re.finditer(
         r"^\s*ARG\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*VERSION[A-Za-z0-9_]*)"
@@ -406,7 +411,7 @@ def prepare_upgrade_candidate(
     if not dockerfile.is_file():
         raise CandidateDerivationError("derive_from Dockerfile is missing")
     source_dockerfile = dockerfile.read_text()
-    source_identity = _source_identity(source_dockerfile, source, task.version)
+    source_identity = extract_source_identity(source, task.version)
     copied_files = _copy_tree(source, target)
     source_oe = task.derive_from.split("/", 1)[1]
     target_dockerfile = target / "Dockerfile"
