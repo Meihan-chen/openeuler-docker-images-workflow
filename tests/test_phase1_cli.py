@@ -742,6 +742,7 @@ def test_pipeline_stage_commands_are_exposed():
     for command in (
         "oe-upgrade-request",
         "oe-upgrade-plan",
+        "oe-upgrade-prepare",
         "fork-deliver",
         "issue-contract-test",
         "target-new-image-precheck",
@@ -769,6 +770,7 @@ def test_flow_is_the_only_phase_one_entry():
     for command in (
         "oe-upgrade-request",
         "oe-upgrade-plan",
+        "oe-upgrade-prepare",
         "task-spec",
         "candidate-create",
         "candidate-verify",
@@ -859,6 +861,67 @@ def test_oe_upgrade_request_and_plan_cli_are_deterministic(tmp_path):
         "warning_count": 0,
     }
     assert "MDU: 1" in summary.read_text()
+
+
+def test_oe_upgrade_prepare_cli_derives_candidate_and_runs_scope_gate(tmp_path):
+    from scripts.lib.task_spec import TaskSpec
+
+    repo = tmp_path / "target"
+    mdu = repo / "Database" / "redis"
+    source = mdu / "8.2.1" / "24.03-lts-sp1"
+    source.mkdir(parents=True)
+    (repo / "Database" / "image-list.yml").write_text(
+        "images:\n  redis: redis\n"
+    )
+    (mdu / "meta.yml").write_text(
+        "8.2.1-oe2403sp1:\n"
+        "  path: 8.2.1/24.03-lts-sp1/Dockerfile\n"
+    )
+    (source / "Dockerfile").write_text(
+        "ARG BASE=openeuler/openeuler:24.03-lts-sp1\nFROM $BASE\n"
+    )
+    _git(repo, "init", "-b", "master")
+    _git(repo, "config", "user.email", "test@example.com")
+    _git(repo, "config", "user.name", "Test")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "fixture")
+    base_sha = _git(repo, "rev-parse", "HEAD")
+    task = TaskSpec.from_workflow_dispatch(
+        {
+            "schema_version": 2,
+            "scenario": "oe-upgrade",
+            "app": "redis",
+            "image_name": "redis",
+            "version": "8.2.1",
+            "os_version": "26.03-lts",
+            "domain": "Database",
+            "source_url": "",
+            "mdu_path": "Database/redis",
+            "derive_from": "8.2.1/24.03-lts-sp1",
+            "architectures": ["x86_64", "aarch64"],
+        }
+    )
+    task_path = tmp_path / "task.json"
+    task_path.write_text(task.to_json())
+    report_dir = tmp_path / "reports"
+
+    result = _run(
+        "oe-upgrade-prepare",
+        "--workspace",
+        str(repo),
+        "--task-spec",
+        str(task_path),
+        "--base-sha",
+        base_sha,
+        "--report-dir",
+        str(report_dir),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (report_dir / "derivation-report.json").is_file()
+    assert json.loads((report_dir / "add-version-gates.json").read_text())[
+        "delivery_allowed"
+    ] is True
 
 
 def test_fork_delivery_reads_token_only_from_environment():

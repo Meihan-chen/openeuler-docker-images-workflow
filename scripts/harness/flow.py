@@ -63,6 +63,10 @@ from scripts.lib.oe_upgrade_contract import (
     UpgradeRequest,
     parse_upgrade_issue,
 )
+from scripts.lib.oe_upgrade_candidate import (
+    CandidateDerivationError,
+    prepare_upgrade_candidate,
+)
 from scripts.lib.oe_upgrade_planner import UpgradePlannerError, plan_upgrade
 from scripts.lib.pr_delivery import (
     ForkPRPipelineError,
@@ -74,6 +78,7 @@ from scripts.lib.pr_delivery import (
 from scripts.lib.task_spec import TaskSpec, TaskSpecError
 from scripts.lib.target_contract import (
     TargetContractError,
+    validate_add_version_target,
     validate_generated_target,
     validate_new_image_target_base,
 )
@@ -136,6 +141,29 @@ def _oe_upgrade_plan(args: argparse.Namespace) -> None:
             f"- Warnings: {summary['warning_count']}\n"
         )
     _print_json({"output": str(args.output), **plan.summary})
+
+
+def _oe_upgrade_prepare(args: argparse.Namespace) -> None:
+    task = _load_task(args.task_spec)
+    report = prepare_upgrade_candidate(
+        workspace=args.workspace,
+        task=task,
+        base_sha=args.base_sha,
+        report_dir=args.report_dir,
+    )
+    gates = validate_add_version_target(
+        repo=args.workspace,
+        task=task,
+        base_sha=args.base_sha,
+    )
+    _write_json(args.report_dir / "add-version-gates.json", gates)
+    _print_json(
+        {
+            "status": gates["status"],
+            "task_key": report.task_key,
+            "target_directory": report.target_directory,
+        }
+    )
 
 
 def _task_spec(args: argparse.Namespace) -> None:
@@ -647,6 +675,16 @@ def _add_task_commands(commands: argparse._SubParsersAction) -> None:
     plan.add_argument("--summary-output", type=Path)
     plan.set_defaults(handler=_oe_upgrade_plan)
 
+    prepare = commands.add_parser(
+        "oe-upgrade-prepare",
+        help="Derive and gate one deterministic add-version candidate",
+    )
+    prepare.add_argument("--workspace", required=True, type=Path)
+    prepare.add_argument("--task-spec", required=True, type=Path)
+    prepare.add_argument("--base-sha", required=True)
+    prepare.add_argument("--report-dir", required=True, type=Path)
+    prepare.set_defaults(handler=_oe_upgrade_prepare)
+
     task = commands.add_parser("task-spec")
     task.add_argument("--app", required=True)
     task.add_argument("--version", required=True)
@@ -924,6 +962,7 @@ def main(argv: list[str] | None = None) -> int:
     except (
         AgentRuntimeError,
         CandidateBundleError,
+        CandidateDerivationError,
         DeliveryConfigError,
         ForkPRPipelineError,
         GenerationPipelineError,

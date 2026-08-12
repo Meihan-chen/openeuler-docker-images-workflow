@@ -897,6 +897,105 @@ def validate_new_image_target_base(
     }
 
 
+def validate_add_version_target(
+    *,
+    repo: Path,
+    task: TaskSpec,
+    base_sha: str,
+) -> dict[str, object]:
+    """Validate a scenario-three patch without re-linting historical debt."""
+    if task.schema_version != 2 or task.scenario != "oe-upgrade":
+        raise TargetContractError("add-version policy requires oe-upgrade TaskSpec v2")
+    repo = _validate_target_base(repo, base_sha)
+    if not task.mdu_path or not task.task_key:
+        raise TargetContractError("add-version TaskSpec has no mdu_path/task_key")
+    mdu_root = task.mdu_path
+    target_root = f"{mdu_root}/{task.version}/{task.os_version}"
+    tests_root = f"{mdu_root}/tests"
+    results_root = f"{mdu_root}/results/{task.version}/{task.os_version}"
+    meta_relative = f"{mdu_root}/meta.yml"
+    readme_relative = f"{mdu_root}/README.md"
+    changes = _changed_files(repo, base_sha)
+    added_files: list[str] = []
+    modified_files: list[str] = []
+    violations: list[str] = []
+    base_tests = _git(
+        repo, "ls-tree", "--name-only", base_sha, "--", tests_root
+    ).stdout.strip()
+
+    for status, relative in changes:
+        if status == "A" and (
+            relative.startswith(f"{target_root}/")
+            or relative.startswith(f"{results_root}/")
+            or (not base_tests and relative.startswith(f"{tests_root}/"))
+        ):
+            added_files.append(relative)
+        elif status == "M" and relative in {meta_relative, readme_relative}:
+            modified_files.append(relative)
+        else:
+            violations.append(
+                f"change outside add-version scope: {status} {relative}"
+            )
+    if violations:
+        raise TargetContractError("\n".join(violations))
+
+    dockerfile_relative = f"{target_root}/Dockerfile"
+    dockerfile = repo / dockerfile_relative
+    if not dockerfile.is_file() or dockerfile.is_symlink():
+        raise TargetContractError(
+            f"required target Dockerfile is missing: {dockerfile_relative}"
+        )
+    for path in (repo / target_root).rglob("*"):
+        if path.is_symlink():
+            raise TargetContractError(
+                f"add-version target contains a symbolic link: {path.relative_to(repo)}"
+            )
+
+    before_text = _git(repo, "show", f"{base_sha}:{meta_relative}").stdout
+    after_path = repo / meta_relative
+    try:
+        before = yaml.safe_load(before_text) or {}
+        after = yaml.safe_load(after_path.read_text()) or {}
+    except (OSError, yaml.YAMLError) as error:
+        raise TargetContractError("meta.yml append-only validation failed") from error
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        raise TargetContractError("meta.yml append-only validation requires mappings")
+    before_bytes = before_text.encode()
+    after_bytes = after_path.read_bytes()
+    if not after_bytes.startswith(before_bytes) or any(
+        after.get(key) != value for key, value in before.items()
+    ):
+        raise TargetContractError("meta.yml must be append-only")
+    expected_tag = _image_tag(task.version, task.os_version)
+    expected_entry: dict[str, str] = {
+        "path": f"{task.version}/{task.os_version}/Dockerfile"
+    }
+    if len(task.architectures) == 1:
+        expected_entry["arch"] = task.architectures[0]
+    if set(after) - set(before) != {expected_tag} or after.get(expected_tag) != expected_entry:
+        raise TargetContractError(
+            "meta.yml must append exactly the TaskSpec target entry"
+        )
+
+    if readme_relative in modified_files:
+        before_readme = _git(repo, "show", f"{base_sha}:{readme_relative}").stdout
+        if not (repo / readme_relative).read_text().startswith(before_readme):
+            raise TargetContractError("README.md must be append-only")
+
+    return {
+        "status": "passed",
+        "build_allowed": True,
+        "delivery_allowed": True,
+        "task_id": task.task_id,
+        "base_sha": base_sha,
+        "policy": "add-version",
+        "added_files": len(added_files),
+        "modified_files": sorted(modified_files),
+        "findings": [],
+        "errors": [],
+    }
+
+
 def validate_generated_target(
     *,
     repo: Path,
