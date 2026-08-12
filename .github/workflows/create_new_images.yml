@@ -153,6 +153,16 @@ jobs:
             > "${RUNNER_TEMP}/phase1-prepare/base-sha.txt"
           printf 'sha=%s\n' "${base_sha}" >> "${GITHUB_OUTPUT}"
 
+      - name: Check scenario one target
+        if: ${{ inputs.operation == 'scenario_one' }}
+        run: |
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
+            target-new-image-precheck \
+            --workspace "${RUNNER_TEMP}/phase1-target" \
+            --task-spec "${RUNNER_TEMP}/phase1-prepare/task-spec.json" \
+            --base-sha "${{ steps.base.outputs.sha }}" \
+            --report-dir "${RUNNER_TEMP}/phase1-prepare/generation-reports"
+
       - name: Generate candidate via agent
         if: >-
           ${{ inputs.operation == 'validate_only' ||

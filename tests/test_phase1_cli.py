@@ -186,6 +186,27 @@ def _upstream(tmp_path):
     return repo
 
 
+def _write_new_image_task(
+    path,
+    *,
+    app="dealii",
+    domain="HPC",
+    scenario="new-image",
+):
+    path.write_text(
+        json.dumps(
+            {
+                "app": app,
+                "version": "9.8.0",
+                "os_version": "24.03-lts-sp4",
+                "domain": domain,
+                "source_url": "https://github.com/dealii/dealii/tree/v9.8.0",
+                "scenario": scenario,
+            }
+        )
+    )
+
+
 def test_task_spec_command_writes_normalized_contract(tmp_path):
     output = tmp_path / "task-spec.json"
 
@@ -612,10 +633,116 @@ def test_target_workspace_commands_clone_create_and_replay_patch(tmp_path):
     assert (replay / "Database" / "new-file").read_text() == "candidate\n"
 
 
+def test_target_new_image_precheck_rejects_existing_application(tmp_path):
+    upstream = _upstream(tmp_path)
+    app_root = upstream / "HPC" / "dealii"
+    app_root.mkdir(parents=True)
+    (app_root / "README.md").write_text("existing application\n")
+    _git(upstream, "add", ".")
+    _git(upstream, "commit", "-m", "add existing application")
+    base_sha = _git(upstream, "rev-parse", "HEAD")
+    # The decision is about the immutable target base, not the mutable worktree.
+    (app_root / "README.md").unlink()
+    app_root.rmdir()
+    (upstream / "HPC").rmdir()
+    task_spec = tmp_path / "task-spec.json"
+    report_dir = tmp_path / "generation-reports"
+    _write_new_image_task(task_spec)
+
+    result = _run(
+        "target-new-image-precheck",
+        "--workspace",
+        str(upstream),
+        "--task-spec",
+        str(task_spec),
+        "--base-sha",
+        base_sha,
+        "--report-dir",
+        str(report_dir),
+    )
+
+    assert result.returncode == 2
+    assert "scenario_one requires a new application" in result.stderr
+    assert "HPC/dealii already exists at the target base" in result.stderr
+    assert json.loads((report_dir / "generation-failure.json").read_text()) == {
+        "error": (
+            "scenario_one requires a new application: "
+            "HPC/dealii already exists at the target base"
+        ),
+        "role": "workflow",
+        "stage": "scenario_one_precheck",
+        "status": "failed",
+    }
+
+
+def test_target_new_image_precheck_accepts_missing_application(tmp_path):
+    upstream = _upstream(tmp_path)
+    base_sha = _git(upstream, "rev-parse", "HEAD")
+    task_spec = tmp_path / "task-spec.json"
+    _write_new_image_task(task_spec)
+
+    result = _run(
+        "target-new-image-precheck",
+        "--workspace",
+        str(upstream),
+        "--task-spec",
+        str(task_spec),
+        "--base-sha",
+        base_sha,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "app_root": "HPC/dealii",
+        "scenario": "new-image",
+        "status": "passed",
+    }
+
+
+def test_target_new_image_precheck_rejects_unknown_base_commit(tmp_path):
+    upstream = _upstream(tmp_path)
+    task_spec = tmp_path / "task-spec.json"
+    _write_new_image_task(task_spec)
+
+    result = _run(
+        "target-new-image-precheck",
+        "--workspace",
+        str(upstream),
+        "--task-spec",
+        str(task_spec),
+        "--base-sha",
+        "f" * 40,
+    )
+
+    assert result.returncode == 2
+    assert "base_sha is not a commit in the target repository" in result.stderr
+
+
+def test_target_new_image_precheck_rejects_non_new_image_task(tmp_path):
+    upstream = _upstream(tmp_path)
+    base_sha = _git(upstream, "rev-parse", "HEAD")
+    task_spec = tmp_path / "task-spec.json"
+    _write_new_image_task(task_spec, scenario="version-update")
+
+    result = _run(
+        "target-new-image-precheck",
+        "--workspace",
+        str(upstream),
+        "--task-spec",
+        str(task_spec),
+        "--base-sha",
+        base_sha,
+    )
+
+    assert result.returncode == 2
+    assert "requires a new-image TaskSpec" in result.stderr
+
+
 def test_pipeline_stage_commands_are_exposed():
     for command in (
         "fork-deliver",
         "issue-contract-test",
+        "target-new-image-precheck",
         "phase1-generate",
         "phase1-smoke-generate",
         "phase1-native-smoke",
@@ -642,6 +769,7 @@ def test_flow_is_the_only_phase_one_entry():
         "candidate-create",
         "candidate-verify",
         "target-clone",
+        "target-new-image-precheck",
         "target-create-patch",
         "target-apply-patch",
         "fork-deliver",

@@ -607,19 +607,26 @@ def test_contract_rejects_change_outside_task_scope(tmp_path):
         validate_generated_target(repo=repo, task=_task(), base_sha=base_sha)
 
 
-def test_contract_rejects_existing_app_in_base(tmp_path):
-    from scripts.harness.gate_diff import TargetContractError, validate_generated_target
+def test_generated_contract_does_not_recheck_existing_app_root(tmp_path):
+    from scripts.harness.gate_diff import validate_generated_target
 
     repo, _ = _repo(tmp_path)
     (repo / "Database" / "kvrocks").mkdir()
-    (repo / "Database" / "kvrocks" / "README.md").write_text("already exists\n")
+    (repo / "Database" / "kvrocks" / "existing.txt").write_text(
+        "pre-existing application content\n"
+    )
     _git(repo, "add", ".")
     _git(repo, "commit", "-m", "existing kvrocks")
     base_sha = _git(repo, "rev-parse", "HEAD")
     _write_valid_generated_candidate(repo)
 
-    with pytest.raises(TargetContractError, match="already exists"):
-        validate_generated_target(repo=repo, task=_task(), base_sha=base_sha)
+    report = validate_generated_target(
+        repo=repo,
+        task=_task(),
+        base_sha=base_sha,
+    )
+
+    assert report["build_allowed"] is True
 
 
 def test_contract_rejects_image_list_rewrite(tmp_path):

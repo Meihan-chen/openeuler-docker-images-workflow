@@ -69,6 +69,7 @@ from scripts.lib.task_spec import TaskSpec, TaskSpecError
 from scripts.lib.target_contract import (
     TargetContractError,
     validate_generated_target,
+    validate_new_image_target_base,
 )
 from scripts.lib.upstream_format_check import run_upstream_format_check
 from scripts.harness.parse_issue import parse_issue_request
@@ -339,6 +340,29 @@ def _target_clone(args: argparse.Namespace) -> None:
     )
 
 
+def _target_new_image_precheck(args: argparse.Namespace) -> None:
+    try:
+        report = validate_new_image_target_base(
+            repo=args.workspace,
+            task=_load_task(args.task_spec),
+            base_sha=args.base_sha,
+        )
+    except TargetContractError as error:
+        if args.report_dir is not None:
+            args.report_dir.mkdir(parents=True, exist_ok=True)
+            _write_json(
+                args.report_dir / "generation-failure.json",
+                {
+                    "status": "failed",
+                    "stage": "scenario_one_precheck",
+                    "role": "workflow",
+                    "error": str(error),
+                },
+            )
+        raise
+    _print_json(report)
+
+
 def _target_create_patch(args: argparse.Namespace) -> None:
     workspace = TargetWorkspace.open_existing(
         args.workspace,
@@ -594,6 +618,13 @@ def _add_candidate_commands(commands: argparse._SubParsersAction) -> None:
     clone.add_argument("--branch", required=True)
     clone.add_argument("--expected-sha", default="")
     clone.set_defaults(handler=_target_clone)
+
+    precheck = commands.add_parser("target-new-image-precheck")
+    precheck.add_argument("--workspace", required=True, type=Path)
+    precheck.add_argument("--task-spec", required=True, type=Path)
+    precheck.add_argument("--base-sha", required=True)
+    precheck.add_argument("--report-dir", type=Path)
+    precheck.set_defaults(handler=_target_new_image_precheck)
 
     create_patch = commands.add_parser("target-create-patch")
     create_patch.add_argument("--workspace", required=True, type=Path)

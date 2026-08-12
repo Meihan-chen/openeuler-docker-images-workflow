@@ -113,6 +113,36 @@ def test_scenario_one_runs_full_validation_chain_and_delivers_same_run():
     assert jobs["round-1"]["with"]["operation"] == "${{ inputs.operation }}"
 
 
+def test_scenario_one_rejects_an_existing_application_before_agent():
+    steps = _workflow()["jobs"]["prepare"]["steps"]
+    step_names = [step["name"] for step in steps]
+    precheck = next(
+        step for step in steps if step["name"] == "Check scenario one target"
+    )
+
+    assert precheck["if"] == "${{ inputs.operation == 'scenario_one' }}"
+    assert "continue-on-error" not in precheck
+    assert "target-new-image-precheck" in precheck["run"]
+    assert '--workspace "${RUNNER_TEMP}/phase1-target"' in precheck["run"]
+    assert (
+        '--task-spec "${RUNNER_TEMP}/phase1-prepare/task-spec.json"'
+        in precheck["run"]
+    )
+    assert '--base-sha "${{ steps.base.outputs.sha }}"' in precheck["run"]
+    assert (
+        '--report-dir "${RUNNER_TEMP}/phase1-prepare/generation-reports"'
+        in precheck["run"]
+    )
+    assert "inputs.app" not in precheck["run"]
+    assert "inputs.domain" not in precheck["run"]
+    assert step_names.index("Record target base commit") < step_names.index(
+        "Check scenario one target"
+    )
+    assert step_names.index("Check scenario one target") < step_names.index(
+        "Generate candidate via agent"
+    )
+
+
 def test_validation_rounds_group_build_test_and_fix_jobs():
     jobs = _workflow()["jobs"]
 

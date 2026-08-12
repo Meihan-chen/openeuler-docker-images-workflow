@@ -844,6 +844,59 @@ def _validate_docs(
             )
 
 
+def _validate_target_base(repo: Path, base_sha: str) -> Path:
+    repo = Path(repo)
+    if not _SHA_RE.fullmatch(base_sha):
+        raise TargetContractError("base_sha must be a full lowercase Git SHA")
+    if not (repo / ".git").is_dir():
+        raise TargetContractError("target repository is not a Git workspace")
+    if _git(
+        repo,
+        "cat-file",
+        "-e",
+        f"{base_sha}^{{commit}}",
+        check=False,
+    ).returncode != 0:
+        raise TargetContractError(
+            "base_sha is not a commit in the target repository"
+        )
+    return repo
+
+
+def validate_new_image_target_base(
+    *,
+    repo: Path,
+    task: TaskSpec,
+    base_sha: str,
+) -> dict[str, object]:
+    """Require scenario one to target an application absent from its Git base."""
+    if task.scenario != "new-image":
+        raise TargetContractError(
+            "scenario_one target precheck requires a new-image TaskSpec"
+        )
+    repo = _validate_target_base(repo, base_sha)
+
+    app_root, _ = _required_paths(task)
+    existing = _git(
+        repo,
+        "ls-tree",
+        "--name-only",
+        base_sha,
+        "--",
+        app_root,
+    )
+    if existing.stdout.strip():
+        raise TargetContractError(
+            "scenario_one requires a new application: "
+            f"{app_root} already exists at the target base"
+        )
+    return {
+        "status": "passed",
+        "scenario": task.scenario,
+        "app_root": app_root,
+    }
+
+
 def validate_generated_target(
     *,
     repo: Path,
@@ -851,24 +904,11 @@ def validate_generated_target(
     base_sha: str,
     phase: str = "full",
 ) -> dict[str, object]:
-    repo = Path(repo)
     if phase not in {"image", "full"}:
         raise TargetContractError("generated target phase must be image or full")
-    if not _SHA_RE.fullmatch(base_sha):
-        raise TargetContractError("base_sha must be a full lowercase Git SHA")
-    if not (repo / ".git").is_dir():
-        raise TargetContractError("target repository is not a Git workspace")
+    repo = _validate_target_base(repo, base_sha)
 
     app_root, required = _required_paths(task)
-    if _git(
-        repo,
-        "cat-file",
-        "-e",
-        f"{base_sha}:{app_root}",
-        check=False,
-    ).returncode == 0:
-        raise TargetContractError(f"{app_root} already exists at the target base")
-
     hard_findings: list[dict[str, str]] = []
     findings: list[dict[str, str]] = []
     changes = _changed_files(repo, base_sha)
