@@ -456,12 +456,23 @@ def build_role_prompt(
                 "weakening tests.",
             )
         )
+    if role == "image_creator":
+        contract_lines.extend(
+            (
+                "- Docker may only be used for bounded, read-only inspection "
+                "of the TaskSpec base image.",
+                "- Write the minimum complete candidate before optional "
+                "research; leave uncertain facts to `native_build` and "
+                "`runtime_test` through `assumptions`.",
+            )
+        )
     contract_lines.extend(
         (
             "- Do not install or upgrade host tools or packages with brew, "
             "apt, dnf, yum, pip, or similar commands.",
-            "- Do not run Docker builds or invoke linters; the harness runs "
-            "those validations after your response.",
+            "- Do not compile or build the target application, whether "
+            "directly on the Runner or inside `docker run`. Do not invoke "
+            "linters; the harness runs those validations after your response.",
             f"- Put all downloads, archives and temporary files under "
             f"`{SCRATCH_DIR}/` (also in `$OE_AGENT_SCRATCH`). Never unpack or "
             "write scratch content anywhere else in this repository.",

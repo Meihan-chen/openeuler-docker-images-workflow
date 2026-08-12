@@ -2108,7 +2108,13 @@ def test_phase1_prompts_pin_task_paths_without_injecting_app_implementation():
     ):
         assert fragment not in prompt
     assert "Do not install or upgrade host tools or packages" in prompt
-    assert "Do not run Docker builds or invoke linters" in prompt
+    assert "Do not compile or build the target application" in prompt
+    assert "directly on the Runner or inside `docker run`" in prompt
+    assert "bounded, read-only inspection of the TaskSpec base image" in prompt
+    assert (
+        "Write the minimum complete candidate before optional research" in prompt
+    )
+    assert "leave uncertain facts to `native_build` and `runtime_test`" in prompt
     # Run 30567356119 unpacked an upstream tarball into the target repo, so
     # every role must be told where research output belongs instead.
     assert ".oe-scratch" in prompt

@@ -85,6 +85,26 @@ def test_image_creator_bounds_optional_release_artifact_research():
     assert "最低成本手段" in image_creator
 
 
+def test_image_creator_limits_docker_to_read_only_base_image_probes():
+    """Native validation, not Creator research, owns application builds."""
+    image_creator = " ".join(
+        (AGENTS_DIR / "image-creator.md").read_text().split()
+    )
+
+    assert "Docker 仅用于基础镜像的轻量只读查询" in image_creator
+    assert "禁止在 `docker run` 中构建目标应用" in image_creator
+
+
+def test_image_creator_writes_candidate_before_deferring_uncertainty():
+    """An uncertain build fact must not postpone the first candidate."""
+    image_creator = " ".join(
+        (AGENTS_DIR / "image-creator.md").read_text().split()
+    )
+
+    assert "立即创建最小完整候选" in image_creator
+    assert "由后续 `native_build` 和 `runtime_test` 验证" in image_creator
+
+
 def test_image_creator_has_no_image_qa_evidence_contract():
     image_creator = (AGENTS_DIR / "image-creator.md").read_text().lower()
 
