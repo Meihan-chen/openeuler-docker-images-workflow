@@ -886,7 +886,7 @@ def deliver_validated_candidate(
     delivery_run_id: str,
     delivery_run_attempt: str,
     source_issue_number: int | None = None,
-    clone: Callable[..., TargetWorkspace] = TargetWorkspace.clone,
+    clone: Callable[..., TargetWorkspace] = TargetWorkspace.clone_at_sha,
     promote: Callable[..., Any] = promote_candidate,
     client_factory: Callable[..., Any] = GitCodeClient,
     deliver: Callable[..., Any] = deliver_promoted_candidate,
@@ -931,7 +931,12 @@ def deliver_validated_candidate(
         target_source,
         workspace_dir,
         branch=config.target_branch,
+        expected_sha=bundle.manifest.base_sha,
     )
+    if workspace.base_sha != bundle.manifest.base_sha:
+        raise ForkPRPipelineError(
+            "delivery workspace does not match the validated base SHA"
+        )
     promotion = promote(
         candidate_dir=candidate_dir,
         expected_run_id=expected_run_id,

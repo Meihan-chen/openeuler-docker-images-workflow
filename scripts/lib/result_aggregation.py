@@ -236,6 +236,18 @@ def aggregate_native_results(
         },
         "version_info.json": _json_bytes(version_info),
     }
+    if task.scenario == "oe-upgrade":
+        files["validation-summary.json"] = _json_bytes(
+            {
+                "schema_version": 1,
+                "status": "passed",
+                "task_id": task.task_id,
+                "task_key": task.task_key,
+                "validated_run_id": run_id,
+                "architectures": list(architectures),
+                "checks": ["native_build", "os_identity", "runtime_test"],
+            }
+        )
     total_bytes = sum(len(content) for content in files.values())
     if total_bytes > _MAX_RESULT_BYTES:
         raise ResultAggregationError(

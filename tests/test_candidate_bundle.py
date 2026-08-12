@@ -145,6 +145,9 @@ def test_oe_upgrade_candidate_requires_only_declared_architecture(tmp_path):
     results["architectures"] = {"x86_64": results["architectures"]["x86_64"]}
     results["architectures"]["x86_64"]["checks"]["os_identity"] = True
     results_path.write_text(json.dumps(results))
+    (tmp_path / "reports/agents/derivation-report.json").write_text(
+        '{"schema_version":1}\n'
+    )
 
     bundle = CandidateBundle.create(
         tmp_path,
@@ -200,6 +203,35 @@ def test_oe_upgrade_manifest_records_activity_and_derivation_evidence(tmp_path):
     assert bundle.manifest.sanitization_reports == (
         "reports/agents/sanitization-round1.json",
     )
+
+
+def test_oe_upgrade_candidate_requires_derivation_audit_evidence(tmp_path):
+    from scripts.lib.candidate_bundle import CandidateBundle, CandidateBundleError
+
+    task = _oe_task()
+    _payload(tmp_path)
+    (tmp_path / "reports/aarch64.json").unlink()
+    (tmp_path / "reports/aarch64.junit.xml").unlink()
+    native = json.loads((tmp_path / "reports/x86_64.json").read_text())
+    native["task_key"] = task.task_key
+    native["checks"]["os_identity"] = True
+    (tmp_path / "reports/x86_64.json").write_text(json.dumps(native))
+    results_path = tmp_path / "reports/results.json"
+    results = json.loads(results_path.read_text())
+    results["task_id"] = task.task_id
+    results["task_key"] = task.task_key
+    results["architectures"] = {"x86_64": results["architectures"]["x86_64"]}
+    results["architectures"]["x86_64"]["checks"]["os_identity"] = True
+    results_path.write_text(json.dumps(results))
+
+    with pytest.raises(CandidateBundleError, match="derivation report"):
+        CandidateBundle.create(
+            tmp_path,
+            task=task,
+            base_sha=BASE_SHA,
+            validated_run_id="123456",
+            request_key="a" * 16,
+        )
 
 
 def test_candidate_bundle_rejects_modified_file(tmp_path):

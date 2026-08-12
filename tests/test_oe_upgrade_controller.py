@@ -176,6 +176,48 @@ def test_completed_failure_is_commented_then_next_task_is_dispatched(tmp_path):
     assert any("Reason: `infrastructure`" in item["body"] for item in client.comments)
 
 
+def test_established_request_ignores_later_issue_body_edits(tmp_path):
+    from scripts.lib.oe_upgrade_activity import render_request_comment
+    from scripts.lib.oe_upgrade_contract import UpgradeRequest
+    from scripts.lib.oe_upgrade_controller import run_activity
+
+    repo = _repo(tmp_path)
+    request = UpgradeRequest.create(
+        tracking_issue_number=19,
+        oe_version="26.03-lts",
+        scope=("Database",),
+        base_sha=_git(repo, "rev-parse", "HEAD"),
+    )
+    client = Client()
+    client.comments.append(
+        {"body": render_request_comment(request), "user": {"login": "oe-bot"}}
+    )
+    edited_issue = {
+        **_issue(),
+        "title": "ordinary edited title",
+        "body": "this mutable body no longer contains workflow inputs",
+        "issue_state_detail": {"title": "已接纳"},
+    }
+
+    result = run_activity(
+        client=client,
+        target_repo="openeuler/openeuler-docker-images",
+        issue=edited_issue,
+        workspace=repo,
+        mode="deliver",
+        expected_oe_version="",
+        expected_scope="",
+        trusted_author="oe-bot",
+        run_url="https://github.example/actions/runs/4",
+        artifact_name="oe-upgrade-plan-4",
+        runs=(),
+        dispatch=lambda **_: None,
+    )
+
+    assert result.request == request
+    assert result.action == "dispatched"
+
+
 def test_all_terminal_tasks_write_one_summary_and_suspend_issue(tmp_path):
     from scripts.lib.oe_upgrade_activity import render_request_comment, task_marker
     from scripts.lib.oe_upgrade_contract import UpgradeRequest

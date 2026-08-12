@@ -265,31 +265,51 @@ def _oe_upgrade_advance(args: argparse.Namespace) -> None:
     issue_number = int(issue.get("number", issue.get("iid", 0)))
     if not args.trusted_author.strip():
         raise UpgradeControllerError("trusted GitCode bot author is required")
-    try:
-        parsed = parse_upgrade_issue(
-            issue_number,
-            str(issue.get("title", "")),
-            str(issue.get("body", "") or ""),
-            mode=args.mode,
+    persisted_request = None
+    if args.mode == "deliver":
+        comments = client.list_issue_comments(
+            target_repo=args.target_repo, number=issue_number
         )
-    except UpgradeContractError as error:
-        reject_issue_request(
-            client=client,
-            target_repo=args.target_repo,
-            issue=issue,
-            reason=str(error),
-            trusted_author=args.trusted_author,
+        try:
+            persisted_request = parse_request_comment(
+                comments, trusted_author=args.trusted_author
+            )
+        except ActivityError as error:
+            if str(error) != "no trusted upgrade request comment exists":
+                raise
+    if persisted_request is not None:
+        expected_oe = args.oe_version or persisted_request.oe_version
+        expected_scope = args.scope or persisted_request.scope
+        activity_request_key = persisted_request.request_key
+    else:
+        try:
+            parsed = parse_upgrade_issue(
+                issue_number,
+                str(issue.get("title", "")),
+                str(issue.get("body", "") or ""),
+                mode=args.mode,
+            )
+        except UpgradeContractError as error:
+            reject_issue_request(
+                client=client,
+                target_repo=args.target_repo,
+                issue=issue,
+                reason=str(error),
+                trusted_author=args.trusted_author,
+            )
+            rejected = {
+                "action": "rejected",
+                "issue_number": issue_number,
+                "reason": str(error),
+            }
+            _write_json(args.result_output, rejected)
+            _print_json(rejected)
+            return
+        expected_oe = args.oe_version or parsed.oe_version
+        expected_scope = args.scope or parsed.scope
+        activity_request_key = upgrade_request_key(
+            issue_number, parsed.oe_version
         )
-        rejected = {
-            "action": "rejected",
-            "issue_number": issue_number,
-            "reason": str(error),
-        }
-        _write_json(args.result_output, rejected)
-        _print_json(rejected)
-        return
-    expected_oe = args.oe_version or parsed.oe_version
-    expected_scope: object = args.scope or parsed.scope
     raw_runs = list_github_workflow_runs(
         github_token=github_token,
         github_repository=args.github_repository,
@@ -297,7 +317,7 @@ def _oe_upgrade_advance(args: argparse.Namespace) -> None:
     )
     runs = parse_workflow_runs(
         raw_runs,
-        request_key=upgrade_request_key(issue_number, parsed.oe_version),
+        request_key=activity_request_key,
     )
 
     def dispatch(*, task: TaskSpec, request: UpgradeRequest, issue_number: int) -> None:

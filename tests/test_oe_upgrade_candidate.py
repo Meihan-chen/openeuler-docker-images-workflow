@@ -185,6 +185,38 @@ def test_prepare_candidate_appends_readme_row_from_unique_source_row(tmp_path):
     assert report.readme["row_added"] is True
 
 
+def test_prepare_candidate_rewrites_case_insensitive_oe_display_in_real_table(tmp_path):
+    from scripts.lib.oe_upgrade_candidate import prepare_upgrade_candidate
+
+    readme = (
+        "before table\n\n"
+        "| Tags | Currently | Architectures |\n"
+        "|---|---|---|\n"
+        "| [8.2.1-oe2403sp1](https://gitee.example/Database/redis/8.2.1/"
+        "24.03-lts-sp1/Dockerfile) | redis 8.2.1 on openEuler "
+        "24.03-LTS-SP1 | amd64, arm64 |\n"
+        "\nafter table\n"
+    )
+    repo, base_sha = _repo(
+        tmp_path,
+        "ARG BASE=openeuler/openeuler:24.03-lts-sp1\nFROM $BASE\n",
+        readme=readme,
+    )
+
+    prepare_upgrade_candidate(
+        workspace=repo,
+        task=_task(),
+        base_sha=base_sha,
+        report_dir=tmp_path / "reports",
+    )
+
+    added = (repo / "Database" / "redis" / "README.md").read_text().splitlines()[5]
+    assert "8.2.1-oe2603lts" in added
+    assert "8.2.1/26.03-lts/Dockerfile" in added
+    assert "openEuler 26.03-lts" in added
+    assert "24.03-LTS-SP1" not in added
+
+
 def test_prepare_candidate_rejects_symlink_in_source_tree(tmp_path):
     from scripts.lib.oe_upgrade_candidate import CandidateDerivationError, prepare_upgrade_candidate
 

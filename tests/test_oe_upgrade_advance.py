@@ -139,6 +139,74 @@ def test_head_target_distinguishes_merged_from_unattributed_satisfaction():
     assert result.action == "finalize"
 
 
+def test_closed_unmerged_pull_request_is_a_terminal_delivery_failure():
+    from scripts.lib.oe_upgrade_advance import PullRequestView, resolve_advance
+
+    task = _task("redis")
+    result = resolve_advance(
+        request=_request(),
+        tasks=(task,),
+        base_targets={},
+        head_targets={},
+        pull_requests=(
+            PullRequestView(
+                number=10,
+                url="https://gitcode.example/pulls/10",
+                title="upgrade",
+                body=f"<!-- oe-upgrade-task:{task.task_key} -->",
+                head=task.branch,
+                base="master",
+                state="closed",
+                merged=False,
+            ),
+        ),
+        failure_reasons={},
+        runs=(),
+    )
+
+    assert result.states[0].status == "failed"
+    assert result.states[0].reason == "delivery"
+    assert result.states[0].pr_number == 10
+    assert result.states[0].pr_url.endswith("/10")
+    assert result.fallback_failures == ((task.task_key, "delivery"),)
+    assert result.action == "finalize"
+
+
+def test_latest_completed_run_is_used_for_terminal_fallback():
+    from scripts.lib.oe_upgrade_advance import RunView, resolve_advance
+
+    task = _task("redis")
+    runs = (
+        RunView(
+            run_id="22",
+            task_key=task.task_key,
+            status="completed",
+            conclusion="cancelled",
+            url="https://github.example/actions/runs/22",
+        ),
+        RunView(
+            run_id="11",
+            task_key=task.task_key,
+            status="completed",
+            conclusion="success",
+            url="https://github.example/actions/runs/11",
+        ),
+    )
+
+    result = resolve_advance(
+        request=_request(),
+        tasks=(task,),
+        base_targets={},
+        head_targets={},
+        pull_requests=(),
+        failure_reasons={},
+        runs=runs,
+    )
+
+    assert result.states[0].run_id == "22"
+    assert result.states[0].reason == "infrastructure"
+
+
 def test_inconsistent_target_is_a_contract_failure_not_existing():
     from scripts.lib.oe_upgrade_advance import resolve_advance
 

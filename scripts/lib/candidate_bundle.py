@@ -242,6 +242,10 @@ class CandidateBundle:
 
         files = {relative: _sha256(path) for relative, path in payload.items()}
         derivation = root / "reports" / "agents" / "derivation-report.json"
+        if task.scenario == "oe-upgrade" and not derivation.is_file():
+            raise CandidateBundleError(
+                "oe-upgrade candidate derivation report is required"
+            )
         sanitization_reports = tuple(
             path.relative_to(root).as_posix()
             for path in sorted(
@@ -333,6 +337,20 @@ class CandidateBundle:
             or manifest.target_os_version != task.os_version
         ):
             raise CandidateBundleError("candidate TaskSpec does not match manifest")
+        if task.scenario == "oe-upgrade":
+            derivation = root / "reports" / "agents" / "derivation-report.json"
+            if (
+                not re.fullmatch(
+                    r"sha256:[0-9a-f]{64}", manifest.derivation_report_sha256
+                )
+                or not derivation.is_file()
+                or manifest.derivation_report_sha256
+                != "sha256:" + _sha256(derivation)
+                or not re.fullmatch(r"[0-9a-f]{16}", manifest.request_key)
+            ):
+                raise CandidateBundleError(
+                    "oe-upgrade candidate activity evidence is invalid"
+                )
         _validate_reports(root, task=task)
         _validate_results(
             root,

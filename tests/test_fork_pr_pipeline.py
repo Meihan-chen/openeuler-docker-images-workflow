@@ -141,8 +141,8 @@ def test_replays_exact_validated_base_then_promotes_and_delivers(tmp_path):
 
     client = Client()
 
-    def clone(source, destination, *, branch):
-        events.append(("clone", source, destination, branch))
+    def clone(source, destination, *, branch, expected_sha):
+        events.append(("clone", source, destination, branch, expected_sha))
         return workspace
 
     def promote(**kwargs):
@@ -177,6 +177,7 @@ def test_replays_exact_validated_base_then_promotes_and_delivers(tmp_path):
         "deliver",
     ]
     assert events[0][3] == "master"
+    assert events[0][4] == bundle.manifest.base_sha
     assert events[1][1]["expected_run_id"] == "123456"
     assert events[1][1]["branch"] == (
         "auto/new-image/kvrocks/2.16.0-oe2403sp4-e2e-654321-a2"
@@ -217,32 +218,33 @@ def test_wrong_validated_run_stops_before_clone_or_delivery(tmp_path):
     assert events == []
 
 
-def test_changed_target_master_does_not_block_promotion_or_delivery(tmp_path):
-    from scripts.lib.pr_delivery import deliver_validated_candidate
+def test_delivery_rejects_clone_that_does_not_return_validated_base(tmp_path):
+    from scripts.lib.pr_delivery import ForkPRPipelineError, deliver_validated_candidate
 
     bundle = _candidate(tmp_path)
     events = []
 
-    deliver_validated_candidate(
-        candidate_dir=bundle.root,
-        expected_run_id="123456",
-        workspace_dir=tmp_path / "promotion",
-        target_source="https://gitcode.com/upstream.git",
-        config=_config(),
-        username="qq_42020325",
-        token="secret",
-        delivery_run_id="654321",
-        delivery_run_attempt="1",
-        clone=lambda *args, **kwargs: Workspace(
-            tmp_path / "promotion",
-            base_sha="9" * 40,
-        ),
-        promote=lambda **kwargs: events.append("promote"),
-        client_factory=lambda **kwargs: events.append("client"),
-        deliver=lambda **kwargs: events.append("deliver"),
-    )
+    with pytest.raises(ForkPRPipelineError, match="validated base"):
+        deliver_validated_candidate(
+            candidate_dir=bundle.root,
+            expected_run_id="123456",
+            workspace_dir=tmp_path / "promotion",
+            target_source="https://gitcode.com/upstream.git",
+            config=_config(),
+            username="qq_42020325",
+            token="secret",
+            delivery_run_id="654321",
+            delivery_run_attempt="1",
+            clone=lambda *args, **kwargs: Workspace(
+                tmp_path / "promotion",
+                base_sha="9" * 40,
+            ),
+            promote=lambda **kwargs: events.append("promote"),
+            client_factory=lambda **kwargs: events.append("client"),
+            deliver=lambda **kwargs: events.append("deliver"),
+        )
 
-    assert events == ["promote", "client", "deliver"]
+    assert events == []
 
 
 def test_production_delivery_uses_stable_task_branch(tmp_path):

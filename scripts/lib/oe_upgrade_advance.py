@@ -227,14 +227,17 @@ def _state(
         (run for run in task_runs if run.status in {"queued", "in_progress"}),
         None,
     )
+    # ``gh run list`` is newest-first and parse_workflow_runs preserves that
+    # ordering.  Never let an older attempt hide the latest terminal result.
     completed = next(
-        (run for run in reversed(task_runs) if run.status == "completed"),
+        (run for run in task_runs if run.status == "completed"),
         None,
     )
     status = "pending"
     reason = ""
     evidence = "none"
     pr_number = None
+    pr_url = ""
     run_id = active.run_id if active else completed.run_id if completed else None
     fallback = None
 
@@ -246,13 +249,20 @@ def _state(
     elif head_target == "exists" and pull_request and pull_request.merged:
         status, evidence = "merged", "merged-pr"
         pr_number = pull_request.number
+        pr_url = pull_request.url
     elif head_target == "exists":
         status, evidence = "satisfied-after-base", "target-head"
     elif pull_request and pull_request.state in {"open", "opened"}:
         status, evidence = "pr-created", "open-pr"
         pr_number = pull_request.number
+        pr_url = pull_request.url
     elif failure_reason:
         status, reason, evidence = "failed", failure_reason, "failure-marker"
+    elif pull_request and pull_request.state in {"closed", "merged"}:
+        status, reason, evidence = "failed", "delivery", "closed-pr"
+        pr_number = pull_request.number
+        pr_url = pull_request.url
+        fallback = (task.task_key or "", reason)
     elif active:
         status, evidence = "running", "active-run"
     elif completed:
@@ -275,6 +285,7 @@ def _state(
             evidence_source=evidence,
             run_id=run_id,
             pr_number=pr_number,
+            pr_url=pr_url,
         ),
         fallback,
     )

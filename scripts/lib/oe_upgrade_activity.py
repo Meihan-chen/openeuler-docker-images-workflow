@@ -233,9 +233,12 @@ def render_summary_comment(
             counts[state.status] += 1
     counts["failed"] += len(planning_failures)
     pr_items = [
-        f"- `{state.mdu_path}`: PR #{state.pr_number}"
+        (
+            f"- `{state.mdu_path}`: "
+            f"[PR #{state.pr_number}]({state.pr_url})"
+        )
         for state in states
-        if state.pr_number is not None
+        if state.pr_number is not None and state.pr_url
     ][:20]
     failure_items = [
         f"- `{state.mdu_path}`: `{state.reason}`"
@@ -525,6 +528,7 @@ class ResolvedTaskState:
     evidence_source: str
     run_id: str | None
     pr_number: int | None
+    pr_url: str
 
     def __post_init__(self) -> None:
         if self.schema_version != 1:
@@ -533,6 +537,10 @@ class ResolvedTaskState:
             raise ValueError("ResolvedTaskState status is unsupported")
         if self.status == "failed" and not self.reason:
             raise ValueError("failed state requires a reason")
+        if self.pr_number is not None and not self.pr_url.startswith("https://"):
+            raise ValueError("PR state requires an HTTPS URL")
+        if self.pr_number is None and self.pr_url:
+            raise ValueError("PR URL requires a PR number")
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)

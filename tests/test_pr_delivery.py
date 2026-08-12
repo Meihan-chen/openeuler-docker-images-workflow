@@ -114,6 +114,10 @@ def _candidate(
         json.dumps({"status": "passed", "delivery_allowed": True})
     )
     (root / "reports" / "hadolint.txt").write_text(hadolint_output)
+    if task.scenario == "oe-upgrade":
+        (root / "reports" / "agents" / "derivation-report.json").write_text(
+            '{"schema_version":1}\n'
+        )
     (root / "reports" / "results.json").write_text(
         json.dumps(
             {

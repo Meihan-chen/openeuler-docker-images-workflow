@@ -233,6 +233,7 @@ def test_stable_state_digest_changes_only_with_business_state():
         evidence_source="open-pr",
         run_id="123",
         pr_number=7,
+        pr_url="https://gitcode.example/pulls/7",
     )
 
     assert state_digest((state,), ()) == state_digest((state,), ())
@@ -271,6 +272,7 @@ def test_failure_and_summary_comments_are_bounded_and_machine_readable():
         evidence_source="failure-marker",
         run_id="123",
         pr_number=None,
+        pr_url="",
     )
     summary = render_summary_comment(
         request=request,

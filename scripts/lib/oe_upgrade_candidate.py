@@ -357,8 +357,14 @@ def _append_readme(readme: Path, task: TaskSpec, source_oe: str) -> dict[str, ob
             "reason": "readme-update-skipped: source tag table row is ambiguous",
         }
     new_row = lines[matches[0]].replace(source_tag, target_tag).replace(
-        source_oe, task.os_version
-    ).replace(source_dockerfile, target_dockerfile)
+        source_dockerfile, target_dockerfile
+    )
+    # README display text frequently uses upper-case LTS/SP while paths use
+    # the normalized lower-case form.  Replace both representations without
+    # touching any historical row.
+    new_row = re.sub(
+        re.escape(source_oe), task.os_version, new_row, flags=re.IGNORECASE
+    )
     existing_target = [line for line in lines if target_tag in line]
     if existing_target:
         if existing_target == [new_row]:

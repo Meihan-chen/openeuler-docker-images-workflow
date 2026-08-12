@@ -205,10 +205,26 @@ def test_oe_upgrade_aggregates_only_declared_architectures_at_nested_mdu(
     )
 
     result_dir = workspace / task.mdu_path / "results/8.2.1/26.03-lts"
-    assert summary["files"] == ["version_info.json", "x86_64.junit.xml"]
+    assert summary["files"] == [
+        "validation-summary.json",
+        "version_info.json",
+        "x86_64.junit.xml",
+    ]
     assert not (result_dir / "aarch64.junit.xml").exists()
     version_info = json.loads((result_dir / "version_info.json").read_text())
     assert version_info["architecture"] == "x86_64"
+    validation_summary = json.loads(
+        (result_dir / "validation-summary.json").read_text()
+    )
+    assert validation_summary == {
+        "architectures": ["x86_64"],
+        "checks": ["native_build", "os_identity", "runtime_test"],
+        "schema_version": 1,
+        "status": "passed",
+        "task_id": task.task_id,
+        "task_key": task.task_key,
+        "validated_run_id": "123456",
+    }
     results = json.loads(
         (tmp_path / "candidate/reports/results.json").read_text()
     )

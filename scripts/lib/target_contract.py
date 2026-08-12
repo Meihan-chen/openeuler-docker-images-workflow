@@ -991,8 +991,27 @@ def validate_add_version_target(
 
     if readme_relative in modified_files:
         before_readme = _git(repo, "show", f"{base_sha}:{readme_relative}").stdout
-        if not (repo / readme_relative).read_text().startswith(before_readme):
-            raise TargetContractError("README.md must be append-only")
+        after_readme = (repo / readme_relative).read_text()
+        expected_path = f"{task.version}/{task.os_version}/Dockerfile"
+        before_lines = before_readme.splitlines(keepends=True)
+        after_lines = after_readme.splitlines(keepends=True)
+        candidates = [
+            index
+            for index, line in enumerate(after_lines)
+            if line.lstrip().startswith("|")
+            and expected_tag in line
+            and task.os_version in line.lower()
+            and expected_path in line
+        ]
+        if len(candidates) != 1:
+            raise TargetContractError(
+                "README.md must add exactly one TaskSpec target table row"
+            )
+        preserved = after_lines[: candidates[0]] + after_lines[candidates[0] + 1 :]
+        if preserved != before_lines:
+            raise TargetContractError(
+                "README.md must preserve every historical byte and add one row"
+            )
 
     return {
         "status": "passed",
@@ -1213,6 +1232,8 @@ def validate_final_target(
         "version_info.json",
         *(f"{architecture}.junit.xml" for architecture in architectures),
     }
+    if task.scenario == "oe-upgrade":
+        required_files.add("validation-summary.json")
     if actual_files != required_files or any(
         not path.is_file() for path in result_dir.iterdir()
     ):
@@ -1257,6 +1278,41 @@ def validate_final_target(
         raise TargetContractError(
             "version_info.json must contain the 11-field declared-architecture evidence"
         )
+    if task.scenario == "oe-upgrade":
+        try:
+            validation_summary = json.loads(
+                (result_dir / "validation-summary.json").read_text()
+            )
+        except (OSError, json.JSONDecodeError) as error:
+            raise TargetContractError(
+                "final validation-summary evidence is invalid"
+            ) from error
+        expected_summary = {
+            "schema_version": 1,
+            "status": "passed",
+            "task_id": task.task_id,
+            "task_key": task.task_key,
+            "architectures": list(architectures),
+            "checks": ["native_build", "os_identity", "runtime_test"],
+        }
+        if (
+            not isinstance(validation_summary, dict)
+            or any(
+                validation_summary.get(key) != value
+                for key, value in expected_summary.items()
+            )
+            or set(validation_summary) != {
+                *expected_summary,
+                "validated_run_id",
+            }
+            or not re.fullmatch(
+                r"[1-9][0-9]*",
+                str(validation_summary.get("validated_run_id", "")),
+            )
+        ):
+            raise TargetContractError(
+                "validation-summary.json does not match the validated upgrade task"
+            )
     return {
         **generated,
         "result_dir": result_dir.relative_to(repo).as_posix(),

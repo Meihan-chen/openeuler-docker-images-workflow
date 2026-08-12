@@ -218,15 +218,9 @@ def run_activity(
     dispatch: Dispatch,
 ) -> ActivityResult:
     """Plan, project state, and perform at most one serial scheduling write."""
-    options = _validate_expected(
-        issue=issue,
-        expected_oe_version=expected_oe_version,
-        expected_scope=expected_scope,
-        mode=mode,
-    )
+    issue_number = int(issue.get("number", issue.get("iid", 0)))
     comments = client.list_issue_comments(
-        target_repo=target_repo,
-        number=options.tracking_issue_number,
+        target_repo=target_repo, number=issue_number,
     )
     if mode == "deliver":
         try:
@@ -236,6 +230,12 @@ def run_activity(
         except ActivityError as error:
             if str(error) != "no trusted upgrade request comment exists":
                 raise
+            options = _validate_expected(
+                issue=issue,
+                expected_oe_version=expected_oe_version,
+                expected_scope=expected_scope,
+                mode=mode,
+            )
             request = UpgradeRequest.create(
                 tracking_issue_number=options.tracking_issue_number,
                 oe_version=options.oe_version,
@@ -254,7 +254,33 @@ def run_activity(
                 target_repo=target_repo,
                 number=options.tracking_issue_number,
             )
+        else:
+            if request.tracking_issue_number != issue_number:
+                raise UpgradeControllerError(
+                    "persisted request belongs to another tracking Issue"
+                )
+            if (
+                expected_oe_version
+                and normalize_oe_version(expected_oe_version)
+                != request.oe_version
+            ):
+                raise UpgradeControllerError(
+                    "workflow oe_version does not match persisted request"
+                )
+            if (
+                expected_scope
+                and normalize_scope(expected_scope) != request.scope
+            ):
+                raise UpgradeControllerError(
+                    "workflow scope does not match persisted request"
+                )
     else:
+        options = _validate_expected(
+            issue=issue,
+            expected_oe_version=expected_oe_version,
+            expected_scope=expected_scope,
+            mode=mode,
+        )
         request = UpgradeRequest.create(
             tracking_issue_number=options.tracking_issue_number,
             oe_version=options.oe_version,

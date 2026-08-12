@@ -4,6 +4,15 @@ from pathlib import Path
 from scripts.lib.agent_runtime import AgentResult
 
 
+COMMAND_EVIDENCE = [
+    {
+        "command": "application --version",
+        "semantics": "prints the application version checked by test.sh",
+        "evidence_id": "creator-command-001",
+    }
+]
+
+
 def _git(repo: Path, *args: str) -> str:
     return subprocess.run(
         ["git", *args], cwd=repo, check=True, text=True, capture_output=True
@@ -94,6 +103,7 @@ def test_missing_test_runs_creator_then_read_only_qa(tmp_path):
 
     repo, base_sha = _candidate(tmp_path, test=False)
     roles = []
+    qa_prompts = []
 
     def agent_runner(**kwargs):
         roles.append(kwargs["role"])
@@ -107,9 +117,10 @@ def test_missing_test_runs_creator_then_read_only_qa(tmp_path):
                 payload={
                     "success": True,
                     "files_created": ["AI/kserve/agent/tests/test.sh"],
-                    "command_evidence": [],
+                    "command_evidence": COMMAND_EVIDENCE,
                 },
             )
+        qa_prompts.append(kwargs["prompt"])
         return AgentResult(
             role="testcase_qa",
             payload={
@@ -134,6 +145,8 @@ def test_missing_test_runs_creator_then_read_only_qa(tmp_path):
 
     assert result.status == "generated"
     assert roles == ["testcase_creator", "testcase_qa"]
+    assert "`AI/kserve/agent/tests/test.sh`" in qa_prompts[0]
+    assert "`AI/agent/tests/test.sh`" not in qa_prompts[0]
     assert result.sanitization is not None and result.sanitization.clean is True
     assert (tmp_path / "reports" / "testcase-creator.json").is_file()
     assert (tmp_path / "reports" / "testcase-qa-round1.json").is_file()
@@ -155,3 +168,108 @@ def test_existing_test_still_writes_approved_qa_evidence(tmp_path):
 
     assert result.status == "reused-existing"
     assert (report_dir / "testcase-qa-round1.json").is_file()
+
+
+def test_testcase_qa_requests_one_sanitized_creator_repair(tmp_path):
+    from scripts.lib.oe_upgrade_test_prep import prepare_upgrade_tests
+
+    repo, base_sha = _candidate(tmp_path, test=False)
+    roles = []
+
+    def agent_runner(**kwargs):
+        roles.append(kwargs["role"])
+        test = repo / "AI" / "kserve" / "agent" / "tests" / "test.sh"
+        if kwargs["role"] == "testcase_creator":
+            test.parent.mkdir(exist_ok=True)
+            test.write_text("#!/bin/bash\nset -euo pipefail\ntrue\n")
+            test.chmod(0o755)
+            return AgentResult(
+                role="testcase_creator",
+                payload={
+                    "success": True,
+                    "files_created": ["AI/kserve/agent/tests/test.sh"],
+                    "command_evidence": COMMAND_EVIDENCE,
+                },
+            )
+        qa_round = roles.count("testcase_qa")
+        return AgentResult(
+            role="testcase_qa",
+            payload={
+                "status": "needs_fix" if qa_round == 1 else "approved",
+                "issues": (
+                    [
+                        {
+                            "severity": "major",
+                            "category": "correctness",
+                            "file": "AI/kserve/agent/tests/test.sh",
+                            "description": "test is incomplete",
+                            "evidence": "test.sh only runs true",
+                            "suggestion": "add a functional assertion",
+                        }
+                    ]
+                    if qa_round == 1
+                    else []
+                ),
+                "coverage_score": 0.5 if qa_round == 1 else 1.0,
+                "summary": "repair needed" if qa_round == 1 else "approved",
+            },
+        )
+
+    result = prepare_upgrade_tests(
+        workspace=repo,
+        task=_task(),
+        base_sha=base_sha,
+        checkpoint_dir=tmp_path / "checkpoint",
+        report_path=tmp_path / "reports" / "sanitization.json",
+        evidence_dir=tmp_path / "reports",
+        executable=tmp_path / "opencode",
+        api_key="secret",
+        agent_runner=agent_runner,
+    )
+
+    assert roles == [
+        "testcase_creator",
+        "testcase_qa",
+        "testcase_creator",
+        "testcase_qa",
+    ]
+    assert result.qa_payload["status"] == "approved"
+    assert (tmp_path / "reports/testcase-sanitization-round2.json").is_file()
+
+
+def test_generated_test_rejects_missing_command_evidence(tmp_path):
+    import pytest
+
+    from scripts.lib.oe_upgrade_test_prep import (
+        UpgradeTestPreparationError,
+        prepare_upgrade_tests,
+    )
+
+    repo, base_sha = _candidate(tmp_path, test=False)
+
+    def agent_runner(**kwargs):
+        test = repo / "AI/kserve/agent/tests/test.sh"
+        test.parent.mkdir(exist_ok=True)
+        test.write_text("#!/bin/bash\nset -euo pipefail\ntrue\n")
+        test.chmod(0o755)
+        return AgentResult(
+            role=kwargs["role"],
+            payload={
+                "success": True,
+                "files_created": ["AI/kserve/agent/tests/test.sh"],
+                "command_evidence": [],
+            },
+        )
+
+    with pytest.raises(UpgradeTestPreparationError, match="command_evidence"):
+        prepare_upgrade_tests(
+            workspace=repo,
+            task=_task(),
+            base_sha=base_sha,
+            checkpoint_dir=tmp_path / "checkpoint",
+            report_path=tmp_path / "reports/sanitization.json",
+            evidence_dir=tmp_path / "reports",
+            executable=tmp_path / "opencode",
+            api_key="secret",
+            agent_runner=agent_runner,
+        )

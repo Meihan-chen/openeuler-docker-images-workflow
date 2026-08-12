@@ -5,10 +5,18 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Mapping
 
-from scripts.lib.agent_runtime import AgentResult, run_agent
-from scripts.lib.generation_pipeline import build_role_prompt
+from scripts.lib.agent_runtime import (
+    AgentResult,
+    AgentRuntimeError,
+    run_agent,
+    validate_agent_payload,
+)
+from scripts.lib.generation_pipeline import (
+    build_role_prompt,
+    review_testcase_candidate,
+)
 from scripts.lib.oe_upgrade_sanitizer import (
     SanitizationReport,
     create_checkpoint,
@@ -96,6 +104,15 @@ def prepare_upgrade_tests(
     )
     if creator.payload.get("success") is not True:
         raise UpgradeTestPreparationError("testcase_creator did not complete")
+    try:
+        validate_agent_payload(
+            creator.payload,
+            required_keys=("success", "files_created", "command_evidence"),
+        )
+    except AgentRuntimeError as error:
+        raise UpgradeTestPreparationError(
+            f"testcase_creator command_evidence is invalid: {error}"
+        ) from error
     (evidence_dir / "testcase-creator.json").write_text(
         json.dumps(
             creator.payload, ensure_ascii=False, indent=2, sort_keys=True
@@ -113,28 +130,61 @@ def prepare_upgrade_tests(
     if contract["runtime_test_allowed"] is not True:
         raise UpgradeTestPreparationError("generated shared tests did not pass gates")
 
-    # QA is read-only and advisory; it can report test defects but cannot
-    # mutate the candidate or override deterministic/runtime validation.
-    qa = agent_runner(
-        executable=executable,
-        role="testcase_qa",
-        prompt=build_role_prompt(
-            role="testcase_qa", task=task, base_sha=base_sha
-        ),
+    repair_checkpoint = create_checkpoint(
         workspace=workspace,
+        base_sha=base_sha,
+        task=task,
+        destination=checkpoint_dir.with_name(checkpoint_dir.name + "-qa-repair"),
+        round_number=0,
+        agent_role="testcase-creator",
+    )
+    repaired_sanitization: SanitizationReport | None = None
+
+    def post_repair_check(payload: Mapping[str, object]) -> None:
+        nonlocal repaired_sanitization
+        try:
+            validate_agent_payload(
+                payload,
+                required_keys=("success", "files_created", "command_evidence"),
+            )
+        except AgentRuntimeError as error:
+            raise UpgradeTestPreparationError(
+                f"repaired testcase_creator command_evidence is invalid: {error}"
+            ) from error
+        repaired_sanitization = sanitize_agent_changes(
+            workspace=workspace,
+            base_sha=base_sha,
+            task=task,
+            checkpoint=repair_checkpoint,
+            report_path=evidence_dir / "testcase-sanitization-round2.json",
+        )
+        repaired_contract = validate_test_contract(repo=workspace, task=task)
+        if repaired_contract["runtime_test_allowed"] is not True:
+            raise UpgradeTestPreparationError(
+                "repaired shared tests did not pass gates"
+            )
+
+    review = review_testcase_candidate(
+        agent_runner=agent_runner,
+        executable=executable,
+        workspace=workspace,
+        report_dir=evidence_dir,
+        task=task,
+        base_sha=base_sha,
         api_key=api_key,
-        required_keys=("issues", "summary"),
-        response_keys=("status", "issues", "coverage_score", "summary"),
-        timeout=1200,
+        creator_payload=creator.payload,
+        post_repair_check=post_repair_check,
     )
-    (evidence_dir / "testcase-qa-round1.json").write_text(
-        json.dumps(qa.payload, ensure_ascii=False, indent=2, sort_keys=True)
-        + "\n"
+    qa_path = evidence_dir / (
+        "testcase-qa-round2.json"
+        if (evidence_dir / "testcase-qa-round2.json").is_file()
+        else "testcase-qa-round1.json"
     )
+    qa_payload = json.loads(qa_path.read_text())
     return UpgradeTestPreparationResult(
         status="generated",
         reused_existing=False,
-        creator_payload=creator.payload,
-        qa_payload=qa.payload,
-        sanitization=sanitization,
+        creator_payload=dict(review.creator_payload or creator.payload),
+        qa_payload=qa_payload,
+        sanitization=repaired_sanitization or sanitization,
     )
