@@ -1,174 +1,18 @@
-name: openEuler Upgrade
-
-# Triggered by oe new-version event or manual.
-# 1. Check for new openEuler version
-# 2. For ALL apps: call _upgrade_versions.yml (build + test with new oe version)
-# 3. If verify fails per app: run fixer, re-verify (up to 3 rounds)
-# 4. Create batch PR for all successful apps, failure report for the rest
+name: Legacy openEuler Upgrade Entry (disabled)
 
 on:
-  repository_dispatch:
-    types: [oe-new-version]
   workflow_dispatch:
 
-env:
-  PYTHONUNBUFFERED: "1"
+permissions:
+  contents: read
 
 jobs:
-  check:
-    name: Check for new openEuler version
-    runs-on: [self-hosted, Linux, x64]
-    outputs:
-      new_oe_version: ${{ steps.c.outputs.version }}
-      apps: ${{ steps.c.outputs.apps }}
+  disabled:
+    name: Use the phase-one activity workflow
+    runs-on: ubuntu-latest
     steps:
-      - name: Check out workflow source
-        uses: actions/checkout@v4
-      - id: c
-        name: Check new openEuler version
+      - name: Explain the supported entry
         run: |
-          RESULT=$(python scripts/harness/query_version.py --check-oe --format json)
-          echo "version=$(echo "$RESULT" | python3 -c 'import sys,json; print(json.load(sys.stdin)["version"])')" >> "$GITHUB_OUTPUT"
-          echo "apps=$(echo "$RESULT" | python3 -c 'import sys,json; print(json.dumps(json.load(sys.stdin)["apps"]))')" >> "$GITHUB_OUTPUT"
-
-  # --- Batch per-app verify + fix ---
-  round-1:
-    name: "Round 1: verify images"
-    needs: check
-    if: needs.check.outputs.new_oe_version != ''
-    strategy:
-      fail-fast: false
-      max-parallel: ${{ vars.MAX_PARALLEL_IMAGES || 4 }}
-      matrix:
-        app: ${{ fromJSON(needs.check.outputs.apps) }}
-    uses: ./.github/workflows/_upgrade_versions.yml
-    with:
-      app: ${{ matrix.app }}
-      oe_version: ${{ needs.check.outputs.new_oe_version }}
-      scenario: oe-upgrade
-
-  fix-1:
-    name: "Fix failures (round 1)"
-    needs: round-1
-    if: failure()
-    strategy:
-      fail-fast: false
-      max-parallel: ${{ vars.MAX_PARALLEL_IMAGES || 4 }}
-      matrix:
-        app: ${{ fromJSON(needs.check.outputs.apps) }}
-    runs-on: [self-hosted, Linux, x64]
-    steps:
-      - name: Check out workflow source
-        uses: actions/checkout@v4
-      - name: Install opencode
-        run: curl -fsSL https://opencode.ai/install | bash
-      - name: Download test results
-        uses: actions/download-artifact@v4
-        with:
-          pattern: test-results-${{ matrix.app }}-*
-          merge-multiple: true
-      - name: Fix build failures
-        env:
-          ANTHROPIC_BASE_URL: https://api.deepseek.com/anthropic
-          ANTHROPIC_AUTH_TOKEN: ${{ secrets.DEEPSEEK_API_KEY }}
-        run: python scripts/harness/run.py fix
-
-  round-2:
-    name: "Round 2: verify images"
-    needs: fix-1
-    if: always() && !failure()
-    strategy:
-      matrix:
-        app: ${{ fromJSON(needs.check.outputs.apps) }}
-    uses: ./.github/workflows/_upgrade_versions.yml
-    with:
-      app: ${{ matrix.app }}
-      oe_version: ${{ needs.check.outputs.new_oe_version }}
-      scenario: oe-upgrade
-      retry: true
-
-  fix-2:
-    name: "Fix failures (round 2)"
-    needs: round-2
-    if: failure()
-    strategy:
-      matrix:
-        app: ${{ fromJSON(needs.check.outputs.apps) }}
-    runs-on: [self-hosted, Linux, x64]
-    steps:
-      - name: Check out workflow source
-        uses: actions/checkout@v4
-      - name: Fix build failures
-        env:
-          ANTHROPIC_BASE_URL: https://api.deepseek.com/anthropic
-          ANTHROPIC_AUTH_TOKEN: ${{ secrets.DEEPSEEK_API_KEY }}
-        run: python scripts/harness/run.py fix
-
-  round-3:
-    name: "Round 3: verify images"
-    needs: fix-2
-    if: always() && !failure()
-    strategy:
-      matrix:
-        app: ${{ fromJSON(needs.check.outputs.apps) }}
-    uses: ./.github/workflows/_upgrade_versions.yml
-    with:
-      app: ${{ matrix.app }}
-      oe_version: ${{ needs.check.outputs.new_oe_version }}
-      scenario: oe-upgrade
-      retry: true
-  # --- End batch per-app verify + fix ---
-
-  compose-pr:
-    name: Compose and create batch PR
-    needs: [round-1, round-2, round-3]
-    if: always() && !failure()
-    runs-on: [self-hosted, Linux, x64]
-    steps:
-      - name: Check out workflow source
-        uses: actions/checkout@v4
-      - name: Download test results
-        uses: actions/download-artifact@v4
-        with: { pattern: test-results-*, merge-multiple: true }
-      - name: Gate diff on changed files
-        run: python scripts/harness/gate_diff.py
-      - name: Compose PR title and body
-        env:
-          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
-          OE_VERSION: ${{ needs.check.outputs.new_oe_version }}
-        run: |
-          python scripts/harness/compose_pr.py --scenario oe-upgrade \
-            --oe-version "$OE_VERSION"
-      - name: Create PR on GitCode
-        env:
-          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
-        run: |
-          python scripts/utils/gitcode.py pr create \
-            --title "$(cat /tmp/pr-title)" \
-            --body-file /tmp/pr-body.md \
-            --head "$(git branch --show-current)"
-
-  failure-report:
-    name: Create failure report Issue
-    needs: [round-1, round-2, round-3, check]
-    if: failure()
-    runs-on: [self-hosted, Linux, x64]
-    steps:
-      - name: Check out workflow source
-        uses: actions/checkout@v4
-      - name: Download test results
-        uses: actions/download-artifact@v4
-        with: { pattern: test-results-*, merge-multiple: true }
-      - name: Report failures
-        env:
-          OE_VERSION: ${{ needs.check.outputs.new_oe_version }}
-        run: python scripts/harness/run.py report-failures --oe-version "$OE_VERSION"
-      - name: Create failure report Issue
-        env:
-          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
-          OE_VERSION: ${{ needs.check.outputs.new_oe_version }}
-        run: |
-          python scripts/utils/gitcode.py issue create \
-            --title "[oe-upgrade] Failure report for openEuler $OE_VERSION" \
-            --body-file /tmp/failure-report.md \
-            --labels "oe-upgrade,needs-human-review"
+          echo "This legacy batch workflow is disabled."
+          echo "Use monitor_oe_upgrade_issues.yml with a tracking Issue."
+          exit 2

@@ -99,6 +99,20 @@ def _config(mode="fork_pr"):
     )
 
 
+def _production_config():
+    from scripts.lib.gitcode_client import DeliveryConfig
+
+    return DeliveryConfig.from_mapping(
+        {
+            "environment": "production",
+            "delivery_mode": "direct_branch_pr",
+            "target_repo": "openeuler/openeuler-docker-images",
+            "push_repo": "openeuler/openeuler-docker-images",
+            "target_branch": "master",
+        }
+    )
+
+
 @dataclass(frozen=True)
 class Workspace:
     path: object
@@ -229,6 +243,66 @@ def test_changed_target_master_does_not_block_promotion_or_delivery(tmp_path):
     )
 
     assert events == ["promote", "client", "deliver"]
+
+
+def test_production_delivery_uses_stable_task_branch(tmp_path):
+    from scripts.lib.pr_delivery import deliver_validated_candidate
+
+    bundle = _candidate(tmp_path)
+    events = []
+
+    deliver_validated_candidate(
+        candidate_dir=bundle.root,
+        expected_run_id="123456",
+        workspace_dir=tmp_path / "promotion",
+        target_source="https://gitcode.com/upstream.git",
+        config=_production_config(),
+        username="openeuler-bot",
+        token="secret",
+        delivery_run_id="654321",
+        delivery_run_attempt="2",
+        clone=lambda *args, **kwargs: Workspace(tmp_path / "promotion"),
+        promote=lambda **kwargs: events.append(("promote", kwargs))
+        or Promotion(branch=kwargs["branch"]),
+        client_factory=lambda **kwargs: object(),
+        deliver=lambda **kwargs: events.append(("deliver", kwargs)) or Resource(),
+    )
+
+    assert events[0][1]["branch"] == bundle.task.branch
+    assert not events[0][1]["branch"].endswith("-e2e-654321-a2")
+
+
+def test_production_cli_accepts_explicit_delivery_configuration():
+    from scripts.harness.flow import _parser
+
+    args = _parser().parse_args(
+        [
+            "fork-deliver",
+            "--candidate-dir",
+            "/tmp/candidate",
+            "--expected-run-id",
+            "1",
+            "--delivery-run-id",
+            "2",
+            "--delivery-run-attempt",
+            "1",
+            "--workspace",
+            "/tmp/workspace",
+            "--environment",
+            "production",
+            "--delivery-mode",
+            "direct_branch_pr",
+            "--target-repo",
+            "openeuler/openeuler-docker-images",
+            "--push-repo",
+            "openeuler/openeuler-docker-images",
+            "--target-branch",
+            "master",
+        ]
+    )
+
+    assert args.environment == "production"
+    assert args.delivery_mode == "direct_branch_pr"
 
 
 def test_validate_only_and_missing_token_stop_before_clone(tmp_path):

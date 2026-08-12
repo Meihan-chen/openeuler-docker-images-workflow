@@ -151,11 +151,55 @@ def test_oe_upgrade_candidate_requires_only_declared_architecture(tmp_path):
         task=task,
         base_sha=BASE_SHA,
         validated_run_id="123456",
+        request_key="a" * 16,
     )
 
     assert bundle.manifest.task_key == task.task_key
     assert bundle.manifest.architectures == ("x86_64",)
     assert CandidateBundle.verify(tmp_path).task == task
+
+
+def test_oe_upgrade_manifest_records_activity_and_derivation_evidence(tmp_path):
+    from scripts.lib.candidate_bundle import CandidateBundle
+
+    task = _oe_task()
+    _payload(tmp_path)
+    (tmp_path / "reports/aarch64.json").unlink()
+    (tmp_path / "reports/aarch64.junit.xml").unlink()
+    native = json.loads((tmp_path / "reports/x86_64.json").read_text())
+    native["task_key"] = task.task_key
+    native["checks"]["os_identity"] = True
+    (tmp_path / "reports/x86_64.json").write_text(json.dumps(native))
+    results_path = tmp_path / "reports/results.json"
+    results = json.loads(results_path.read_text())
+    results["task_id"] = task.task_id
+    results["task_key"] = task.task_key
+    results["architectures"] = {"x86_64": results["architectures"]["x86_64"]}
+    results["architectures"]["x86_64"]["checks"]["os_identity"] = True
+    results_path.write_text(json.dumps(results))
+    (tmp_path / "reports/agents/derivation-report.json").write_text(
+        '{"schema_version":1}\n'
+    )
+    (tmp_path / "reports/agents/sanitization-round1.json").write_text(
+        '{"schema_version":1,"clean":true}\n'
+    )
+
+    bundle = CandidateBundle.create(
+        tmp_path,
+        task=task,
+        base_sha=BASE_SHA,
+        validated_run_id="123456",
+        request_key="a" * 16,
+    )
+
+    assert bundle.manifest.scenario == "oe-upgrade"
+    assert bundle.manifest.request_key == "a" * 16
+    assert bundle.manifest.mdu_path == "Database/redis"
+    assert bundle.manifest.derive_from == "8.2.1/24.03-lts-sp1"
+    assert bundle.manifest.derivation_report_sha256.startswith("sha256:")
+    assert bundle.manifest.sanitization_reports == (
+        "reports/agents/sanitization-round1.json",
+    )
 
 
 def test_candidate_bundle_rejects_modified_file(tmp_path):

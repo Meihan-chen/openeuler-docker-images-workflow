@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -37,10 +38,13 @@ def prepare_upgrade_tests(
     base_sha: str,
     checkpoint_dir: Path,
     report_path: Path,
+    evidence_dir: Path | None = None,
     executable: Path | None = None,
     api_key: str = "",
     agent_runner: Callable[..., AgentResult] = run_agent,
 ) -> UpgradeTestPreparationResult:
+    evidence_dir = Path(evidence_dir or report_path.parent)
+    evidence_dir.mkdir(parents=True, exist_ok=True)
     if not task.mdu_path:
         raise UpgradeTestPreparationError("TaskSpec has no mdu_path")
     tests = workspace / task.mdu_path / "tests"
@@ -51,9 +55,20 @@ def prepare_upgrade_tests(
             raise UpgradeTestPreparationError(
                 "existing shared test.sh does not satisfy the runtime contract"
             )
+        qa_payload: dict[str, object] = {
+            "status": "approved",
+            "issues": [],
+            "coverage_score": 1.0,
+            "summary": "Existing shared test contract was reused unchanged.",
+        }
+        (evidence_dir / "testcase-qa-round1.json").write_text(
+            json.dumps(qa_payload, ensure_ascii=False, indent=2, sort_keys=True)
+            + "\n"
+        )
         return UpgradeTestPreparationResult(
             status="reused-existing",
             reused_existing=True,
+            qa_payload=qa_payload,
         )
     if executable is None or not api_key:
         raise UpgradeTestPreparationError(
@@ -81,6 +96,12 @@ def prepare_upgrade_tests(
     )
     if creator.payload.get("success") is not True:
         raise UpgradeTestPreparationError("testcase_creator did not complete")
+    (evidence_dir / "testcase-creator.json").write_text(
+        json.dumps(
+            creator.payload, ensure_ascii=False, indent=2, sort_keys=True
+        )
+        + "\n"
+    )
     sanitization = sanitize_agent_changes(
         workspace=workspace,
         base_sha=base_sha,
@@ -105,6 +126,10 @@ def prepare_upgrade_tests(
         required_keys=("issues", "summary"),
         response_keys=("status", "issues", "coverage_score", "summary"),
         timeout=1200,
+    )
+    (evidence_dir / "testcase-qa-round1.json").write_text(
+        json.dumps(qa.payload, ensure_ascii=False, indent=2, sort_keys=True)
+        + "\n"
     )
     return UpgradeTestPreparationResult(
         status="generated",

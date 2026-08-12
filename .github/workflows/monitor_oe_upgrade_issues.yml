@@ -1,8 +1,8 @@
 name: Monitor openEuler Upgrade Issues
 
-# Registration-only default-branch entry. Feature branches can provide the
-# implementation at this stable path and select it with workflow_dispatch ref.
 on:
+  schedule:
+    - cron: "*/30 * * * *"
   workflow_dispatch:
     inputs:
       tracking_issue_number:
@@ -10,7 +10,7 @@ on:
         required: true
         type: string
       oe_version:
-        description: "Target openEuler version"
+        description: "Target openEuler version; empty reuses the Issue request"
         required: false
         type: string
       scope:
@@ -27,16 +27,105 @@ on:
           - deliver
 
 permissions:
+  actions: write
   contents: read
 
+concurrency:
+  group: >-
+    oe-upgrade-advance-${{ inputs.tracking_issue_number ||
+    'scheduled' }}
+  cancel-in-progress: false
+
 jobs:
-  registration-only:
-    name: Refuse execution from the registration stub
-    runs-on: [self-hosted, Linux, X64, oe-image-x86]
-    timeout-minutes: 2
+  oe-upgrade-advance:
+    name: Plan or advance one upgrade activity
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - name: Explain how to select an implementation
+      - name: Check out workflow source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Validate manual inputs
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        env:
+          ISSUE_NUMBER: ${{ inputs.tracking_issue_number }}
         run: |
-          echo "This default-branch file only registers the workflow path."
-          echo "Run the workflow with --ref pointing to an implementation branch."
-          exit 2
+          case "${ISSUE_NUMBER}" in
+            ''|*[!0-9]*|0)
+              echo "tracking_issue_number must be a positive integer" >&2
+              exit 2
+              ;;
+          esac
+
+      - name: Clone current target repository
+        run: |
+          python3 scripts/harness/flow.py target-clone \
+            --source https://gitcode.com/openeuler/openeuler-docker-images.git \
+            --destination "${RUNNER_TEMP}/target" \
+            --branch master
+
+      - name: Recompute plan and advance at most one task
+        env:
+          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+          GITCODE_USERNAME: ${{ vars.GITCODE_BOT_USERNAME }}
+          ISSUE_NUMBER: ${{ inputs.tracking_issue_number }}
+          OE_VERSION: ${{ inputs.oe_version }}
+          SCOPE: ${{ inputs.scope }}
+          MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || 'deliver' }}
+        run: |
+          if [ -z "${GITCODE_USERNAME}" ]; then
+            echo "GITCODE_BOT_USERNAME repository variable is required" >&2
+            exit 2
+          fi
+          issue_args=()
+          if [ -n "${ISSUE_NUMBER}" ]; then
+            issue_args=(--issue-number "${ISSUE_NUMBER}")
+          fi
+          python3 scripts/harness/flow.py oe-upgrade-advance \
+            --target-repo openeuler/openeuler-docker-images \
+            "${issue_args[@]}" \
+            --workspace "${RUNNER_TEMP}/target" \
+            --mode "${MODE}" \
+            --oe-version "${OE_VERSION}" \
+            --scope "${SCOPE}" \
+            --trusted-author "${GITCODE_USERNAME}" \
+            --run-url \
+              "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --artifact-name "oe-upgrade-advance-${{ github.run_id }}" \
+            --github-repository "${GITHUB_REPOSITORY}" \
+            --github-ref "${GITHUB_REF_NAME}" \
+            --worker-workflow oe_upgrade_worker.yml \
+            --plan-output "${RUNNER_TEMP}/plan.json" \
+            --result-output "${RUNNER_TEMP}/advance-result.json"
+
+      - name: Publish plan summary
+        if: ${{ always() }}
+        run: |
+          if [ ! -f "${RUNNER_TEMP}/plan.json" ]; then
+            echo "No plan was produced." >> "${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
+          python3 - "${RUNNER_TEMP}/plan.json" >> "${GITHUB_STEP_SUMMARY}" <<'PY'
+          import json
+          import sys
+          plan = json.load(open(sys.argv[1]))
+          summary = plan["summary"]
+          print("## openEuler upgrade plan")
+          print()
+          print(f"- MDU: {summary['mdu_count']}")
+          print(f"- Tasks: {summary['task_count']}")
+          print(f"- Planning failures: {summary['planning_failed_count']}")
+          print(f"- Warnings: {summary['warning_count']}")
+          PY
+
+      - name: Upload plan and state projection
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: oe-upgrade-advance-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/plan.json
+            ${{ runner.temp }}/advance-result.json
+          if-no-files-found: warn
+          retention-days: 30

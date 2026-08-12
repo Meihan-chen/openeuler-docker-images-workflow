@@ -18,7 +18,12 @@ from scripts.lib.candidate_bundle import (
     promote_candidate,
 )
 from scripts.lib.git_workspace import TargetWorkspace
-from scripts.lib.gitcode_client import DeliveryConfig, GitCodeClient
+from scripts.lib.gitcode_client import (
+    DeliveryConfig,
+    GitCodeClient,
+    GitCodeResource,
+)
+from scripts.lib.oe_upgrade_activity import task_marker
 from scripts.lib.target_contract import native_checks_pass
 
 
@@ -242,6 +247,10 @@ def push_working_branch(
             env=env,
             token=token,
         )
+        if config.environment == "production" and observed_sha:
+            raise GitDeliveryError(
+                "production delivery branch already exists; refusing to overwrite it"
+            )
         _run_git(
             runner,
             repo,
@@ -450,7 +459,9 @@ def _qa_review_lines(root: Path, prefix: str, label: str) -> tuple[str, ...]:
     return tuple(lines)
 
 
-def _fixer_process_lines(root: Path) -> tuple[str, ...]:
+def _fixer_process_lines(
+    root: Path, *, architectures: Sequence[str] = ("x86_64", "aarch64")
+) -> tuple[str, ...]:
     pattern = re.compile(
         r"^fixer-native-(?P<architecture>[A-Za-z0-9_]+)"
         r"-round(?P<round>[0-9]+)"
@@ -481,7 +492,9 @@ def _fixer_process_lines(root: Path) -> tuple[str, ...]:
             *lines,
             "- No native repair was required.",
             "- Final outcome: the candidate passed sealed native validation "
-            "on `x86_64` and `aarch64`.",
+            "on "
+            + " and ".join(f"`{architecture}`" for architecture in architectures)
+            + ".",
             "",
         )
 
@@ -504,12 +517,12 @@ def _fixer_process_lines(root: Path) -> tuple[str, ...]:
             f"{_brief(report.get('summary'))}"
         )
 
-        architectures = review.get("architectures")
+        reviewed_architectures = review.get("architectures")
         failed_architectures: list[str] = []
-        if isinstance(architectures, dict):
+        if isinstance(reviewed_architectures, dict):
             failed_architectures = [
                 str(name)
-                for name, evidence in architectures.items()
+                for name, evidence in reviewed_architectures.items()
                 if not isinstance(evidence, dict)
                 or evidence.get("status") != "passed"
             ]
@@ -552,7 +565,9 @@ def _fixer_process_lines(root: Path) -> tuple[str, ...]:
     lines.extend(
         (
             "- Final outcome: the repaired candidate passed sealed native "
-            "validation on `x86_64` and `aarch64`.",
+            "validation on "
+            + " and ".join(f"`{architecture}`" for architecture in architectures)
+            + ".",
             "",
         )
     )
@@ -594,9 +609,16 @@ def _patch_changes(bundle: CandidateBundle) -> tuple[tuple[str, str], ...]:
 
 def compose_pull_request(bundle: CandidateBundle) -> PullRequestContent:
     task = bundle.task
+    architectures = (
+        task.architectures
+        if task.schema_version == 2
+        else ("x86_64", "aarch64")
+    )
     changes = _patch_changes(bundle)
     rows = []
-    for architecture in ("x86_64", "aarch64"):
+    build_success: dict[str, bool] = {}
+    test_pass_rates: dict[str, float] = {}
+    for architecture in architectures:
         report = _load_json(
             bundle.root / "reports" / f"{architecture}.json",
             architecture,
@@ -604,8 +626,18 @@ def compose_pull_request(bundle: CandidateBundle) -> PullRequestContent:
         if report.get("status") != "passed":
             raise PRDeliveryError(f"{architecture} evidence did not pass")
         checks = report.get("checks")
-        if not native_checks_pass(checks):
+        if not native_checks_pass(
+            checks, oe_upgrade=task.scenario == "oe-upgrade"
+        ):
             raise PRDeliveryError(f"{architecture} checks are incomplete")
+        confidence_architecture = (
+            "amd64" if architecture == "x86_64" else "arm64"
+        )
+        build_success[confidence_architecture] = True
+        test_pass_rates[confidence_architecture] = junit_pass_rate(
+            bundle.root / "reports" / f"{architecture}.junit.xml",
+            architecture,
+        )
         rows.append(
             "| "
             + " | ".join(
@@ -629,21 +661,24 @@ def compose_pull_request(bundle: CandidateBundle) -> PullRequestContent:
         "testcase-qa",
         "Testcase",
     )
-    fixer_process = _fixer_process_lines(bundle.root)
+    fixer_process = _fixer_process_lines(
+        bundle.root, architectures=architectures
+    )
     hadolint_lines = _hadolint_lines(bundle.root)
     hadolint_violations = _hadolint_violation_count(bundle.root)
+    # The confidence score is descriptive PR evidence. Missing architectures
+    # are neutral for a TaskSpec that intentionally declares a smaller set.
+    effective_build = {
+        "amd64": build_success.get("amd64", True),
+        "arm64": build_success.get("arm64", True),
+    }
+    effective_tests = {
+        "amd64": test_pass_rates.get("amd64", 1.0),
+        "arm64": test_pass_rates.get("arm64", 1.0),
+    }
     confidence = calculate_confidence(
-        {"amd64": True, "arm64": True},
-        {
-            "amd64": junit_pass_rate(
-                bundle.root / "reports" / "x86_64.junit.xml",
-                "x86_64",
-            ),
-            "arm64": junit_pass_rate(
-                bundle.root / "reports" / "aarch64.junit.xml",
-                "aarch64",
-            ),
-        },
+        effective_build,
+        effective_tests,
         hadolint_violations,
         True,
     )
@@ -651,18 +686,41 @@ def compose_pull_request(bundle: CandidateBundle) -> PullRequestContent:
         f"- Promoted from validated run "
         f"`{bundle.manifest.validated_run_id}`."
     )
-    title = (
-        f"[New Image] Add {task.app} {task.version} "
-        f"for openEuler {task.os_version}"
-    )
+    if task.scenario == "oe-upgrade":
+        title = (
+            f"[oe-upgrade] {task.mdu_path} {task.version} "
+            f"for openEuler {task.os_version}"
+        )
+        summary = (
+            f"Upgrade `{task.mdu_path}` application version `{task.version}` "
+            f"from openEuler `{task.derive_from.split('/', 1)[1]}` to "
+            f"`{task.os_version}`."
+        )
+        origin_lines = (
+            task_marker(task.task_key or ""),
+            f"- Derived from `{task.derive_from}`.",
+            f"- Declared architectures: "
+            + ", ".join(f"`{value}`" for value in architectures)
+            + ".",
+        )
+    else:
+        title = (
+            f"[New Image] Add {task.app} {task.version} "
+            f"for openEuler {task.os_version}"
+        )
+        summary = (
+            f"Add `{task.app}` `{task.version}` built from "
+            f"[the pinned upstream source]({task.source_url}) for openEuler "
+            f"{task.os_version}."
+        )
+        origin_lines = ()
     body = "\n".join(
         (
             "## Summary",
             "",
-            f"Add `{task.app}` `{task.version}` built from "
-            f"[the pinned upstream source]({task.source_url}) for openEuler "
-            f"{task.os_version}.",
+            summary,
             "",
+            *origin_lines,
             f"- Validated run: `{bundle.manifest.validated_run_id}`.",
             f"- Candidate SHA256: `{bundle.manifest.content_sha256}`.",
             "",
@@ -689,14 +747,15 @@ def compose_pull_request(bundle: CandidateBundle) -> PullRequestContent:
             "### Confidence Score",
             "",
             f"- Score: `{confidence['score']}` (`{confidence['level']}`).",
-            "- Inputs: both native builds passed; both required runtime test "
-            f"sets passed; Hadolint advisories: "
+            "- Inputs: all declared native builds passed; all required "
+            f"runtime test sets passed; Hadolint advisories: "
             f"`{hadolint_violations}`; final metadata "
             "contract passed.",
             f"- Target base SHA: `{bundle.manifest.base_sha}`.",
             f"- Task ID: `{bundle.manifest.task_id}`.",
-            "- Target evidence: `version_info.json`, `x86_64.junit.xml`, "
-            "`aarch64.junit.xml`.",
+            "- Target evidence: `version_info.json`, "
+            + ", ".join(f"`{value}.junit.xml`" for value in architectures)
+            + ".",
             "- Production candidate evidence: `reports/results.json`.",
             "- Candidate integrity: verified before delivery.",
             "",
@@ -704,8 +763,10 @@ def compose_pull_request(bundle: CandidateBundle) -> PullRequestContent:
             "",
             "- [x] Version and upstream source are pinned",
             "- [x] Changed files are restricted to the task scope",
-            "- [x] x86_64 native validation passed",
-            "- [x] aarch64 native validation passed",
+            *(
+                f"- [x] {architecture} native validation passed"
+                for architecture in architectures
+            ),
             "- [x] Adversarial review records are preserved",
             "- [x] Native Fixer process is recorded",
             "- [x] Candidate integrity was verified before delivery",
@@ -732,6 +793,44 @@ def deliver_promoted_candidate(
         raise PRDeliveryError(
             f"delivery mode {config.delivery_mode} forbids PR delivery writes"
         )
+    def find_existing() -> GitCodeResource | None:
+        matches = [
+            pull
+            for pull in client.list_pull_requests(
+                target_repo=config.target_repo,
+                state="open",
+                base=config.target_branch,
+            )
+            if pull.get("head") == config.pr_head(promotion.branch)
+        ]
+        if len(matches) > 1:
+            raise PRDeliveryError(
+                "multiple open pull requests use the stable delivery branch"
+            )
+        if matches:
+            number = matches[0].get("number")
+            url = str(matches[0].get("url", ""))
+            if number is None or not url.startswith("https://"):
+                raise PRDeliveryError("existing pull request response is invalid")
+            return GitCodeResource(number=int(number), url=url)
+        return None
+
+    def link_issue(resource: GitCodeResource) -> None:
+        if issue_number is None:
+            return
+        if resource.number is None:
+            raise PRDeliveryError("pull request has no number for Issue linking")
+        client.link_pull_request_issue(
+            target_repo=config.target_repo,
+            pull_number=resource.number,
+            issue_number=issue_number,
+        )
+
+    if config.duplicate_pr_guard_enabled:
+        existing = find_existing()
+        if existing is not None:
+            link_issue(existing)
+            return existing
     push(
         repo=repo,
         config=config,
@@ -752,6 +851,14 @@ def deliver_promoted_candidate(
             **create_args,
         )
     except Exception:
+        # A POST can succeed server-side while its response is lost.  Resolve the
+        # stable head branch again before deleting it, otherwise cleanup could
+        # destroy the branch backing a PR that was actually created.
+        if config.duplicate_pr_guard_enabled:
+            existing = find_existing()
+            if existing is not None:
+                link_issue(existing)
+                return existing
         try:
             delete(
                 repo=repo,
@@ -784,9 +891,16 @@ def deliver_validated_candidate(
     client_factory: Callable[..., Any] = GitCodeClient,
     deliver: Callable[..., Any] = deliver_promoted_candidate,
 ) -> Any:
-    if config.environment != "test" or config.delivery_mode != "fork_pr":
+    supported_delivery = (
+        config.environment == "test" and config.delivery_mode == "fork_pr"
+    ) or (
+        config.environment == "production"
+        and config.delivery_mode == "direct_branch_pr"
+    )
+    if not supported_delivery:
         raise ForkPRPipelineError(
-            "validated candidate delivery requires test fork_pr mode"
+            "validated candidate delivery requires test fork_pr or "
+            "production direct_branch_pr mode"
         )
     if not token:
         raise ForkPRPipelineError("GitCode token is required")
@@ -808,9 +922,11 @@ def deliver_validated_candidate(
         candidate_dir,
         expected_run_id=expected_run_id,
     )
-    delivery_branch = (
-        f"{bundle.task.branch}-e2e-{delivery_run_id}-a{delivery_run_attempt}"
-    )
+    delivery_branch = bundle.task.branch
+    if config.environment == "test":
+        delivery_branch = (
+            f"{delivery_branch}-e2e-{delivery_run_id}-a{delivery_run_attempt}"
+        )
     workspace = clone(
         target_source,
         workspace_dir,

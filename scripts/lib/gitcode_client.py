@@ -278,29 +278,77 @@ class GitCodeClient:
         repo: str,
         base: str,
         title: str,
+        branch: str = "",
     ) -> GitCodeResource | None:
+        for pull_request in self.list_pull_requests(
+            target_repo=repo,
+            state="open",
+            base=base,
+        ):
+            if (
+                (branch and pull_request["head"] == branch)
+                or pull_request["title"] == title
+            ):
+                if pull_request["number"] is None:
+                    raise GitCodeAPIError("GitCode pull request has no number")
+                return GitCodeResource(
+                    number=int(pull_request["number"]),
+                    url=str(pull_request["url"]),
+                )
+        return None
+
+    @staticmethod
+    def _ref(value: object) -> str:
+        if isinstance(value, Mapping):
+            return str(value.get("ref") or value.get("label") or "")
+        return str(value or "")
+
+    def list_pull_requests(
+        self,
+        *,
+        target_repo: str,
+        state: str = "all",
+        base: str = "",
+    ) -> list[dict[str, object]]:
+        if state not in {"open", "closed", "all"}:
+            raise ValueError("pull request state must be open, closed or all")
+        self._split_repo(target_repo)
         page = 1
+        pulls: list[dict[str, object]] = []
         while True:
+            params: dict[str, object] = {
+                "state": state,
+                "page": page,
+                "per_page": 100,
+            }
+            if base:
+                params["base"] = base
             payload = self._request(
-                "GET",
-                f"/repos/{repo}/pulls",
-                params={
-                    "state": "open",
-                    "base": base,
-                    "page": page,
-                    "per_page": 100,
-                },
+                "GET", f"/repos/{target_repo}/pulls", params=params
             )
-            if not isinstance(payload, list):
+            if not isinstance(payload, list) or any(
+                not isinstance(item, Mapping) for item in payload
+            ):
                 raise GitCodeAPIError("GitCode pull request list must be an array")
-            for pull_request in payload:
-                if (
-                    isinstance(pull_request, Mapping)
-                    and pull_request.get("title") == title
-                ):
-                    return self._resource(pull_request)
+            for item in payload:
+                assert isinstance(item, Mapping)
+                resource = self._resource(item)
+                pulls.append(
+                    {
+                        "number": resource.number,
+                        "url": resource.url,
+                        "title": str(item.get("title") or ""),
+                        "body": str(item.get("body") or ""),
+                        "head": self._ref(item.get("head")),
+                        "base": self._ref(item.get("base")),
+                        "state": str(item.get("state") or ""),
+                        "merged": bool(
+                            item.get("merged") is True or item.get("merged_at")
+                        ),
+                    }
+                )
             if len(payload) < 100:
-                return None
+                return pulls
             page += 1
 
     def create_pull_request(
@@ -322,6 +370,7 @@ class GitCodeClient:
                 repo=config.target_repo,
                 base=config.target_branch,
                 title=title,
+                branch=config.pr_head(branch),
             )
             if duplicate is not None:
                 raise DuplicatePullRequestError(
@@ -506,3 +555,29 @@ class GitCodeClient:
         if not isinstance(payload, Mapping):
             raise GitCodeAPIError("GitCode issue comment response must be an object")
         return payload
+
+    def list_issue_comments(
+        self,
+        *,
+        target_repo: str,
+        number: int,
+    ) -> list[Mapping[str, object]]:
+        if number <= 0:
+            raise ValueError("issue number must be positive")
+        owner, repo = self._split_repo(target_repo)
+        page = 1
+        comments: list[Mapping[str, object]] = []
+        while True:
+            payload = self._request(
+                "GET",
+                f"/repos/{owner}/{repo}/issues/{number}/comments",
+                params={"page": page, "per_page": 100},
+            )
+            if not isinstance(payload, list) or any(
+                not isinstance(comment, Mapping) for comment in payload
+            ):
+                raise GitCodeAPIError("GitCode issue comment list must be an array")
+            comments.extend(payload)
+            if len(payload) < 100:
+                return comments
+            page += 1

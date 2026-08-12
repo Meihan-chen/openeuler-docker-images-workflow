@@ -79,7 +79,8 @@ def test_existing_nested_mdu_test_is_reused_without_agent(tmp_path):
         task=_task(),
         base_sha=base_sha,
         checkpoint_dir=tmp_path / "checkpoint",
-        report_path=tmp_path / "sanitization.json",
+        report_path=tmp_path / "reports" / "sanitization.json",
+        evidence_dir=tmp_path / "reports",
         agent_runner=lambda **kwargs: calls.append(kwargs) or None,
     )
 
@@ -124,7 +125,8 @@ def test_missing_test_runs_creator_then_read_only_qa(tmp_path):
         task=_task(),
         base_sha=base_sha,
         checkpoint_dir=tmp_path / "checkpoint",
-        report_path=tmp_path / "sanitization.json",
+        report_path=tmp_path / "reports" / "sanitization.json",
+        evidence_dir=tmp_path / "reports",
         executable=tmp_path / "opencode",
         api_key="secret",
         agent_runner=agent_runner,
@@ -133,3 +135,23 @@ def test_missing_test_runs_creator_then_read_only_qa(tmp_path):
     assert result.status == "generated"
     assert roles == ["testcase_creator", "testcase_qa"]
     assert result.sanitization is not None and result.sanitization.clean is True
+    assert (tmp_path / "reports" / "testcase-creator.json").is_file()
+    assert (tmp_path / "reports" / "testcase-qa-round1.json").is_file()
+
+
+def test_existing_test_still_writes_approved_qa_evidence(tmp_path):
+    from scripts.lib.oe_upgrade_test_prep import prepare_upgrade_tests
+
+    repo, base_sha = _candidate(tmp_path, test=True)
+    report_dir = tmp_path / "reports"
+    result = prepare_upgrade_tests(
+        workspace=repo,
+        task=_task(),
+        base_sha=base_sha,
+        checkpoint_dir=tmp_path / "checkpoint",
+        report_path=report_dir / "sanitization.json",
+        evidence_dir=report_dir,
+    )
+
+    assert result.status == "reused-existing"
+    assert (report_dir / "testcase-qa-round1.json").is_file()

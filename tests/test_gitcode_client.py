@@ -495,6 +495,98 @@ def test_create_issue_comment_uses_repository_issue_endpoint():
     assert request.json_body == {"body": "contract update"}
 
 
+def test_list_issue_comments_paginates_all_comments():
+    from scripts.utils.gitcode import GitCodeClient, GitCodeResponse
+
+    first = [{"id": index, "body": f"comment-{index}"} for index in range(100)]
+    transport = RecordingTransport(
+        [
+            GitCodeResponse(status=200, payload=first),
+            GitCodeResponse(status=200, payload=[{"id": 101, "body": "last"}]),
+        ]
+    )
+    client = GitCodeClient(token="top-secret", transport=transport)
+
+    comments = client.list_issue_comments(target_repo=TARGET_REPO, number=9)
+
+    assert len(comments) == 101
+    assert [request.params["page"] for request in transport.requests] == [1, 2]
+
+
+def test_list_pull_requests_normalizes_head_body_and_merged_fields():
+    from scripts.utils.gitcode import GitCodeClient, GitCodeResponse
+
+    transport = RecordingTransport(
+        [
+            GitCodeResponse(
+                status=200,
+                payload=[
+                    {
+                        "number": 7,
+                        "html_url": "https://gitcode.example/pulls/7",
+                        "title": "upgrade",
+                        "body": "marker",
+                        "head": {"ref": "auto/oe-upgrade/redis"},
+                        "base": {"ref": "master"},
+                        "state": "closed",
+                        "merged_at": "2026-08-01T00:00:00Z",
+                    }
+                ],
+            )
+        ]
+    )
+    client = GitCodeClient(token="top-secret", transport=transport)
+
+    pulls = client.list_pull_requests(target_repo=TARGET_REPO, state="all")
+
+    assert pulls[0] == {
+        "number": 7,
+        "url": "https://gitcode.example/pulls/7",
+        "title": "upgrade",
+        "body": "marker",
+        "head": "auto/oe-upgrade/redis",
+        "base": "master",
+        "state": "closed",
+        "merged": True,
+    }
+
+
+def test_production_duplicate_guard_prefers_exact_head_branch():
+    from scripts.utils.gitcode import (
+        DuplicatePullRequestError,
+        GitCodeClient,
+        GitCodeResponse,
+    )
+
+    transport = RecordingTransport(
+        [
+            GitCodeResponse(
+                status=200,
+                payload=[
+                    {
+                        "number": 7,
+                        "html_url": "https://gitcode.example/pulls/7",
+                        "title": "old wording",
+                        "body": "marker",
+                        "head": {"ref": BRANCH},
+                        "base": {"ref": "master"},
+                        "state": "open",
+                    }
+                ],
+            )
+        ]
+    )
+    client = GitCodeClient(token="top-secret", transport=transport)
+
+    with pytest.raises(DuplicatePullRequestError, match="#7"):
+        client.create_pull_request(
+            config=_delivery_config("production"),
+            title="new wording",
+            body="body",
+            branch=BRANCH,
+        )
+
+
 def test_legacy_gitcode_cli_uses_the_shared_safe_client(monkeypatch):
     from scripts.utils import gitcode
 

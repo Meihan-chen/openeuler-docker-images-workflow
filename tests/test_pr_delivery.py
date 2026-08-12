@@ -18,6 +18,26 @@ def _task():
     )
 
 
+def _oe_upgrade_task(*, architectures=("x86_64",)):
+    from scripts.lib.task_spec import TaskSpec
+
+    return TaskSpec.from_workflow_dispatch(
+        {
+            "schema_version": 2,
+            "scenario": "oe-upgrade",
+            "app": "redis",
+            "image_name": "redis",
+            "version": "8.2.1",
+            "os_version": "26.03-lts",
+            "domain": "Database",
+            "source_url": "",
+            "mdu_path": "Database/redis",
+            "derive_from": "8.2.1/24.03-lts-sp4",
+            "architectures": list(architectures),
+        }
+    )
+
+
 def _candidate(
     tmp_path,
     *,
@@ -26,9 +46,16 @@ def _candidate(
     native_fixer=False,
     hadolint_output="",
     gate_delivery_allowed=True,
+    task=None,
 ):
     from scripts.lib.candidate_bundle import CandidateBundle
 
+    task = task or _task()
+    architectures = (
+        task.architectures
+        if task.schema_version == 2
+        else ("x86_64", "aarch64")
+    )
     root = tmp_path / "candidate"
     (root / "reports" / "agents").mkdir(parents=True)
     (root / "changes.patch").write_text(
@@ -48,7 +75,13 @@ def _candidate(
         "@@ -0,0 +1 @@\n"
         "+FROM openeuler/openeuler:24.03-lts-sp4\n"
     )
-    for architecture in ("x86_64", "aarch64"):
+    for architecture in architectures:
+        checks = {
+            "native_build": True,
+            "runtime_test": True,
+        }
+        if task.scenario == "oe-upgrade":
+            checks["os_identity"] = True
         (root / "reports" / f"{architecture}.json").write_text(
             json.dumps(
                 {
@@ -61,10 +94,12 @@ def _candidate(
                     ),
                     "image_id": f"sha256:{architecture}",
                     "duration_seconds": 12,
-                    "checks": {
-                        "native_build": True,
-                        "runtime_test": True,
-                    },
+                    "checks": checks,
+                    **(
+                        {"task_key": task.task_key}
+                        if task.schema_version == 2
+                        else {}
+                    ),
                 }
             )
         )
@@ -84,7 +119,7 @@ def _candidate(
             {
                 "schema_version": 1,
                 "status": "passed",
-                "task_id": _task().task_id,
+                "task_id": task.task_id,
                 "validated_run_id": "123456",
                 "artifact_url": "https://example.test/actions/runs/123456",
                 "architectures": {
@@ -92,10 +127,20 @@ def _candidate(
                         "checks": {
                             "native_build": True,
                             "runtime_test": True,
+                            **(
+                                {"os_identity": True}
+                                if task.scenario == "oe-upgrade"
+                                else {}
+                            ),
                         }
                     }
-                    for architecture in ("x86_64", "aarch64")
+                    for architecture in architectures
                 },
+                **(
+                    {"task_key": task.task_key}
+                    if task.schema_version == 2
+                    else {}
+                ),
             }
         )
     )
@@ -179,9 +224,10 @@ def _candidate(
         )
     return CandidateBundle.create(
         root,
-        task=_task(),
+        task=task,
         base_sha="1" * 40,
         validated_run_id="123456",
+        request_key="a" * 16 if task.scenario == "oe-upgrade" else "",
     )
 
 
@@ -194,6 +240,20 @@ def _config(mode="fork_pr"):
             "delivery_mode": mode,
             "target_repo": "openeuler/openeuler-docker-images",
             "push_repo": "qq_42020325/openeuler-docker-images",
+            "target_branch": "master",
+        }
+    )
+
+
+def _production_config():
+    from scripts.lib.gitcode_client import DeliveryConfig
+
+    return DeliveryConfig.from_mapping(
+        {
+            "environment": "production",
+            "delivery_mode": "direct_branch_pr",
+            "target_repo": "openeuler/openeuler-docker-images",
+            "push_repo": "openeuler/openeuler-docker-images",
             "target_branch": "master",
         }
     )
@@ -220,12 +280,19 @@ class PRClient:
     def __init__(self, error=None):
         self.error = error
         self.calls = []
+        self.link_calls = []
 
     def create_pull_request(self, **kwargs):
         self.calls.append(kwargs)
         if self.error:
             raise self.error
         return Resource()
+
+    def list_pull_requests(self, **kwargs):
+        return []
+
+    def link_pull_request_issue(self, **kwargs):
+        self.link_calls.append(kwargs)
 
 
 def test_pr_content_contains_candidate_and_dual_architecture_evidence(tmp_path):
@@ -271,6 +338,25 @@ def test_pr_content_contains_candidate_and_dual_architecture_evidence(tmp_path):
     assert "`Database/image-list.yml`" not in content.body.split(
         "## Repository checks", 1
     )[1]
+
+
+def test_oe_upgrade_pr_content_uses_task_marker_and_declared_architectures(tmp_path):
+    from scripts.harness.compose_pr import compose_pull_request
+    from scripts.lib.oe_upgrade_activity import task_marker
+
+    task = _oe_upgrade_task()
+    bundle = _candidate(tmp_path, task=task)
+
+    content = compose_pull_request(bundle)
+
+    assert content.title == (
+        "[oe-upgrade] Database/redis 8.2.1 for openEuler 26.03-lts"
+    )
+    assert task_marker(task.task_key) in content.body
+    assert "Derived from `8.2.1/24.03-lts-sp4`." in content.body
+    assert "x86_64" in content.body
+    assert "aarch64" not in content.body
+    assert "os_identity" in content.body
 
 
 def test_pr_content_records_native_fixer_process(tmp_path):
@@ -557,6 +643,106 @@ def test_pr_api_failure_deletes_exact_pushed_branch(tmp_path):
 
     assert [name for name, _ in calls] == ["push", "delete"]
     assert calls[1][1]["branch"] == Promotion().branch
+
+
+def test_production_delivery_reuses_existing_open_pr_before_push(tmp_path):
+    from scripts.harness.compose_pr import deliver_promoted_candidate
+
+    class ExistingClient(PRClient):
+        def list_pull_requests(self, **kwargs):
+            return [
+                {
+                    "number": 88,
+                    "url": Resource().url,
+                    "title": "existing",
+                    "body": "marker",
+                    "head": Promotion().branch,
+                    "base": "master",
+                    "state": "open",
+                    "merged": False,
+                }
+            ]
+
+    calls = []
+    client = ExistingClient()
+    result = deliver_promoted_candidate(
+        repo=tmp_path,
+        config=_production_config(),
+        promotion=Promotion(),
+        username="openeuler-bot",
+        token="secret",
+        title="title",
+        body="body",
+        client=client,
+        issue_number=27,
+        push=lambda **kwargs: calls.append(("push", kwargs)),
+        delete=lambda **kwargs: calls.append(("delete", kwargs)),
+    )
+
+    assert result.number == Resource().number
+    assert result.url == Resource().url
+    assert calls == []
+    assert client.link_calls == [
+        {
+            "target_repo": "openeuler/openeuler-docker-images",
+            "pull_number": 88,
+            "issue_number": 27,
+        }
+    ]
+
+
+def test_production_delivery_recovers_pr_created_after_uncertain_response(tmp_path):
+    from scripts.harness.compose_pr import deliver_promoted_candidate
+    from scripts.utils.gitcode import GitCodeAPIError
+
+    class UncertainClient(PRClient):
+        def __init__(self):
+            super().__init__(GitCodeAPIError("response lost"))
+            self.list_count = 0
+
+        def list_pull_requests(self, **kwargs):
+            self.list_count += 1
+            if self.list_count == 1:
+                return []
+            return [
+                {
+                    "number": 88,
+                    "url": Resource().url,
+                    "title": "created despite timeout",
+                    "body": "marker",
+                    "head": Promotion().branch,
+                    "base": "master",
+                    "state": "open",
+                    "merged": False,
+                }
+            ]
+
+    calls = []
+    client = UncertainClient()
+    result = deliver_promoted_candidate(
+        repo=tmp_path,
+        config=_production_config(),
+        promotion=Promotion(),
+        username="openeuler-bot",
+        token="secret",
+        title="title",
+        body="body",
+        client=client,
+        issue_number=27,
+        push=lambda **kwargs: calls.append(("push", kwargs)),
+        delete=lambda **kwargs: calls.append(("delete", kwargs)),
+    )
+
+    assert result.number == 88
+    assert [name for name, _ in calls] == ["push"]
+    assert client.list_count == 2
+    assert client.link_calls == [
+        {
+            "target_repo": "openeuler/openeuler-docker-images",
+            "pull_number": 88,
+            "issue_number": 27,
+        }
+    ]
 
 
 def test_validate_only_refuses_before_push_or_pr(tmp_path):

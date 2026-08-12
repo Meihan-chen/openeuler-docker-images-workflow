@@ -743,6 +743,7 @@ def test_pipeline_stage_commands_are_exposed():
         "oe-upgrade-request",
         "oe-upgrade-plan",
         "oe-upgrade-prepare",
+        "oe-upgrade-test-prepare",
         "oe-upgrade-checkpoint",
         "oe-upgrade-sanitize",
         "fork-deliver",
@@ -773,6 +774,7 @@ def test_flow_is_the_only_phase_one_entry():
         "oe-upgrade-request",
         "oe-upgrade-plan",
         "oe-upgrade-prepare",
+        "oe-upgrade-test-prepare",
         "oe-upgrade-checkpoint",
         "oe-upgrade-sanitize",
         "task-spec",
@@ -926,6 +928,13 @@ def test_oe_upgrade_prepare_cli_derives_candidate_and_runs_scope_gate(tmp_path):
     assert json.loads((report_dir / "add-version-gates.json").read_text())[
         "delivery_allowed"
     ] is True
+
+
+def test_candidate_create_accepts_request_key_for_oe_upgrade_manifest():
+    result = _run("candidate-create", "--help")
+
+    assert result.returncode == 0
+    assert "--request-key" in result.stdout
 
 
 def test_fork_delivery_reads_token_only_from_environment():

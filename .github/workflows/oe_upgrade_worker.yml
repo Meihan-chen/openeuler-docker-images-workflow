@@ -1,7 +1,6 @@
 name: openEuler Upgrade Worker
+run-name: oe-upgrade / ${{ inputs.task_display }}
 
-# Registration-only default-branch entry. The controller dispatches the full
-# worker from the selected implementation ref after this path is registered.
 on:
   workflow_dispatch:
     inputs:
@@ -27,16 +26,568 @@ on:
         type: string
 
 permissions:
+  actions: read
   contents: read
 
+concurrency:
+  group: oe-upgrade-worker-${{ inputs.request_key }}
+  cancel-in-progress: false
+
+env:
+  PYTHONUNBUFFERED: "1"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
 jobs:
-  registration-only:
-    name: Refuse execution from the registration stub
+  prepare:
+    name: Prepare deterministic upgrade candidate
     runs-on: [self-hosted, Linux, X64, oe-image-x86]
-    timeout-minutes: 2
+    timeout-minutes: 360
+    outputs:
+      architectures: ${{ steps.task.outputs.architectures }}
+      task_key: ${{ steps.task.outputs.task_key }}
+      proceed: ${{ steps.precheck.outputs.proceed }}
     steps:
-      - name: Explain how to select an implementation
+      - name: Check out workflow source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Set up native runner
+        id: tools
+        uses: ./.github/actions/phase1-setup
+        with:
+          arch: x86_64
+          preflight: "true"
+
+      - name: Validate canonical worker inputs
+        id: task
+        env:
+          TASK_SPEC_JSON: ${{ inputs.task_spec_json }}
+          TASK_DISPLAY: ${{ inputs.task_display }}
+          REQUEST_KEY: ${{ inputs.request_key }}
+          BASE_SHA: ${{ inputs.base_sha }}
+          TRACKING_ISSUE: ${{ inputs.tracking_issue_number }}
         run: |
-          echo "This default-branch file only registers the workflow path."
-          echo "Dispatch the worker with ref set to an implementation branch."
-          exit 2
+          mkdir -p "${RUNNER_TEMP}/oe-upgrade-prepare"
+          printf '%s\n' "${TASK_SPEC_JSON}" \
+            > "${RUNNER_TEMP}/oe-upgrade-prepare/task-spec.json"
+          "${RUNNER_TEMP}/phase1-venv/bin/python" - \
+            "${RUNNER_TEMP}/oe-upgrade-prepare/task-spec.json" \
+            "${TASK_DISPLAY}" "${REQUEST_KEY}" "${BASE_SHA}" \
+            "${TRACKING_ISSUE}" "${GITHUB_OUTPUT}" <<'PY'
+          import json
+          import re
+          import sys
+          from scripts.lib.task_spec import TaskSpec
+
+          task = TaskSpec.from_json(open(sys.argv[1], encoding="utf-8").read())
+          display = f"{sys.argv[3]} / {task.task_key} / {task.mdu_path}"
+          if task.scenario != "oe-upgrade" or task.schema_version != 2:
+              raise SystemExit("worker requires an oe-upgrade TaskSpec v2")
+          if sys.argv[2] != display:
+              raise SystemExit("task_display does not match TaskSpec/request_key")
+          if not re.fullmatch(r"[0-9a-f]{16}", sys.argv[3]):
+              raise SystemExit("request_key is invalid")
+          if not re.fullmatch(r"[0-9a-f]{40}", sys.argv[4]):
+              raise SystemExit("base_sha is invalid")
+          if not sys.argv[5].isdigit() or int(sys.argv[5]) <= 0:
+              raise SystemExit("tracking_issue_number is invalid")
+          with open(sys.argv[6], "a", encoding="utf-8") as output:
+              print("architectures=" + json.dumps(list(task.architectures)), file=output)
+              print("task_key=" + task.task_key, file=output)
+          PY
+          printf '%s\n' "${BASE_SHA}" \
+            > "${RUNNER_TEMP}/oe-upgrade-prepare/base-sha.txt"
+
+      - name: Clone pinned target repository
+        run: |
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
+            target-clone \
+            --source https://gitcode.com/openeuler/openeuler-docker-images.git \
+            --destination "${RUNNER_TEMP}/phase1-target" \
+            --branch master \
+            --expected-sha "${{ inputs.base_sha }}"
+
+      - name: Check current business state before expensive work
+        id: precheck
+        env:
+          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+          GITCODE_USERNAME: ${{ vars.GITCODE_BOT_USERNAME }}
+        run: |
+          if [ -z "${GITCODE_USERNAME}" ]; then
+            echo "GITCODE_BOT_USERNAME repository variable is required" >&2
+            exit 2
+          fi
+          python3 scripts/harness/flow.py oe-upgrade-worker-precheck \
+            --target-repo openeuler/openeuler-docker-images \
+            --issue-number "${{ inputs.tracking_issue_number }}" \
+            --request-key "${{ inputs.request_key }}" \
+            --task-spec "${RUNNER_TEMP}/oe-upgrade-prepare/task-spec.json" \
+            --workspace "${RUNNER_TEMP}/phase1-target" \
+            --trusted-author "${GITCODE_USERNAME}" \
+            --head-revision origin/master \
+            --github-output "${GITHUB_OUTPUT}"
+
+      - name: Derive add-version candidate deterministically
+        if: ${{ steps.precheck.outputs.proceed == 'true' }}
+        run: |
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
+            oe-upgrade-prepare \
+            --workspace "${RUNNER_TEMP}/phase1-target" \
+            --task-spec "${RUNNER_TEMP}/oe-upgrade-prepare/task-spec.json" \
+            --base-sha "${{ inputs.base_sha }}" \
+            --report-dir \
+              "${RUNNER_TEMP}/oe-upgrade-prepare/generation-reports"
+
+      - name: Reuse or generate shared tests
+        if: ${{ steps.precheck.outputs.proceed == 'true' }}
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
+            oe-upgrade-test-prepare \
+            --workspace "${RUNNER_TEMP}/phase1-target" \
+            --task-spec "${RUNNER_TEMP}/oe-upgrade-prepare/task-spec.json" \
+            --base-sha "${{ inputs.base_sha }}" \
+            --checkpoint "${RUNNER_TEMP}/testcase-checkpoint" \
+            --report-dir \
+              "${RUNNER_TEMP}/oe-upgrade-prepare/generation-reports" \
+            --opencode "${{ steps.tools.outputs.opencode_path }}"
+
+      - name: Gate and lint prepared candidate
+        if: ${{ steps.precheck.outputs.proceed == 'true' }}
+        run: |
+          dockerfile="$("${RUNNER_TEMP}/phase1-venv/bin/python" - \
+            "${RUNNER_TEMP}/oe-upgrade-prepare/task-spec.json" <<'PY'
+          import sys
+          from scripts.lib.task_spec import TaskSpec
+          task = TaskSpec.from_json(open(sys.argv[1], encoding="utf-8").read())
+          print(f"{task.mdu_path}/{task.version}/{task.os_version}/Dockerfile")
+          PY
+          )"
+          lint_report="${RUNNER_TEMP}/oe-upgrade-prepare/generation-reports/hadolint.txt"
+          lint_status=0
+          "${{ steps.tools.outputs.hadolint_path }}" \
+            "${RUNNER_TEMP}/phase1-target/${dockerfile}" \
+            > "${lint_report}" 2>&1 || lint_status=$?
+          cat "${lint_report}"
+          printf 'Hadolint advisory exit status: %s\n' "${lint_status}"
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/gate_diff.py \
+            task-contract \
+            --phase generated \
+            --workspace "${RUNNER_TEMP}/phase1-target" \
+            --task-spec "${RUNNER_TEMP}/oe-upgrade-prepare/task-spec.json" \
+            --base-sha "${{ inputs.base_sha }}" \
+            > "${RUNNER_TEMP}/oe-upgrade-prepare/generation-reports/gates.json"
+
+      - name: Emit round 1 candidate
+        if: ${{ steps.precheck.outputs.proceed == 'true' }}
+        uses: ./.github/actions/phase1-emit-patch
+        with:
+          workspace: ${{ runner.temp }}/phase1-target
+          input-dir: ${{ runner.temp }}/oe-upgrade-prepare
+          output-dir: ${{ runner.temp }}/phase1-patch1
+
+      - name: Upload round 1 candidate
+        if: ${{ steps.precheck.outputs.proceed == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: phase1-patch1-${{ github.run_id }}
+          path: ${{ runner.temp }}/phase1-patch1/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload preparation evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: phase1-generation-${{ github.run_id }}
+          path: ${{ runner.temp }}/oe-upgrade-prepare/
+          if-no-files-found: error
+          retention-days: 30
+
+  round-1:
+    name: "Round 1: validate and fix"
+    needs: prepare
+    if: >-
+      ${{ needs.prepare.result == 'success' &&
+          needs.prepare.outputs.proceed == 'true' }}
+    uses: ./.github/workflows/_create_new_image_rounds.yml
+    with:
+      round: "1"
+      operation: oe_upgrade
+      max_rounds: "3"
+      next_round: "2"
+      architectures: ${{ needs.prepare.outputs.architectures }}
+      task_key: ${{ needs.prepare.outputs.task_key }}
+    secrets:
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+
+  round-2:
+    name: "Round 2: validate and fix"
+    needs: [prepare, round-1]
+    if: >-
+      ${{ always() && needs.round-1.result == 'success' &&
+          needs.round-1.outputs.converged != 'true' &&
+          needs.round-1.outputs.terminal_status == '' }}
+    uses: ./.github/workflows/_create_new_image_rounds.yml
+    with:
+      round: "2"
+      operation: oe_upgrade
+      max_rounds: "3"
+      next_round: "3"
+      architectures: ${{ needs.prepare.outputs.architectures }}
+      task_key: ${{ needs.prepare.outputs.task_key }}
+    secrets:
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+
+  round-3:
+    name: "Round 3: validate and fix"
+    needs: [prepare, round-2]
+    if: >-
+      ${{ always() && needs.round-2.result == 'success' &&
+          needs.round-2.outputs.converged != 'true' &&
+          needs.round-2.outputs.terminal_status == '' }}
+    uses: ./.github/workflows/_create_new_image_rounds.yml
+    with:
+      round: "3"
+      operation: oe_upgrade
+      max_rounds: "3"
+      next_round: "4"
+      architectures: ${{ needs.prepare.outputs.architectures }}
+      task_key: ${{ needs.prepare.outputs.task_key }}
+    secrets:
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+
+  round-4:
+    name: "Round 4: validate and fix"
+    needs: [prepare, round-3]
+    if: >-
+      ${{ always() && needs.round-3.result == 'success' &&
+          needs.round-3.outputs.converged != 'true' &&
+          needs.round-3.outputs.terminal_status == '' }}
+    uses: ./.github/workflows/_create_new_image_rounds.yml
+    with:
+      round: "4"
+      operation: oe_upgrade
+      max_rounds: "3"
+      next_round: "5"
+      architectures: ${{ needs.prepare.outputs.architectures }}
+      task_key: ${{ needs.prepare.outputs.task_key }}
+    secrets:
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+
+  package-candidate:
+    name: Seal immutable upgrade candidate
+    needs: [prepare, round-1, round-2, round-3, round-4]
+    if: >-
+      ${{ always() &&
+          ((needs.round-1.result == 'success' &&
+            needs.round-1.outputs.converged == 'true') ||
+           (needs.round-2.result == 'success' &&
+            needs.round-2.outputs.converged == 'true') ||
+           (needs.round-3.result == 'success' &&
+            needs.round-3.outputs.converged == 'true') ||
+           (needs.round-4.result == 'success' &&
+            needs.round-4.outputs.converged == 'true')) }}
+    runs-on: [self-hosted, Linux, X64, oe-image-x86]
+    timeout-minutes: 60
+    steps:
+      - name: Check out workflow source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Set up tooling
+        id: tools
+        uses: ./.github/actions/phase1-setup
+        with:
+          arch: x86_64
+
+      - name: Download preparation evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: phase1-generation-${{ github.run_id }}
+          path: ${{ runner.temp }}/generation
+
+      - name: Download converged candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: phase1-converged-${{ github.run_id }}
+          path: ${{ runner.temp }}/converged
+
+      - name: Download decision evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: phase1-decide*-${{ github.run_id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/decision-agents
+
+      - name: Replay converged candidate
+        uses: ./.github/actions/phase1-replay
+        with:
+          input-dir: ${{ runner.temp }}/converged
+          workspace: ${{ runner.temp }}/phase1-target
+          base-sha-output: ${{ runner.temp }}/package-base-sha.txt
+
+      - name: copy-declared-native-evidence
+        run: |
+          mkdir -p "${RUNNER_TEMP}/native-reports"
+          "${RUNNER_TEMP}/phase1-venv/bin/python" \
+            scripts/harness/copy_declared_native_evidence.py \
+            --task-spec "${RUNNER_TEMP}/converged/task-spec.json" \
+            --source "${RUNNER_TEMP}/converged" \
+            --destination "${RUNNER_TEMP}/native-reports"
+
+      - name: Aggregate declared architecture result evidence
+        run: |
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/utils/artifacts.py \
+            aggregate-native \
+            --workspace "${RUNNER_TEMP}/phase1-target" \
+            --task-spec "${RUNNER_TEMP}/converged/task-spec.json" \
+            --run-id "${{ github.run_id }}" \
+            --run-url \
+              "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --report-dir "${RUNNER_TEMP}/native-reports" \
+            --results-output "${RUNNER_TEMP}/candidate/reports/results.json"
+
+      - name: Enforce final gates and lint
+        run: |
+          base_sha="$(tr -d '\n' < "${RUNNER_TEMP}/package-base-sha.txt")"
+          dockerfile="$("${RUNNER_TEMP}/phase1-venv/bin/python" - \
+            "${RUNNER_TEMP}/converged/task-spec.json" <<'PY'
+          import sys
+          from scripts.lib.task_spec import TaskSpec
+          task = TaskSpec.from_json(open(sys.argv[1], encoding="utf-8").read())
+          print(f"{task.mdu_path}/{task.version}/{task.os_version}/Dockerfile")
+          PY
+          )"
+          mkdir -p "${RUNNER_TEMP}/candidate/reports/agents"
+          lint_status=0
+          "${{ steps.tools.outputs.hadolint_path }}" \
+            "${RUNNER_TEMP}/phase1-target/${dockerfile}" \
+            > "${RUNNER_TEMP}/candidate/reports/hadolint.txt" 2>&1 \
+            || lint_status=$?
+          cat "${RUNNER_TEMP}/candidate/reports/hadolint.txt"
+          printf 'Hadolint advisory exit status: %s\n' "${lint_status}"
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/gate_diff.py \
+            task-contract \
+            --phase final \
+            --workspace "${RUNNER_TEMP}/phase1-target" \
+            --task-spec "${RUNNER_TEMP}/converged/task-spec.json" \
+            --base-sha "${base_sha}" \
+            > "${RUNNER_TEMP}/candidate/reports/gates.json"
+
+      - name: Seal immutable candidate bundle
+        run: |
+          base_sha="$(tr -d '\n' < "${RUNNER_TEMP}/package-base-sha.txt")"
+          cp -a "${RUNNER_TEMP}/native-reports/." \
+            "${RUNNER_TEMP}/candidate/reports/"
+          cp -a "${RUNNER_TEMP}/generation/generation-reports/." \
+            "${RUNNER_TEMP}/candidate/reports/agents/"
+          cp -a "${RUNNER_TEMP}/decision-agents/." \
+            "${RUNNER_TEMP}/candidate/reports/agents/"
+          cp "${RUNNER_TEMP}/generation/generation-reports/gates.json" \
+            "${RUNNER_TEMP}/candidate/reports/generation-gates.json"
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
+            target-create-patch \
+            --workspace "${RUNNER_TEMP}/phase1-target" \
+            --branch master \
+            --base-sha "${base_sha}" \
+            --output "${RUNNER_TEMP}/candidate/changes.patch"
+          "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
+            candidate-create \
+            --candidate-dir "${RUNNER_TEMP}/candidate" \
+            --task-spec "${RUNNER_TEMP}/converged/task-spec.json" \
+            --base-sha "${base_sha}" \
+            --validated-run-id "${{ github.run_id }}" \
+            --request-key "${{ inputs.request_key }}"
+
+      - name: Upload immutable candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: oe-upgrade-candidate-${{ github.run_id }}
+          path: ${{ runner.temp }}/candidate/
+          if-no-files-found: error
+          retention-days: 30
+
+  release-x86-builders:
+    name: Clean Environment (x86_64)
+    needs: [prepare, round-1, round-2, round-3, round-4]
+    if: >-
+      ${{ always() &&
+          contains(fromJSON(needs.prepare.outputs.architectures), 'x86_64') }}
+    runs-on: [self-hosted, Linux, X64, oe-image-x86]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: ./.github/actions/phase1-setup
+      - run: >-
+          python3 scripts/harness/flow.py phase1-native-release
+          --workspace "${GITHUB_WORKSPACE}" --architecture x86_64
+          --run-id "${{ github.run_id }}"
+          --task-key "${{ needs.prepare.outputs.task_key }}"
+
+  release-arm-builders:
+    name: Clean Environment (aarch64)
+    needs: [prepare, round-1, round-2, round-3, round-4]
+    if: >-
+      ${{ always() &&
+          contains(fromJSON(needs.prepare.outputs.architectures), 'aarch64') }}
+    runs-on: [self-hosted, Linux, ARM64, oe-image-arm64]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: ./.github/actions/phase1-setup
+      - run: >-
+          python3 scripts/harness/flow.py phase1-native-release
+          --workspace "${GITHUB_WORKSPACE}" --architecture aarch64
+          --run-id "${{ github.run_id }}"
+          --task-key "${{ needs.prepare.outputs.task_key }}"
+
+  deliver:
+    name: Create production PR
+    needs: [package-candidate, release-x86-builders, release-arm-builders]
+    if: ${{ always() && needs.package-candidate.result == 'success' }}
+    runs-on: [self-hosted, Linux, X64, oe-image-x86]
+    timeout-minutes: 30
+    outputs:
+      pr_number: ${{ steps.delivery.outputs.pr_number }}
+      pr_url: ${{ steps.delivery.outputs.pr_url }}
+      candidate_digest: ${{ steps.delivery.outputs.candidate_digest }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: ./.github/actions/phase1-setup
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: oe-upgrade-candidate-${{ github.run_id }}
+          path: ${{ runner.temp }}/candidate
+      - name: Promote stable branch and create PR
+        id: delivery
+        env:
+          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+          GITCODE_USERNAME: ${{ vars.GITCODE_BOT_USERNAME }}
+        run: |
+          set -o pipefail
+          result="${RUNNER_TEMP}/delivery.jsonl"
+          python3 scripts/harness/flow.py fork-deliver \
+            --candidate-dir "${RUNNER_TEMP}/candidate" \
+            --expected-run-id "${{ github.run_id }}" \
+            --delivery-run-id "${{ github.run_id }}" \
+            --delivery-run-attempt "${{ github.run_attempt }}" \
+            --workspace "${RUNNER_TEMP}/promotion" \
+            --source-issue-number "${{ inputs.tracking_issue_number }}" \
+            --gitcode-username "${GITCODE_USERNAME}" \
+            --environment production \
+            --delivery-mode direct_branch_pr \
+            --target-repo openeuler/openeuler-docker-images \
+            --push-repo openeuler/openeuler-docker-images \
+            --target-branch master | tee "${result}"
+          python3 - "${result}" "${RUNNER_TEMP}/candidate/manifest.json" \
+            >> "${GITHUB_OUTPUT}" <<'PY'
+          import json
+          import sys
+          lines = [line for line in open(sys.argv[1]) if line.lstrip().startswith("{")]
+          delivery = json.loads(lines[-1])
+          manifest = json.load(open(sys.argv[2]))
+          print(f"pr_number={delivery['number']}")
+          print(f"pr_url={delivery['url']}")
+          print(f"candidate_digest=sha256:{manifest['content_sha256']}")
+          PY
+
+  finalize:
+    name: Record task result
+    permissions:
+      actions: write
+      contents: read
+    needs:
+      - prepare
+      - round-1
+      - round-2
+      - round-3
+      - round-4
+      - package-candidate
+      - deliver
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Persist canonical TaskSpec
+        env:
+          TASK_SPEC_JSON: ${{ inputs.task_spec_json }}
+        run: |
+          printf '%s\n' "${TASK_SPEC_JSON}" > "${RUNNER_TEMP}/task-spec.json"
+      - name: Write Issue result and WorkerResult
+        if: ${{ needs.prepare.outputs.proceed == 'true' }}
+        env:
+          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+          GITCODE_USERNAME: ${{ vars.GITCODE_BOT_USERNAME }}
+          OUTCOME: ${{ needs.deliver.result == 'success' && 'pr-created' || 'failed' }}
+          REASON: >-
+            ${{ needs.prepare.result == 'failure' && 'generation' ||
+                contains(needs.round-1.outputs.terminal_status, 'dependency') && 'dependency' ||
+                contains(needs.round-2.outputs.terminal_status, 'dependency') && 'dependency' ||
+                contains(needs.round-3.outputs.terminal_status, 'dependency') && 'dependency' ||
+                contains(needs.round-4.outputs.terminal_status, 'dependency') && 'dependency' ||
+                contains(needs.round-1.outputs.terminal_status, 'infrastructure') && 'infrastructure' ||
+                contains(needs.round-2.outputs.terminal_status, 'infrastructure') && 'infrastructure' ||
+                contains(needs.round-3.outputs.terminal_status, 'infrastructure') && 'infrastructure' ||
+                contains(needs.round-4.outputs.terminal_status, 'infrastructure') && 'infrastructure' ||
+                contains(needs.round-1.outputs.terminal_status, 'contract') && 'contract' ||
+                contains(needs.round-2.outputs.terminal_status, 'contract') && 'contract' ||
+                contains(needs.round-3.outputs.terminal_status, 'contract') && 'contract' ||
+                contains(needs.round-4.outputs.terminal_status, 'contract') && 'contract' ||
+                contains(needs.round-1.outputs.terminal_status, 'evidence-insufficient') && 'evidence-insufficient' ||
+                contains(needs.round-2.outputs.terminal_status, 'evidence-insufficient') && 'evidence-insufficient' ||
+                contains(needs.round-3.outputs.terminal_status, 'evidence-insufficient') && 'evidence-insufficient' ||
+                contains(needs.round-4.outputs.terminal_status, 'evidence-insufficient') && 'evidence-insufficient' ||
+                contains(needs.round-4.outputs.terminal_status, 'repair-exhausted') && 'repair-exhausted' ||
+                needs.package-candidate.result == 'failure' && 'contract' ||
+                needs.deliver.result == 'failure' && 'delivery' || 'result-missing' }}
+        run: |
+          success_args=()
+          failure_args=()
+          if [ "${OUTCOME}" = "pr-created" ]; then
+            success_args=(
+              --pr-number "${{ needs.deliver.outputs.pr_number }}"
+              --pr-url "${{ needs.deliver.outputs.pr_url }}"
+              --candidate-digest "${{ needs.deliver.outputs.candidate_digest }}"
+            )
+          else
+            failure_args=(--reason "${REASON}")
+          fi
+          python3 scripts/harness/flow.py oe-upgrade-task-finalize \
+            --target-repo openeuler/openeuler-docker-images \
+            --issue-number "${{ inputs.tracking_issue_number }}" \
+            --request-key "${{ inputs.request_key }}" \
+            --task-spec "${RUNNER_TEMP}/task-spec.json" \
+            --outcome "${OUTCOME}" "${failure_args[@]}" \
+            --run-id "${{ github.run_id }}" \
+            --run-url \
+              "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            "${success_args[@]}" \
+            --summary \
+              "prepare=${{ needs.prepare.result }}, package=${{ needs.package-candidate.result }}, delivery=${{ needs.deliver.result }}" \
+            --artifact-name "oe-upgrade-worker-${{ github.run_id }}" \
+            --trusted-author "${GITCODE_USERNAME}" \
+            --output "${RUNNER_TEMP}/worker-result.json"
+      - name: Upload worker receipt
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: oe-upgrade-worker-${{ github.run_id }}
+          path: ${{ runner.temp }}/worker-result.json
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Wake the activity controller
+        if: ${{ always() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run monitor_oe_upgrade_issues.yml \
+            --repo "${GITHUB_REPOSITORY}" \
+            --ref "${GITHUB_REF_NAME}" \
+            -f tracking_issue_number="${{ inputs.tracking_issue_number }}" \
+            -f oe_version="" -f scope="" -f mode=deliver
+
+      - name: Stop superseded worker without recording a failure
+        if: ${{ needs.prepare.outputs.proceed != 'true' }}
+        run: |
+          echo "Task is already terminal in an external truth source; no work needed."

@@ -9,6 +9,7 @@ import os
 import sys
 from dataclasses import asdict
 from pathlib import Path
+from typing import Mapping
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -59,20 +60,45 @@ from scripts.lib.native_validation import (
     write_infrastructure_failure_evidence,
 )
 from scripts.lib.oe_upgrade_contract import (
+    InvocationOptions,
     UpgradeContractError,
     UpgradeRequest,
+    normalize_scope,
     parse_upgrade_issue,
+    request_key as upgrade_request_key,
 )
 from scripts.lib.oe_upgrade_candidate import (
     CandidateDerivationError,
     prepare_upgrade_candidate,
 )
 from scripts.lib.oe_upgrade_planner import UpgradePlannerError, plan_upgrade
+from scripts.lib.oe_upgrade_activity import (
+    ActivityError,
+    WorkerResult,
+    ensure_issue_comment,
+    failure_marker,
+    parse_request_comment,
+    reject_issue_request,
+    render_failure_comment,
+)
+from scripts.lib.oe_upgrade_advance import (
+    list_github_workflow_runs,
+    parse_workflow_runs,
+)
+from scripts.lib.oe_upgrade_controller import (
+    UpgradeControllerError,
+    run_activity,
+    verify_worker_start,
+)
 from scripts.lib.oe_upgrade_sanitizer import (
     SanitizationError,
     create_checkpoint,
     load_checkpoint,
     sanitize_agent_changes,
+)
+from scripts.lib.oe_upgrade_test_prep import (
+    UpgradeTestPreparationError,
+    prepare_upgrade_tests,
 )
 from scripts.lib.pr_delivery import (
     ForkPRPipelineError,
@@ -172,6 +198,233 @@ def _oe_upgrade_prepare(args: argparse.Namespace) -> None:
     )
 
 
+def _oe_upgrade_test_prepare(args: argparse.Namespace) -> None:
+    api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+    result = prepare_upgrade_tests(
+        workspace=args.workspace,
+        task=_load_task(args.task_spec),
+        base_sha=args.base_sha,
+        checkpoint_dir=args.checkpoint,
+        report_path=args.report_dir / "testcase-sanitization.json",
+        evidence_dir=args.report_dir,
+        executable=args.opencode,
+        api_key=api_key,
+    )
+    _write_json(
+        args.report_dir / "test-preparation.json",
+        {
+            "status": result.status,
+            "reused_existing": result.reused_existing,
+        },
+    )
+    _print_json(
+        {
+            "status": result.status,
+            "reused_existing": result.reused_existing,
+        }
+    )
+
+
+def _issue_workflow_status(issue: Mapping[str, object]) -> str:
+    detail = issue.get("issue_state_detail")
+    if isinstance(detail, Mapping):
+        return str(detail.get("title", "")).strip()
+    return str(issue.get("issue_state", "")).strip()
+
+
+def _oe_upgrade_advance(args: argparse.Namespace) -> None:
+    gitcode_token = os.environ.get("GITCODE_TOKEN", "")
+    github_token = os.environ.get("GITHUB_TOKEN", "")
+    if not gitcode_token or not github_token:
+        raise UpgradeControllerError("GITCODE_TOKEN and GITHUB_TOKEN are required")
+    client = GitCodeClient(token=gitcode_token)
+    if args.issue_number is not None:
+        issue = client.get_issue(
+            target_repo=args.target_repo, number=args.issue_number
+        )
+    else:
+        issues = client.list_issues(
+            target_repo=args.target_repo,
+            state="open",
+            search="【oe-upgrade】",
+        )
+        issue = next(
+            (
+                value
+                for value in issues
+                if str(value.get("title", "")).strip().startswith(
+                    "【oe-upgrade】"
+                )
+                and _issue_workflow_status(value) in {"新建", "已接纳"}
+            ),
+            None,
+        )
+        if issue is None:
+            _print_json({"action": "no-active-request"})
+            return
+    issue_number = int(issue.get("number", issue.get("iid", 0)))
+    if not args.trusted_author.strip():
+        raise UpgradeControllerError("trusted GitCode bot author is required")
+    try:
+        parsed = parse_upgrade_issue(
+            issue_number,
+            str(issue.get("title", "")),
+            str(issue.get("body", "") or ""),
+            mode=args.mode,
+        )
+    except UpgradeContractError as error:
+        reject_issue_request(
+            client=client,
+            target_repo=args.target_repo,
+            issue=issue,
+            reason=str(error),
+            trusted_author=args.trusted_author,
+        )
+        rejected = {
+            "action": "rejected",
+            "issue_number": issue_number,
+            "reason": str(error),
+        }
+        _write_json(args.result_output, rejected)
+        _print_json(rejected)
+        return
+    expected_oe = args.oe_version or parsed.oe_version
+    expected_scope: object = args.scope or parsed.scope
+    raw_runs = list_github_workflow_runs(
+        github_token=github_token,
+        github_repository=args.github_repository,
+        workflow=args.worker_workflow,
+    )
+    runs = parse_workflow_runs(
+        raw_runs,
+        request_key=upgrade_request_key(issue_number, parsed.oe_version),
+    )
+
+    def dispatch(*, task: TaskSpec, request: UpgradeRequest, issue_number: int) -> None:
+        dispatch_github_workflow(
+            github_token=github_token,
+            github_repository=args.github_repository,
+            workflow=args.worker_workflow,
+            ref=args.github_ref,
+            inputs={
+                "task_spec_json": task.to_json(),
+                "tracking_issue_number": str(issue_number),
+                "request_key": request.request_key,
+                "base_sha": request.base_sha,
+                "task_display": (
+                    f"{request.request_key} / {task.task_key} / {task.mdu_path}"
+                ),
+            },
+        )
+
+    result = run_activity(
+        client=client,
+        target_repo=args.target_repo,
+        issue=issue,
+        workspace=args.workspace,
+        mode=args.mode,
+        expected_oe_version=expected_oe,
+        expected_scope=expected_scope,
+        trusted_author=args.trusted_author,
+        run_url=args.run_url,
+        artifact_name=args.artifact_name,
+        runs=runs,
+        dispatch=dispatch,
+    )
+    _write_json(args.plan_output, result.plan.to_dict())
+    _write_json(
+        args.result_output,
+        {
+            "action": result.action,
+            "request": result.request.to_dict(),
+            "states": [state.to_dict() for state in result.states],
+            "next_task": (
+                result.next_task.to_dict() if result.next_task else None
+            ),
+        },
+    )
+    _print_json(
+        {
+            "action": result.action,
+            "issue_number": issue_number,
+            "request_key": result.request.request_key,
+            "task_count": len(result.plan.tasks),
+        }
+    )
+
+
+def _oe_upgrade_task_finalize(args: argparse.Namespace) -> None:
+    token = os.environ.get("GITCODE_TOKEN", "")
+    if not token:
+        raise ActivityError("GITCODE_TOKEN is required")
+    client = GitCodeClient(token=token)
+    comments = client.list_issue_comments(
+        target_repo=args.target_repo, number=args.issue_number
+    )
+    request = parse_request_comment(
+        comments, trusted_author=args.trusted_author
+    )
+    task = _load_task(args.task_spec)
+    if (
+        request.request_key != args.request_key
+        or request.tracking_issue_number != args.issue_number
+        or request.oe_version != task.os_version
+    ):
+        raise ActivityError("worker result does not match its upgrade request")
+    if args.outcome == "failed":
+        marker = failure_marker(request.request_key, task.task_key or "")
+        ensure_issue_comment(
+            client=client,
+            target_repo=args.target_repo,
+            issue_number=args.issue_number,
+            body=render_failure_comment(
+                request=request,
+                task=task,
+                reason=args.reason,
+                run_url=args.run_url,
+                summary=args.summary,
+                artifact_name=args.artifact_name,
+            ),
+            marker=marker,
+            trusted_author=args.trusted_author,
+        )
+    result = WorkerResult.create(
+        request_key=request.request_key,
+        task=task,
+        outcome=args.outcome,
+        reason=args.reason,
+        run_id=args.run_id,
+        run_url=args.run_url,
+        pr_number=args.pr_number,
+        pr_url=args.pr_url,
+        candidate_digest=args.candidate_digest,
+    )
+    _write_json(args.output, result.to_dict())
+    _print_json(result.to_dict())
+
+
+def _oe_upgrade_worker_precheck(args: argparse.Namespace) -> None:
+    token = os.environ.get("GITCODE_TOKEN", "")
+    if not token:
+        raise UpgradeControllerError("GITCODE_TOKEN is required")
+    task = _load_task(args.task_spec)
+    result = verify_worker_start(
+        client=GitCodeClient(token=token),
+        target_repo=args.target_repo,
+        issue_number=args.issue_number,
+        request_key=args.request_key,
+        task=task,
+        workspace=args.workspace,
+        trusted_author=args.trusted_author,
+        head_revision=args.head_revision,
+    )
+    if args.github_output:
+        with args.github_output.open("a", encoding="utf-8") as output:
+            output.write(f"proceed={'true' if result.proceed else 'false'}\n")
+            output.write(f"reason={result.reason}\n")
+    _print_json({"proceed": result.proceed, "reason": result.reason})
+
+
 def _oe_upgrade_checkpoint(args: argparse.Namespace) -> None:
     checkpoint = create_checkpoint(
         workspace=args.workspace,
@@ -252,6 +505,7 @@ def _candidate_create(args: argparse.Namespace) -> None:
         task=_load_task(args.task_spec),
         base_sha=args.base_sha,
         validated_run_id=args.validated_run_id,
+        request_key=args.request_key,
     )
     _print_json(
         {
@@ -281,24 +535,14 @@ def _fork_deliver(args: argparse.Namespace) -> None:
     token = os.environ.get("GITCODE_TOKEN", "")
     if not token:
         raise ForkPRPipelineError("GITCODE_TOKEN is required")
-    # TODO(production-delivery): this is the single reason no entry can deliver
-    # in production. The config below is hard-coded to the test pair, and
-    # deliver_validated_candidate refuses anything else, so scenario_one is a
-    # production orchestration entry with test-mode delivery. The production
-    # pair (environment=production, delivery_mode=direct_branch_pr, defined in
-    # scripts/lib/gitcode_client.DeliveryConfig) is unreachable from any
-    # workflow, and test fork_pr deliberately skips the duplicate PR guard.
-    # Rollout order: lift these five values into CLI arguments, re-enable the
-    # duplicate PR guard, then relax the mode check in
-    # pr_delivery.deliver_validated_candidate.
-    # Left as-is on purpose while phase-one testing continues.
     config = DeliveryConfig.from_mapping(
         {
-            "environment": "test",
-            "delivery_mode": "fork_pr",
-            "target_repo": "openeuler/openeuler-docker-images",
-            "push_repo": "qq_42020325/openeuler-docker-images",
-            "target_branch": "master",
+            "environment": args.environment,
+            "delivery_mode": args.delivery_mode,
+            "target_repo": args.target_repo,
+            "push_repo": args.push_repo,
+            "target_branch": args.target_branch,
+            "duplicate_pr_guard": args.duplicate_pr_guard,
         }
     )
     resource = deliver_validated_candidate(
@@ -735,6 +979,18 @@ def _add_task_commands(commands: argparse._SubParsersAction) -> None:
     prepare.add_argument("--report-dir", required=True, type=Path)
     prepare.set_defaults(handler=_oe_upgrade_prepare)
 
+    test_prepare = commands.add_parser(
+        "oe-upgrade-test-prepare",
+        help="Reuse or generate shared tests for one upgrade candidate",
+    )
+    test_prepare.add_argument("--workspace", required=True, type=Path)
+    test_prepare.add_argument("--task-spec", required=True, type=Path)
+    test_prepare.add_argument("--base-sha", required=True)
+    test_prepare.add_argument("--checkpoint", required=True, type=Path)
+    test_prepare.add_argument("--report-dir", required=True, type=Path)
+    test_prepare.add_argument("--opencode", required=True, type=Path)
+    test_prepare.set_defaults(handler=_oe_upgrade_test_prepare)
+
     checkpoint = commands.add_parser(
         "oe-upgrade-checkpoint",
         help="Snapshot a gated candidate before an Agent modifies it",
@@ -762,6 +1018,63 @@ def _add_task_commands(commands: argparse._SubParsersAction) -> None:
     sanitize.add_argument("--report", required=True, type=Path)
     sanitize.set_defaults(handler=_oe_upgrade_sanitize)
 
+    advance = commands.add_parser(
+        "oe-upgrade-advance",
+        help="Recompute one activity and dispatch at most one worker",
+    )
+    advance.add_argument("--target-repo", required=True)
+    advance.add_argument("--issue-number", type=int)
+    advance.add_argument("--workspace", required=True, type=Path)
+    advance.add_argument("--mode", required=True, choices=("plan", "deliver"))
+    advance.add_argument("--oe-version", default="")
+    advance.add_argument("--scope", default="")
+    advance.add_argument("--trusted-author", required=True)
+    advance.add_argument("--run-url", required=True)
+    advance.add_argument("--artifact-name", required=True)
+    advance.add_argument("--github-repository", required=True)
+    advance.add_argument("--github-ref", required=True)
+    advance.add_argument("--worker-workflow", default="oe_upgrade_worker.yml")
+    advance.add_argument("--plan-output", required=True, type=Path)
+    advance.add_argument("--result-output", required=True, type=Path)
+    advance.set_defaults(handler=_oe_upgrade_advance)
+
+    finalize = commands.add_parser(
+        "oe-upgrade-task-finalize",
+        help="Write one worker receipt and an idempotent failure comment",
+    )
+    finalize.add_argument("--target-repo", required=True)
+    finalize.add_argument("--issue-number", required=True, type=int)
+    finalize.add_argument("--request-key", required=True)
+    finalize.add_argument("--task-spec", required=True, type=Path)
+    finalize.add_argument(
+        "--outcome", required=True, choices=("pr-created", "failed")
+    )
+    finalize.add_argument("--reason", default="")
+    finalize.add_argument("--run-id", required=True)
+    finalize.add_argument("--run-url", required=True)
+    finalize.add_argument("--pr-number", type=int)
+    finalize.add_argument("--pr-url", default="")
+    finalize.add_argument("--candidate-digest", default="")
+    finalize.add_argument("--summary", default="")
+    finalize.add_argument("--artifact-name", required=True)
+    finalize.add_argument("--trusted-author", required=True)
+    finalize.add_argument("--output", required=True, type=Path)
+    finalize.set_defaults(handler=_oe_upgrade_task_finalize)
+
+    precheck = commands.add_parser(
+        "oe-upgrade-worker-precheck",
+        help="Verify a dispatched worker still owns one pending task",
+    )
+    precheck.add_argument("--target-repo", required=True)
+    precheck.add_argument("--issue-number", required=True, type=int)
+    precheck.add_argument("--request-key", required=True)
+    precheck.add_argument("--task-spec", required=True, type=Path)
+    precheck.add_argument("--workspace", required=True, type=Path)
+    precheck.add_argument("--trusted-author", required=True)
+    precheck.add_argument("--head-revision", default="HEAD")
+    precheck.add_argument("--github-output", type=Path)
+    precheck.set_defaults(handler=_oe_upgrade_worker_precheck)
+
     task = commands.add_parser("task-spec")
     task.add_argument("--app", required=True)
     task.add_argument("--version", required=True)
@@ -788,6 +1101,7 @@ def _add_candidate_commands(commands: argparse._SubParsersAction) -> None:
     create.add_argument("--task-spec", required=True, type=Path)
     create.add_argument("--base-sha", required=True)
     create.add_argument("--validated-run-id", required=True)
+    create.add_argument("--request-key", default="")
     create.set_defaults(handler=_candidate_create)
 
     verify = commands.add_parser("candidate-verify")
@@ -843,6 +1157,16 @@ def _add_delivery_commands(commands: argparse._SubParsersAction) -> None:
         required=True,
         help="GitCode bot username",
     )
+    fork.add_argument("--environment", default="test")
+    fork.add_argument("--delivery-mode", default="fork_pr")
+    fork.add_argument(
+        "--target-repo", default="openeuler/openeuler-docker-images"
+    )
+    fork.add_argument(
+        "--push-repo", default="qq_42020325/openeuler-docker-images"
+    )
+    fork.add_argument("--target-branch", default="master")
+    fork.add_argument("--duplicate-pr-guard", default="")
     fork.set_defaults(handler=_fork_deliver)
 
     issue_probe = commands.add_parser(
@@ -1052,8 +1376,11 @@ def main(argv: list[str] | None = None) -> int:
         NativeValidationError,
         UpgradeContractError,
         UpgradePlannerError,
+        UpgradeTestPreparationError,
         PRDeliveryError,
         SanitizationError,
+        ActivityError,
+        UpgradeControllerError,
         TargetContractError,
         TaskSpecError,
         json.JSONDecodeError,

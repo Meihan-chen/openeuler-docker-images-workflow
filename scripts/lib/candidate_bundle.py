@@ -174,6 +174,14 @@ class CandidateManifest:
     content_sha256: str
     task_key: str | None = None
     architectures: tuple[str, ...] = ()
+    scenario: str = ""
+    request_key: str = ""
+    mdu_path: str = ""
+    derive_from: str = ""
+    target_os_version: str = ""
+    derivation_report_sha256: str = ""
+    sanitization_reports: tuple[str, ...] = ()
+    os_identity_reports: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -190,11 +198,22 @@ class CandidateBundle:
         task: TaskSpec,
         base_sha: str,
         validated_run_id: str,
+        request_key: str = "",
     ) -> "CandidateBundle":
         root = Path(root)
         _validate_sha(base_sha, "base_sha")
         if not _RUN_ID_RE.fullmatch(validated_run_id):
             raise CandidateBundleError("validated_run_id must be a positive integer")
+        if task.scenario == "oe-upgrade" and not re.fullmatch(
+            r"[0-9a-f]{16}", request_key
+        ):
+            raise CandidateBundleError(
+                "oe-upgrade candidate requires a 16-hex request_key"
+            )
+        if task.scenario != "oe-upgrade" and request_key:
+            raise CandidateBundleError(
+                "request_key is only valid for an oe-upgrade candidate"
+            )
 
         (root / "task-spec.json").write_text(task.to_json() + "\n")
         _validate_reports(root, task=task)
@@ -222,6 +241,18 @@ class CandidateBundle:
             raise CandidateBundleError("changes.patch must not be empty")
 
         files = {relative: _sha256(path) for relative, path in payload.items()}
+        derivation = root / "reports" / "agents" / "derivation-report.json"
+        sanitization_reports = tuple(
+            path.relative_to(root).as_posix()
+            for path in sorted(
+                (root / "reports" / "agents").rglob("sanitization-*.json")
+            )
+        )
+        os_identity_reports = tuple(
+            f"reports/{architecture}.json"
+            for architecture in _architectures(task)
+            if task.scenario == "oe-upgrade"
+        )
         manifest = CandidateManifest(
             schema_version=1,
             validated_run_id=validated_run_id,
@@ -231,6 +262,16 @@ class CandidateBundle:
             content_sha256=_content_digest(files),
             task_key=task.task_key,
             architectures=_architectures(task),
+            scenario=task.scenario,
+            request_key=request_key,
+            mdu_path=task.mdu_path or "",
+            derive_from=task.derive_from or "",
+            target_os_version=task.os_version,
+            derivation_report_sha256=(
+                "sha256:" + _sha256(derivation) if derivation.is_file() else ""
+            ),
+            sanitization_reports=sanitization_reports,
+            os_identity_reports=os_identity_reports,
         )
         (root / "manifest.json").write_text(
             json.dumps(asdict(manifest), ensure_ascii=False, indent=2, sort_keys=True)
@@ -250,8 +291,13 @@ class CandidateBundle:
                 raw_manifest.get("architectures"), list
             ):
                 raw_manifest["architectures"] = tuple(
-                    raw_manifest["architectures"]
+                raw_manifest["architectures"]
                 )
+            for key in ("sanitization_reports", "os_identity_reports"):
+                if isinstance(raw_manifest, dict) and isinstance(
+                    raw_manifest.get(key), list
+                ):
+                    raw_manifest[key] = tuple(raw_manifest[key])
             manifest = CandidateManifest(**raw_manifest)
         except (OSError, json.JSONDecodeError, TypeError) as exc:
             raise CandidateBundleError("candidate manifest is invalid") from exc
@@ -281,6 +327,10 @@ class CandidateBundle:
         if task.schema_version == 2 and (
             manifest.task_key != task.task_key
             or manifest.architectures != task.architectures
+            or manifest.scenario != task.scenario
+            or manifest.mdu_path != task.mdu_path
+            or manifest.derive_from != task.derive_from
+            or manifest.target_os_version != task.os_version
         ):
             raise CandidateBundleError("candidate TaskSpec does not match manifest")
         _validate_reports(root, task=task)
@@ -316,12 +366,19 @@ def promote_candidate(
 
     workspace.apply_patch(bundle.root / "changes.patch")
     delivery_branch = branch or bundle.task.branch
-    commit_sha = workspace.commit_candidate(
-        branch=delivery_branch,
-        message=(
+    if bundle.task.scenario == "oe-upgrade":
+        message = (
+            f"feat: upgrade {bundle.task.mdu_path} {bundle.task.version} "
+            f"to openEuler {bundle.task.os_version}"
+        )
+    else:
+        message = (
             f"feat: add {bundle.task.app} {bundle.task.version} image "
             f"for openEuler {bundle.task.os_version}"
-        ),
+        )
+    commit_sha = workspace.commit_candidate(
+        branch=delivery_branch,
+        message=message,
     )
     return CandidatePromotion(
         branch=delivery_branch,

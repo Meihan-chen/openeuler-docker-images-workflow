@@ -21,6 +21,20 @@ def _config(mode="fork_pr"):
     )
 
 
+def _production_config():
+    from scripts.lib.gitcode_client import DeliveryConfig
+
+    return DeliveryConfig.from_mapping(
+        {
+            "environment": "production",
+            "delivery_mode": "direct_branch_pr",
+            "target_repo": "openeuler/openeuler-docker-images",
+            "push_repo": "openeuler/openeuler-docker-images",
+            "target_branch": "master",
+        }
+    )
+
+
 class RecordingGitRunner:
     def __init__(self, results):
         self.results = list(results)
@@ -116,6 +130,27 @@ def test_push_uses_exact_observed_sha_as_force_with_lease(tmp_path):
     assert runner.calls[1]["args"][1] == (
         f"--force-with-lease=refs/heads/{BRANCH}:{old_sha}"
     )
+
+
+def test_production_push_refuses_to_overwrite_an_existing_stable_branch(tmp_path):
+    from scripts.lib.pr_delivery import GitDeliveryError, push_working_branch
+
+    old_sha = "1" * 40
+    runner = RecordingGitRunner(
+        [_result(stdout=f"{old_sha}\trefs/heads/{BRANCH}\n")]
+    )
+
+    with pytest.raises(GitDeliveryError, match="already exists"):
+        push_working_branch(
+            repo=tmp_path,
+            config=_production_config(),
+            branch=BRANCH,
+            username="openeuler-bot",
+            token="secret",
+            runner=runner,
+        )
+
+    assert len(runner.calls) == 1
 
 
 def test_validate_only_and_unsafe_branch_refuse_before_git_runs(tmp_path):
