@@ -26,6 +26,16 @@ on:
           because GitHub expressions have no arithmetic operators.
         required: true
         type: string
+      architectures:
+        description: "JSON array of native architectures required by TaskSpec"
+        required: false
+        type: string
+        default: '["x86_64","aarch64"]'
+      task_key:
+        description: "Stable task namespace reserved for multi-app scheduling"
+        required: false
+        type: string
+        default: single
     secrets:
       DEEPSEEK_API_KEY:
         # pipeline_smoke converges deterministically and must never repair,
@@ -50,6 +60,7 @@ env:
 jobs:
   x86_64:
     name: Validate (x86_64)
+    if: ${{ contains(fromJSON(inputs.architectures), 'x86_64') }}
     runs-on: [self-hosted, Linux, X64, oe-image-x86]
     timeout-minutes: 180
     steps:
@@ -115,13 +126,14 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: phase1-round${{ inputs.round }}-x86_64-${{ github.run_id }}
+          name: phase1-round${{ inputs.round }}-x86_64-${{ github.run_id }}-${{ inputs.task_key }}
           path: ${{ runner.temp }}/phase1-round/
           if-no-files-found: error
           retention-days: 30
 
   aarch64:
     name: Validate (aarch64)
+    if: ${{ contains(fromJSON(inputs.architectures), 'aarch64') }}
     runs-on: [self-hosted, Linux, ARM64, oe-image-arm64]
     timeout-minutes: 180
     steps:
@@ -187,7 +199,7 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: phase1-round${{ inputs.round }}-aarch64-${{ github.run_id }}
+          name: phase1-round${{ inputs.round }}-aarch64-${{ github.run_id }}-${{ inputs.task_key }}
           path: ${{ runner.temp }}/phase1-round/
           if-no-files-found: error
           retention-days: 30
@@ -218,15 +230,17 @@ jobs:
           path: ${{ runner.temp }}/phase1-input
 
       - name: Download round evidence (x86_64)
+        if: ${{ contains(fromJSON(inputs.architectures), 'x86_64') }}
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: phase1-round${{ inputs.round }}-x86_64-${{ github.run_id }}
+          name: phase1-round${{ inputs.round }}-x86_64-${{ github.run_id }}-${{ inputs.task_key }}
           path: ${{ runner.temp }}/phase1-x86
 
       - name: Download round evidence (aarch64)
+        if: ${{ contains(fromJSON(inputs.architectures), 'aarch64') }}
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: phase1-round${{ inputs.round }}-aarch64-${{ github.run_id }}
+          name: phase1-round${{ inputs.round }}-aarch64-${{ github.run_id }}-${{ inputs.task_key }}
           path: ${{ runner.temp }}/phase1-arm
 
       - name: Replay round candidate
@@ -249,8 +263,8 @@ jobs:
             --base-sha "${base_sha}" \
             --round "${{ inputs.round }}" \
             --max-rounds "${{ inputs.max_rounds }}" \
-            --x86-report "${RUNNER_TEMP}/phase1-x86/x86_64.json" \
-            --arm-report "${RUNNER_TEMP}/phase1-arm/aarch64.json" \
+            ${{ contains(fromJSON(inputs.architectures), 'x86_64') && format('--x86-report {0}/phase1-x86/x86_64.json', runner.temp) || '' }} \
+            ${{ contains(fromJSON(inputs.architectures), 'aarch64') && format('--arm-report {0}/phase1-arm/aarch64.json', runner.temp) || '' }} \
             --report-dir "${RUNNER_TEMP}/phase1-decide/agents" \
             --opencode "${{ steps.tools.outputs.opencode_path }}" \
             --github-output "${GITHUB_OUTPUT}"
@@ -263,11 +277,10 @@ jobs:
             "${RUNNER_TEMP}/phase1-input/base-sha.txt" \
             "${RUNNER_TEMP}/phase1-input/changes.patch" \
             "${RUNNER_TEMP}/phase1-converged/"
-          cp "${RUNNER_TEMP}/phase1-x86/x86_64.json" \
-            "${RUNNER_TEMP}/phase1-x86/x86_64.junit.xml" \
-            "${RUNNER_TEMP}/phase1-arm/aarch64.json" \
-            "${RUNNER_TEMP}/phase1-arm/aarch64.junit.xml" \
-            "${RUNNER_TEMP}/phase1-converged/"
+          find "${RUNNER_TEMP}/phase1-x86" "${RUNNER_TEMP}/phase1-arm" \
+            -maxdepth 1 -type f \
+            \( -name '*.json' -o -name '*.junit.xml' \) \
+            -exec cp {} "${RUNNER_TEMP}/phase1-converged/" \; 2>/dev/null || true
 
       - name: Emit next round candidate
         if: >-
@@ -346,11 +359,11 @@ jobs:
           cp "${RUNNER_TEMP}/phase1-terminal-candidate/task-spec.json" \
             "${RUNNER_TEMP}/phase1-terminal-candidate/base-sha.txt" \
             "${RUNNER_TEMP}/phase1-terminal-candidate/changes.patch" \
-            "${RUNNER_TEMP}/phase1-x86/x86_64.json" \
-            "${RUNNER_TEMP}/phase1-x86/x86_64.junit.xml" \
-            "${RUNNER_TEMP}/phase1-arm/aarch64.json" \
-            "${RUNNER_TEMP}/phase1-arm/aarch64.junit.xml" \
             "${RUNNER_TEMP}/phase1-terminal/"
+          find "${RUNNER_TEMP}/phase1-x86" "${RUNNER_TEMP}/phase1-arm" \
+            -maxdepth 1 -type f \
+            \( -name '*.json' -o -name '*.junit.xml' \) \
+            -exec cp {} "${RUNNER_TEMP}/phase1-terminal/" \; 2>/dev/null || true
           cp -a "${RUNNER_TEMP}/phase1-decide/." \
             "${RUNNER_TEMP}/phase1-terminal/decision/"
           cp -a "${RUNNER_TEMP}/phase1-terminal-generation/generation-reports/." \

@@ -59,6 +59,9 @@ _VERSION_INFO_FIELDS = {
     "numpy_version",
 }
 NATIVE_REQUIRED_CHECKS = frozenset({"native_build", "runtime_test"})
+OE_UPGRADE_NATIVE_REQUIRED_CHECKS = frozenset(
+    {"native_build", "os_identity", "runtime_test"}
+)
 
 _ALLOWED_TEST_ASSETS = frozenset({"test.sh", "test_helpers.sh"})
 _RESERVED_CONTROL_ASSETS = frozenset(
@@ -71,12 +74,17 @@ _AGENT_CONTROL_NAMES = frozenset({"agents.md", "claude.md"})
 _AGENT_CONTROL_DIRECTORIES = frozenset({".agents", ".codex"})
 
 
-def native_checks_pass(checks: object) -> bool:
+def native_checks_pass(checks: object, *, oe_upgrade: bool = False) -> bool:
     if not isinstance(checks, dict) or not all(
         value is True for value in checks.values()
     ):
         return False
-    return frozenset(checks) == NATIVE_REQUIRED_CHECKS
+    expected = (
+        OE_UPGRADE_NATIVE_REQUIRED_CHECKS
+        if oe_upgrade
+        else NATIVE_REQUIRED_CHECKS
+    )
+    return frozenset(checks) == expected
 
 
 def junit_pass_rate(content: bytes) -> float:
@@ -1174,7 +1182,11 @@ def validate_final_target(
     task: TaskSpec,
     base_sha: str,
 ) -> dict[str, object]:
-    generated = validate_generated_target(
+    generated = (
+        validate_add_version_target
+        if task.scenario == "oe-upgrade"
+        else validate_generated_target
+    )(
         repo=repo,
         task=task,
         base_sha=base_sha,
@@ -1185,24 +1197,27 @@ def validate_final_target(
             "final delivery contract did not pass: "
             + "; ".join(str(message) for message in messages)
         )
-    result_dir = (
-        Path(repo)
-        / task.domain
-        / task.app
-        / "results"
-        / task.version
-        / task.os_version
-    )
+    app_root = Path(repo) / (task.mdu_path or f"{task.domain}/{task.app}")
+    result_dir = app_root / "results" / task.version / task.os_version
     if not result_dir.is_dir():
         raise TargetContractError("final app result directory is missing")
     actual_files = {
         path.name for path in result_dir.iterdir() if path.is_file()
     }
-    if actual_files != _RESULT_FILES or any(
+    architectures = (
+        task.architectures
+        if task.schema_version == 2
+        else ("x86_64", "aarch64")
+    )
+    required_files = {
+        "version_info.json",
+        *(f"{architecture}.junit.xml" for architecture in architectures),
+    }
+    if actual_files != required_files or any(
         not path.is_file() for path in result_dir.iterdir()
     ):
-        missing = sorted(_RESULT_FILES - actual_files)
-        extra = sorted(actual_files - _RESULT_FILES)
+        missing = sorted(required_files - actual_files)
+        extra = sorted(actual_files - required_files)
         detail = []
         if missing:
             detail.append("missing " + ", ".join(missing))
@@ -1212,10 +1227,10 @@ def validate_final_target(
             "final result files are incomplete: " + "; ".join(detail)
         )
 
-    total_bytes = sum((result_dir / name).stat().st_size for name in _RESULT_FILES)
+    total_bytes = sum((result_dir / name).stat().st_size for name in required_files)
     if total_bytes > 20 * 1024:
         raise TargetContractError("final in-repository results exceed 20 KiB")
-    for architecture in ("x86_64", "aarch64"):
+    for architecture in architectures:
         path = result_dir / f"{architecture}.junit.xml"
         try:
             pass_rate = junit_pass_rate(path.read_bytes())
@@ -1235,12 +1250,12 @@ def validate_final_target(
     if (
         not isinstance(version_info, dict)
         or set(version_info) != _VERSION_INFO_FIELDS
-        or version_info.get("architecture") != "x86_64,aarch64"
+        or version_info.get("architecture") != ",".join(architectures)
         or version_info.get("software_name") != task.app
         or version_info.get("software_version") != task.version
     ):
         raise TargetContractError(
-            "version_info.json must contain the 11-field dual-architecture evidence"
+            "version_info.json must contain the 11-field declared-architecture evidence"
         )
     return {
         **generated,

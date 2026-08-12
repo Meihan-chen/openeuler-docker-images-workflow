@@ -22,22 +22,16 @@ class CandidateBundleError(ValueError):
 
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _RUN_ID_RE = re.compile(r"^[1-9][0-9]*$")
-_REQUIRED_PAYLOAD = (
+_COMMON_REQUIRED_PAYLOAD = (
     "changes.patch",
-    "reports/aarch64.json",
-    "reports/aarch64.junit.xml",
     "reports/gates.json",
     "reports/hadolint.txt",
     "reports/results.json",
-    "reports/x86_64.json",
-    "reports/x86_64.junit.xml",
     "task-spec.json",
 )
-_REQUIRED_REPORTS = {
-    "aarch64": "reports/aarch64.json",
+_COMMON_REQUIRED_REPORTS = {
     "gates": "reports/gates.json",
     "generation gates": "reports/generation-gates.json",
-    "x86_64": "reports/x86_64.json",
 }
 
 
@@ -87,8 +81,22 @@ def junit_pass_rate(path: Path, architecture: str) -> float:
         ) from exc
 
 
-def _validate_reports(root: Path) -> None:
-    for name, relative in _REQUIRED_REPORTS.items():
+def _architectures(task: TaskSpec) -> tuple[str, ...]:
+    return task.architectures if task.schema_version == 2 else (
+        "x86_64",
+        "aarch64",
+    )
+
+
+def _validate_reports(root: Path, *, task: TaskSpec) -> None:
+    reports = {
+        **_COMMON_REQUIRED_REPORTS,
+        **{
+            architecture: f"reports/{architecture}.json"
+            for architecture in _architectures(task)
+        },
+    }
+    for name, relative in reports.items():
         path = root / relative
         if not path.is_file():
             raise CandidateBundleError(f"{name} validation report is required")
@@ -104,7 +112,8 @@ def _validate_reports(root: Path) -> None:
         ):
             raise CandidateBundleError(f"{name} delivery contract did not pass")
         if name in {"x86_64", "aarch64"} and not native_checks_pass(
-            report.get("checks")
+            report.get("checks"),
+            oe_upgrade=task.scenario == "oe-upgrade",
         ):
             raise CandidateBundleError(f"{name} validation checks are incomplete")
         if name in {"x86_64", "aarch64"} and junit_pass_rate(
@@ -112,9 +121,15 @@ def _validate_reports(root: Path) -> None:
             name,
         ) != 1.0:
             raise CandidateBundleError(f"{name} JUnit evidence did not pass")
+        if (
+            task.schema_version == 2
+            and name in _architectures(task)
+            and report.get("task_key") != task.task_key
+        ):
+            raise CandidateBundleError(f"{name} validation belongs to another task")
 
 
-def _validate_results(root: Path, *, task_id: str, run_id: str) -> None:
+def _validate_results(root: Path, *, task: TaskSpec, run_id: str) -> None:
     path = root / "reports" / "results.json"
     try:
         results = json.loads(path.read_text())
@@ -124,23 +139,26 @@ def _validate_results(root: Path, *, task_id: str, run_id: str) -> None:
         raise CandidateBundleError("results.json schema version is unsupported")
     if results.get("status") != "passed":
         raise CandidateBundleError("results.json does not record a passed result")
-    if results.get("task_id") != task_id:
+    if results.get("task_id") != task.task_id:
         raise CandidateBundleError("results.json belongs to another task")
     if results.get("validated_run_id") != run_id:
         raise CandidateBundleError("results.json run ID does not match candidate")
     if not str(results.get("artifact_url", "")).startswith("https://"):
         raise CandidateBundleError("results.json artifact URL must use HTTPS")
     architectures = results.get("architectures")
-    if not isinstance(architectures, dict) or set(architectures) != {
-        "x86_64",
-        "aarch64",
-    }:
+    required_architectures = set(_architectures(task))
+    if not isinstance(architectures, dict) or set(architectures) != required_architectures:
         raise CandidateBundleError(
-            "results.json must contain x86_64 and aarch64 evidence"
+            "results.json must contain exactly the declared architecture evidence"
         )
+    if task.schema_version == 2 and results.get("task_key") != task.task_key:
+        raise CandidateBundleError("results.json task key does not match candidate")
     for architecture, evidence in architectures.items():
         checks = evidence.get("checks") if isinstance(evidence, dict) else None
-        if not native_checks_pass(checks):
+        if not native_checks_pass(
+            checks,
+            oe_upgrade=task.scenario == "oe-upgrade",
+        ):
             raise CandidateBundleError(
                 f"results.json {architecture} checks are incomplete"
             )
@@ -154,6 +172,8 @@ class CandidateManifest:
     base_sha: str
     files: dict[str, str]
     content_sha256: str
+    task_key: str | None = None
+    architectures: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -177,15 +197,23 @@ class CandidateBundle:
             raise CandidateBundleError("validated_run_id must be a positive integer")
 
         (root / "task-spec.json").write_text(task.to_json() + "\n")
-        _validate_reports(root)
+        _validate_reports(root, task=task)
         _validate_results(
             root,
-            task_id=task.task_id,
+            task=task,
             run_id=validated_run_id,
         )
 
         payload = _payload_files(root)
-        missing = sorted(set(_REQUIRED_PAYLOAD) - set(payload))
+        required_payload = set(_COMMON_REQUIRED_PAYLOAD)
+        for architecture in _architectures(task):
+            required_payload.update(
+                {
+                    f"reports/{architecture}.json",
+                    f"reports/{architecture}.junit.xml",
+                }
+            )
+        missing = sorted(required_payload - set(payload))
         if missing:
             raise CandidateBundleError(
                 "candidate payload is incomplete: " + ", ".join(missing)
@@ -201,6 +229,8 @@ class CandidateBundle:
             base_sha=base_sha,
             files=files,
             content_sha256=_content_digest(files),
+            task_key=task.task_key,
+            architectures=_architectures(task),
         )
         (root / "manifest.json").write_text(
             json.dumps(asdict(manifest), ensure_ascii=False, indent=2, sort_keys=True)
@@ -216,6 +246,12 @@ class CandidateBundle:
         manifest_path = root / "manifest.json"
         try:
             raw_manifest = json.loads(manifest_path.read_text())
+            if isinstance(raw_manifest, dict) and isinstance(
+                raw_manifest.get("architectures"), list
+            ):
+                raw_manifest["architectures"] = tuple(
+                    raw_manifest["architectures"]
+                )
             manifest = CandidateManifest(**raw_manifest)
         except (OSError, json.JSONDecodeError, TypeError) as exc:
             raise CandidateBundleError("candidate manifest is invalid") from exc
@@ -236,16 +272,21 @@ class CandidateBundle:
         if _content_digest(manifest.files) != manifest.content_sha256:
             raise CandidateBundleError("candidate content checksum is invalid")
 
-        _validate_reports(root)
         try:
             task = TaskSpec.from_json((root / "task-spec.json").read_text())
         except (OSError, json.JSONDecodeError, TaskSpecError) as exc:
             raise CandidateBundleError("candidate TaskSpec is invalid") from exc
         if task.task_id != manifest.task_id:
             raise CandidateBundleError("candidate TaskSpec does not match manifest")
+        if task.schema_version == 2 and (
+            manifest.task_key != task.task_key
+            or manifest.architectures != task.architectures
+        ):
+            raise CandidateBundleError("candidate TaskSpec does not match manifest")
+        _validate_reports(root, task=task)
         _validate_results(
             root,
-            task_id=task.task_id,
+            task=task,
             run_id=manifest.validated_run_id,
         )
 

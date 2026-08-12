@@ -17,6 +17,26 @@ def _task():
     )
 
 
+def _oe_task(*, architectures=("x86_64",)):
+    from scripts.lib.task_spec import TaskSpec
+
+    return TaskSpec.from_workflow_dispatch(
+        {
+            "schema_version": 2,
+            "scenario": "oe-upgrade",
+            "app": "redis",
+            "image_name": "redis",
+            "version": "8.2.1",
+            "os_version": "26.03-lts",
+            "domain": "Database",
+            "source_url": "",
+            "mdu_path": "Database/redis",
+            "derive_from": "8.2.1/24.03-lts-sp1",
+            "architectures": list(architectures),
+        }
+    )
+
+
 def _passing_gate():
     return {
         "status": "passed",
@@ -618,6 +638,115 @@ def test_a_round_that_passes_on_both_architectures_is_itself_the_proof(
     assert decision.validated_patch_sha256 == DIGEST
     # Convergence is proof on its own; no separate revalidation, no Fixer.
     assert fixer.calls == []
+
+
+def test_oe_upgrade_single_architecture_converges_from_one_required_report(
+    tmp_path,
+):
+    task = _oe_task()
+    report = _report("x86_64")
+    report["task_key"] = task.task_key
+    report["checks"]["os_identity"] = True
+
+    decision = _decide(tmp_path, {"x86_64": report}, task=task)
+
+    assert decision.converged is True
+    assert decision.validated_patch_sha256 == DIGEST
+
+
+def test_oe_upgrade_round_rejects_report_for_another_task(tmp_path):
+    from scripts.lib.native_repair import NativeRepairError
+
+    task = _oe_task()
+    report = _report("x86_64")
+    report["task_key"] = "0" * 16
+
+    with pytest.raises(NativeRepairError, match="task_key"):
+        _decide(tmp_path, {"x86_64": report}, task=task)
+
+
+def test_oe_upgrade_infrastructure_failure_is_an_automatic_terminal_failure(
+    tmp_path,
+):
+    task = _oe_task()
+    report = _report("x86_64", status="failed")
+    report.update(
+        {
+            "task_key": task.task_key,
+            "failed_stage": "native_build",
+            "failure": "timed out",
+            "failure_details": {"returncode": 124},
+        }
+    )
+    fixer = Fixer()
+
+    decision = _decide(
+        tmp_path,
+        {"x86_64": report},
+        task=task,
+        agent_runner=fixer,
+    )
+
+    assert decision.terminal_status == "failed:infrastructure"
+    assert fixer.calls == []
+
+
+def test_round_classification_requires_actionable_candidate_evidence():
+    from scripts.lib.native_repair import aggregate_round_classifications
+
+    assert aggregate_round_classifications(
+        {"x86_64": {"category": "unclassified"}}
+    ) == {
+        "infrastructure_only": False,
+        "dependency_unavailable": False,
+        "has_actionable_candidate_evidence": False,
+    }
+    assert aggregate_round_classifications(
+        {
+            "x86_64": {"category": "os-identity"},
+            "aarch64": {"category": "infra"},
+        }
+    )["has_actionable_candidate_evidence"] is True
+
+
+def test_oe_upgrade_fixer_is_wrapped_by_checkpoint_and_sanitization(tmp_path):
+    task = _oe_task()
+    report = _report("x86_64", status="failed")
+    report.update(
+        {
+            "task_key": task.task_key,
+            "failed_stage": "native_build",
+            "failure": "package name changed",
+            "failure_details": {"returncode": 1},
+        }
+    )
+    calls = []
+
+    class Checkpoint:
+        checkpoint_id = "sha256:" + "a" * 64
+        allowed_paths = ("Database/redis/8.2.1/26.03-lts/**",)
+
+    checkpoint = Checkpoint()
+
+    def checkpoint_factory(**kwargs):
+        calls.append(("checkpoint", kwargs))
+        return checkpoint
+
+    def sanitizer(**kwargs):
+        calls.append(("sanitize", kwargs))
+        return type("Report", (), {"clean": True})()
+
+    decision = _decide(
+        tmp_path,
+        {"x86_64": report},
+        task=task,
+        checkpoint_factory=checkpoint_factory,
+        sanitizer=sanitizer,
+    )
+
+    assert decision.repair_attempts == 1
+    assert [name for name, _ in calls] == ["checkpoint", "sanitize"]
+    assert calls[1][1]["checkpoint"] is checkpoint
 
 
 def test_both_passing_on_different_candidates_is_never_convergence(tmp_path):

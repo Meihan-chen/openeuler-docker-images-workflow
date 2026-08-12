@@ -468,6 +468,25 @@ def test_every_round_validates_one_candidate_on_both_architectures():
         "${{ jobs.decide.outputs.terminal_status }}"
     )
 
+
+def test_reusable_round_reserves_dynamic_architecture_and_task_interfaces():
+    jobs = _workflow()["jobs"]
+    round_workflow = _workflow(ROUND_PATH)
+    inputs = _trigger(round_workflow)["workflow_call"]["inputs"]
+
+    assert inputs["architectures"]["default"] == '["x86_64","aarch64"]'
+    assert inputs["task_key"]["default"] == "single"
+    assert "contains(fromJSON(inputs.architectures), 'x86_64')" in (
+        round_workflow["jobs"]["x86_64"]["if"]
+    )
+    assert "contains(fromJSON(inputs.architectures), 'aarch64')" in (
+        round_workflow["jobs"]["aarch64"]["if"]
+    )
+    text = ROUND_PATH.read_text()
+    assert "${{ inputs.task_key }}" in text
+    assert "--x86-report" in text
+    assert "--arm-report" in text
+
     # A later round exists only because the previous one did not converge.
     for index, name in enumerate(ROUNDS[1:]):
         assert jobs[name]["needs"] == [ROUNDS[index], "seed-resume"]
@@ -651,8 +670,8 @@ def test_round_artifact_producers_and_consumers_use_the_same_templates():
     main_uploads = artifact_names(WORKFLOW_PATH, "upload-artifact")
 
     assert {
-        "phase1-round${{ inputs.round }}-x86_64-${{ github.run_id }}",
-        "phase1-round${{ inputs.round }}-aarch64-${{ github.run_id }}",
+        "phase1-round${{ inputs.round }}-x86_64-${{ github.run_id }}-${{ inputs.task_key }}",
+        "phase1-round${{ inputs.round }}-aarch64-${{ github.run_id }}-${{ inputs.task_key }}",
     }.issubset(round_uploads & round_downloads)
     current_patch = "phase1-patch${{ inputs.round }}-${{ github.run_id }}"
     assert current_patch in round_downloads
@@ -1059,7 +1078,8 @@ def test_a_failed_round_still_publishes_the_evidence_the_decision_needs():
         assert "always()" in upload["if"]
         assert upload["with"]["name"] == (
             "phase1-round${{ inputs.round }}-"
-            f"{architecture}" + "-${{ github.run_id }}"
+            f"{architecture}"
+            + "-${{ github.run_id }}-${{ inputs.task_key }}"
         )
         assert upload["with"]["if-no-files-found"] == "error"
 

@@ -7,6 +7,7 @@ import json
 import os
 import platform as runtime_platform
 import re
+import shlex
 import subprocess
 import time
 import xml.etree.ElementTree as ET
@@ -536,6 +537,8 @@ def write_infrastructure_failure_evidence(
             "retryable": True,
         },
     }
+    if task.task_key:
+        report["task_key"] = task.task_key
     _write_evidence(
         report_path=Path(report_path),
         junit_path=Path(junit_path),
@@ -575,8 +578,17 @@ def validated_patch_digest(workspace: Path) -> str:
     return hashlib.sha256(completed.stdout).hexdigest()
 
 
-def _builder_name(kind: str, run_id: str, architecture: str) -> str:
-    return f"oe-{kind}-{run_id}-{architecture.replace('_', '-')}-builder"
+def _builder_name(
+    kind: str,
+    run_id: str,
+    architecture: str,
+    task_key: str = "",
+) -> str:
+    task_part = f"-{task_key}" if task_key else ""
+    return (
+        f"oe-{kind}-{run_id}{task_part}-"
+        f"{architecture.replace('_', '-')}-builder"
+    )
 
 
 def _ensure_builder(
@@ -619,6 +631,7 @@ def release_run_builders(
     run_id: str,
     architecture: str,
     workspace: Path,
+    task_key: str = "",
     runner: CommandRunner = _default_runner,
 ) -> dict[str, object]:
     """Remove the builders this run owns on one architecture's runner."""
@@ -641,7 +654,7 @@ def release_run_builders(
     }
     released = []
     for kind in ("e2e", "smoke"):
-        builder = _builder_name(kind, run_id, architecture)
+        builder = _builder_name(kind, run_id, architecture, task_key)
         if builder not in existing:
             continue
         _run(
@@ -656,6 +669,7 @@ def release_run_builders(
         "status": "passed",
         "architecture": architecture,
         "run_id": run_id,
+        "task_key": task_key,
         "released_builders": released,
     }
 
@@ -715,6 +729,142 @@ def _environment_evidence(task: TaskSpec, architecture: str) -> dict[str, object
         "python_version": runtime_platform.python_version(),
         "numpy_version": numpy_version,
     }
+
+
+def _parse_os_release(content: str) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for number, raw_line in enumerate(content.splitlines(), start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, separator, raw_value = line.partition("=")
+        if not separator or not re.fullmatch(r"[A-Z0-9_]+", key):
+            raise NativeValidationError(
+                f"image os-release line {number} is invalid"
+            )
+        try:
+            tokens = shlex.split(raw_value, posix=True)
+        except ValueError as error:
+            raise NativeValidationError(
+                f"image os-release line {number} has invalid quoting"
+            ) from error
+        if len(tokens) != 1:
+            raise NativeValidationError(
+                f"image os-release line {number} has an invalid value"
+            )
+        values[key] = tokens[0]
+    return values
+
+
+_OE_IDENTITY_VERSION_RE = re.compile(
+    r"(?P<base>\d{2}\.\d{2})"
+    r"(?:\s*(?:\(|-|\s)\s*LTS"
+    r"(?:-?SP(?P<sp>\d+))?\s*\)?)?",
+    re.IGNORECASE,
+)
+
+
+def _normalize_observed_oe(value: str) -> str:
+    match = _OE_IDENTITY_VERSION_RE.search(value)
+    if not match:
+        return ""
+    normalized = match.group("base").lower()
+    matched = match.group(0).lower()
+    if "lts" in matched:
+        normalized += "-lts"
+    if match.group("sp"):
+        normalized += f"-sp{int(match.group('sp'))}"
+    return normalized
+
+
+def inspect_image_os_identity(
+    *,
+    runner: CommandRunner,
+    workspace: Path,
+    image_id: str,
+    target_oe: str,
+    container: str,
+    report_dir: Path,
+) -> dict[str, object]:
+    """Read /etc/os-release through Docker without executing image code."""
+    workspace = Path(workspace)
+    report_dir = Path(report_dir)
+    report_dir.mkdir(parents=True, exist_ok=True)
+    destination = report_dir / f"{container}.os-release"
+    create = ["docker", "create", "--name", container, image_id]
+    created = _run(runner, create, cwd=workspace, check=False)
+    if created.returncode != 0:
+        raise NativeValidationError(
+            _merged_output(created) or "cannot create OS identity container",
+            details={"command": create, "returncode": created.returncode},
+        )
+    try:
+        copy = [
+            "docker",
+            "cp",
+            f"{container}:/etc/os-release",
+            str(destination),
+        ]
+        copied = _run(runner, copy, cwd=workspace, check=False)
+        if copied.returncode != 0 or not destination.is_file():
+            raise NativeValidationError(
+                _merged_output(copied) or "image /etc/os-release is unavailable",
+                details={"command": copy, "returncode": copied.returncode},
+            )
+        raw = destination.read_bytes()
+        try:
+            fields = _parse_os_release(raw.decode("utf-8"))
+        except UnicodeDecodeError as error:
+            raise NativeValidationError(
+                "image /etc/os-release is not UTF-8"
+            ) from error
+        safe_fields = {
+            name: fields[name]
+            for name in ("ID", "VERSION_ID", "VERSION", "PRETTY_NAME")
+            if name in fields
+        }
+        report: dict[str, object] = {
+            "status": "passed",
+            "expected_oe": target_oe,
+            "observed_oe": _normalize_observed_oe(fields.get("VERSION_ID", "")),
+            "fields": safe_fields,
+            "os_release_sha256": hashlib.sha256(raw).hexdigest(),
+        }
+        errors: list[str] = []
+        if fields.get("ID", "").lower() != "openeuler":
+            errors.append("ID is not openEuler")
+        if report["observed_oe"] != target_oe:
+            errors.append(
+                f"expected {target_oe} but found "
+                f"{report['observed_oe'] or fields.get('VERSION_ID', 'unknown')}"
+            )
+        display_fields = [
+            name for name in ("VERSION", "PRETTY_NAME") if fields.get(name)
+        ]
+        if not display_fields:
+            errors.append("VERSION or PRETTY_NAME is required")
+        for name in display_fields:
+            observed = _normalize_observed_oe(fields[name])
+            if observed != target_oe:
+                errors.append(
+                    f"{name} expected {target_oe} but found {observed or 'unknown'}"
+                )
+        if errors:
+            report["status"] = "failed"
+            report["errors"] = errors
+            raise NativeValidationError(
+                "; ".join(errors),
+                details={"report": report},
+            )
+        return report
+    finally:
+        _run(
+            runner,
+            ["docker", "rm", "--force", container],
+            cwd=workspace,
+            timeout=300,
+            check=False,
+        )
 
 
 def _image_has_healthcheck(
@@ -905,18 +1055,20 @@ def _runtime_test_command(
     container: str,
     test_container: str,
     run_id: str,
+    target_os_version: str = "",
+    architecture: str = "",
 ) -> list[str]:
+    environment = [f"EXPECTED_VERSION={version}"]
+    if target_os_version:
+        environment.append(f"EXPECTED_OS_VERSION={target_os_version}")
+    if architecture:
+        environment.append(f"TARGET_ARCH={architecture}")
     if carrier == "default":
-        return [
-            "docker",
-            "exec",
-            "--env",
-            f"EXPECTED_VERSION={version}",
-            container,
-            "/bin/bash",
-            "/opt/oe-tests/test.sh",
-        ]
-    return [
+        command = ["docker", "exec"]
+        for value in environment:
+            command.extend(("--env", value))
+        return command + [container, "/bin/bash", "/opt/oe-tests/test.sh"]
+    command = [
         "docker",
         "run",
         "--name",
@@ -925,8 +1077,10 @@ def _runtime_test_command(
         f"oe.autopilot.run={run_id}",
         "--volume",
         f"{tests_root}:/opt/oe-tests:ro",
-        "--env",
-        f"EXPECTED_VERSION={version}",
+    ]
+    for value in environment:
+        command.extend(("--env", value))
+    return command + [
         "--entrypoint",
         "/bin/bash",
         image_id,
@@ -982,6 +1136,8 @@ def _run_runtime_test(
     run_id: str,
     waiter: Path,
     wait_timeout: int = 120,
+    target_os_version: str = "",
+    architecture: str = "",
 ) -> dict[str, object]:
     """Run test.sh once after readiness or lifecycle observation completes."""
     failures: list[dict[str, object]] = []
@@ -1098,6 +1254,8 @@ def _run_runtime_test(
         container=container,
         test_container=test_container,
         run_id=run_id,
+        target_os_version=target_os_version,
+        architecture=architecture,
     )
     tested = _run(
         runner,
@@ -1192,7 +1350,7 @@ def validate_native_image(
         architecture=architecture,
         report_path=report_path,
     )
-    app_root = workspace / task.domain / task.app
+    app_root = workspace / (task.mdu_path or f"{task.domain}/{task.app}")
     image_root = app_root / task.version / task.os_version
     tests_root = app_root / "tests"
     dockerfile = image_root / "Dockerfile"
@@ -1208,19 +1366,30 @@ def validate_native_image(
 
     platform = _PLATFORMS[architecture]
     slug = architecture.replace("_", "-")
-    prefix = f"oe-e2e-{run_id}-{slug}"
+    task_part = f"-{task.task_key}" if task.task_key else ""
+    prefix = f"oe-e2e-{run_id}{task_part}-{slug}"
     builder = f"{prefix}-builder"
     container = f"{prefix}-runtime"
     test_container = f"{prefix}-runtime-test"
-    image = f"oe-autopilot/{task.app}:{task.version}-{run_id}-{slug}"
+    image_name = task.image_name or task.app
+    image = (
+        f"oe-autopilot/{image_name}:"
+        f"{task.version}-{run_id}{task_part}-{slug}"
+    )
     validated_patch_sha256 = validated_patch_digest(workspace)
     image_id = ""
     native_build_evidence: dict[str, object] = {}
     failures: list[dict[str, object]] = []
     container_evidence: dict[str, object] = {}
     runtime_observation: dict[str, object] = {}
+    image_os_identity: Mapping[str, object] | None = None
     # None distinguishes a check that was never reached from a failed check.
-    checks: dict[str, bool | None] = {name: None for name in _E2E_CHECKS}
+    required_checks = (
+        ("native_build", "os_identity", "runtime_test")
+        if task.scenario == "oe-upgrade"
+        else _E2E_CHECKS
+    )
+    checks: dict[str, bool | None] = {name: None for name in required_checks}
     stage = f"native:{architecture}"
     log(stage, "START validation")
 
@@ -1334,6 +1503,18 @@ def validate_native_image(
         else:
             checks["native_build"] = True
             log(stage, "PASS build")
+            if task.scenario == "oe-upgrade":
+                image_os_identity = run_check(
+                    "os_identity",
+                    lambda: inspect_image_os_identity(
+                        runner=runner,
+                        workspace=workspace,
+                        image_id=image_id,
+                        target_oe=task.os_version,
+                        container=f"{prefix}-os-identity",
+                        report_dir=report_path.parent,
+                    ),
+                )
             if test_contract["runtime_test_allowed"] is True:
                 runtime_outcome = run_check(
                     "runtime_test",
@@ -1347,6 +1528,12 @@ def validate_native_image(
                         test_container=test_container,
                         run_id=run_id,
                         waiter=waiter,
+                        target_os_version=(
+                            task.os_version if task.scenario == "oe-upgrade" else ""
+                        ),
+                        architecture=(
+                            architecture if task.scenario == "oe-upgrade" else ""
+                        ),
                     ),
                 )
                 if isinstance(runtime_outcome, Mapping):
@@ -1428,6 +1615,10 @@ def validate_native_image(
         "environment": _environment_evidence(task, architecture),
         "checks": checks,
     }
+    if task.task_key:
+        report["task_key"] = task.task_key
+    if task.scenario == "oe-upgrade" and image_os_identity is not None:
+        report["image_os_identity"] = dict(image_os_identity)
     if format_check is not None:
         report["format_check"] = format_check
     if native_build_evidence:

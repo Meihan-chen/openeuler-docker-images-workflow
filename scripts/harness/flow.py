@@ -619,21 +619,30 @@ def cmd_phase1_decide(args: argparse.Namespace) -> None:
     args.report_dir.mkdir(parents=True, exist_ok=True)
     api_key = os.environ.get("DEEPSEEK_API_KEY", "")
     try:
+        task = _load_task(args.task_spec)
+        report_paths = {
+            "x86_64": args.x86_report,
+            "aarch64": args.arm_report,
+        }
+        required_architectures = (
+            task.architectures
+            if task.schema_version == 2
+            else ("x86_64", "aarch64")
+        )
         reports = {
-            "x86_64": json.loads(args.x86_report.read_text()),
-            "aarch64": json.loads(args.arm_report.read_text()),
+            architecture: json.loads(report_paths[architecture].read_text())
+            for architecture in required_architectures
+            if report_paths[architecture] is not None
         }
         evidence_roots = {
             architecture: diagnostics.resolve()
-            for architecture, report_path in (
-                ("x86_64", args.x86_report),
-                ("aarch64", args.arm_report),
-            )
+            for architecture, report_path in report_paths.items()
+            if report_path is not None
             if (diagnostics := report_path.resolve().parent / "diagnostics").is_dir()
         }
         decision = decide_round(
             workspace=args.workspace,
-            task=_load_task(args.task_spec),
+            task=task,
             base_sha=args.base_sha,
             round_number=args.round,
             max_rounds=args.max_rounds,
@@ -688,6 +697,7 @@ def cmd_phase1_native_release(args: argparse.Namespace) -> None:
             run_id=args.run_id,
             architecture=args.architecture,
             workspace=args.workspace,
+            task_key=args.task_key,
         )
     )
 
@@ -983,8 +993,8 @@ def _add_native_commands(commands: argparse._SubParsersAction) -> None:
     decide.add_argument("--base-sha", required=True)
     decide.add_argument("--round", required=True, type=int)
     decide.add_argument("--max-rounds", required=True, type=int)
-    decide.add_argument("--x86-report", required=True, type=Path)
-    decide.add_argument("--arm-report", required=True, type=Path)
+    decide.add_argument("--x86-report", type=Path)
+    decide.add_argument("--arm-report", type=Path)
     decide.add_argument("--report-dir", required=True, type=Path)
     decide.add_argument("--opencode", required=True, type=Path)
     decide.add_argument("--github-output", type=Path)
@@ -1001,6 +1011,7 @@ def _add_native_commands(commands: argparse._SubParsersAction) -> None:
         choices=("x86_64", "aarch64"),
     )
     release.add_argument("--run-id", required=True)
+    release.add_argument("--task-key", default="")
     release.set_defaults(handler=cmd_phase1_native_release)
 
 

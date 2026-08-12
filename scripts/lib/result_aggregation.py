@@ -61,7 +61,10 @@ def _load_report(
             f"{architecture} report does not record the candidate it validated"
         )
     checks = report.get("checks")
-    if not native_checks_pass(checks):
+    if not native_checks_pass(
+        checks,
+        oe_upgrade=task.scenario == "oe-upgrade",
+    ):
         raise ResultAggregationError(f"{architecture} report checks are incomplete")
     environment = report.get("environment")
     if not isinstance(environment, dict) or set(environment) != _ENVIRONMENT_FIELDS:
@@ -93,10 +96,11 @@ def _load_junit(path: Path, architecture: str) -> bytes:
 def _combine(
     reports: Mapping[str, Mapping[str, object]],
     field: str,
+    architectures: tuple[str, ...] = _ARCHITECTURES,
 ) -> str:
     return "; ".join(
         f"{architecture}={reports[architecture]['environment'][field]}"
-        for architecture in _ARCHITECTURES
+        for architecture in architectures
     )
 
 
@@ -123,7 +127,7 @@ def aggregate_native_results(
     workspace = Path(workspace)
     report_dir = Path(report_dir)
     results_output = Path(results_output)
-    app_root = workspace / task.domain / task.app
+    app_root = workspace / (task.mdu_path or f"{task.domain}/{task.app}")
     if not app_root.is_dir():
         raise ResultAggregationError("generated application directory is missing")
     result_dir = app_root / "results" / task.version / task.os_version
@@ -136,17 +140,31 @@ def aggregate_native_results(
             f"production results already exist and cannot be overwritten: {results_output}"
         )
 
+    architectures = (
+        task.architectures if task.schema_version == 2 else _ARCHITECTURES
+    )
     reports = {
         architecture: _load_report(
             report_dir / f"{architecture}.json",
             architecture,
             task,
         )
-        for architecture in _ARCHITECTURES
+        for architecture in architectures
     }
+    if task.schema_version == 2:
+        wrong_tasks = [
+            architecture
+            for architecture in architectures
+            if reports[architecture].get("task_key") != task.task_key
+        ]
+        if wrong_tasks:
+            raise ResultAggregationError(
+                "native reports have a mismatched task_key: "
+                + ", ".join(wrong_tasks)
+            )
     validated = {
         str(reports[architecture].get("validated_patch_sha256", ""))
-        for architecture in _ARCHITECTURES
+        for architecture in architectures
     }
     if len(validated) != 1:
         # Job order alone cannot prove this: a repair on one architecture
@@ -156,7 +174,7 @@ def aggregate_native_results(
             + ", ".join(
                 f"{architecture}="
                 f"{reports[architecture].get('validated_patch_sha256', '')}"
-                for architecture in _ARCHITECTURES
+                for architecture in architectures
             )
         )
     junit = {
@@ -164,30 +182,30 @@ def aggregate_native_results(
             report_dir / f"{architecture}.junit.xml",
             architecture,
         )
-        for architecture in _ARCHITECTURES
+        for architecture in architectures
     }
     environments = {
         architecture: reports[architecture]["environment"]
-        for architecture in _ARCHITECTURES
+        for architecture in architectures
     }
     version_info = {
         "test_time": max(
             str(environments[architecture]["test_time"])
-            for architecture in _ARCHITECTURES
+            for architecture in architectures
         ),
-        "Model": _combine(reports, "Model"),
-        "architecture": "x86_64,aarch64",
-        "kernel": _combine(reports, "kernel"),
-        "os": _combine(reports, "os"),
-        "cpu_model": _combine(reports, "cpu_model"),
+        "Model": _combine(reports, "Model", architectures),
+        "architecture": ",".join(architectures),
+        "kernel": _combine(reports, "kernel", architectures),
+        "os": _combine(reports, "os", architectures),
+        "cpu_model": _combine(reports, "cpu_model", architectures),
         "cpu_cores": sum(
             int(environments[architecture]["cpu_cores"])
-            for architecture in _ARCHITECTURES
+            for architecture in architectures
         ),
         "software_name": task.app,
         "software_version": task.version,
-        "python_version": _combine(reports, "python_version"),
-        "numpy_version": _combine(reports, "numpy_version"),
+        "python_version": _combine(reports, "python_version", architectures),
+        "numpy_version": _combine(reports, "numpy_version", architectures),
     }
     results = {
         "schema_version": 1,
@@ -206,12 +224,16 @@ def aggregate_native_results(
                     "environment",
                 )
             }
-            for architecture in _ARCHITECTURES
+            for architecture in architectures
         },
     }
+    if task.task_key:
+        results["task_key"] = task.task_key
     files = {
-        "x86_64.junit.xml": junit["x86_64"],
-        "aarch64.junit.xml": junit["aarch64"],
+        **{
+            f"{architecture}.junit.xml": junit[architecture]
+            for architecture in architectures
+        },
         "version_info.json": _json_bytes(version_info),
     }
     total_bytes = sum(len(content) for content in files.values())

@@ -21,6 +21,26 @@ def _task():
     )
 
 
+def _oe_task(*, architectures=("x86_64", "aarch64")):
+    from scripts.lib.task_spec import TaskSpec
+
+    return TaskSpec.from_workflow_dispatch(
+        {
+            "schema_version": 2,
+            "scenario": "oe-upgrade",
+            "app": "redis",
+            "image_name": "redis",
+            "version": "8.2.1",
+            "os_version": "26.03-lts",
+            "domain": "Database",
+            "source_url": "",
+            "mdu_path": "Database/stacks/redis",
+            "derive_from": "8.2.1/24.03-lts-sp1",
+            "architectures": list(architectures),
+        }
+    )
+
+
 def _git_init(workspace):
     subprocess.run(["git", "init", "-q", str(workspace)], check=True)
     for key, value in (("user.email", "t@example.com"), ("user.name", "T")):
@@ -48,6 +68,80 @@ def _workspace(tmp_path):
     test_sh.write_text("#!/bin/bash\nexit 0\n")
     test_sh.chmod(0o755)
     return _git_init(workspace)
+
+
+def _oe_workspace(tmp_path):
+    workspace = tmp_path / "target"
+    image = workspace / "Database/stacks/redis/8.2.1/26.03-lts"
+    tests = workspace / "Database/stacks/redis/tests"
+    image.mkdir(parents=True)
+    tests.mkdir(parents=True)
+    (image / "Dockerfile").write_text("FROM scratch\n")
+    test_sh = tests / "test.sh"
+    test_sh.write_text("#!/bin/bash\nexit 0\n")
+    test_sh.chmod(0o755)
+    return _git_init(workspace)
+
+
+def test_image_os_identity_is_read_without_running_a_shell(tmp_path):
+    from scripts.lib.native_validation import inspect_image_os_identity
+
+    calls = []
+
+    def runner(command, cwd, env, timeout):
+        command = list(command)
+        calls.append(command)
+        if command[:2] == ["docker", "cp"]:
+            Path(command[-1]).write_text(
+                'ID="openEuler"\n'
+                'VERSION_ID="26.03 (LTS)"\n'
+                'PRETTY_NAME="openEuler 26.03 (LTS)"\n'
+            )
+        return subprocess.CompletedProcess(command, 0, "container-id\n", "")
+
+    report = inspect_image_os_identity(
+        runner=runner,
+        workspace=tmp_path,
+        image_id="sha256:candidate",
+        target_oe="26.03-lts",
+        container="oe-os-identity",
+        report_dir=tmp_path / "evidence",
+    )
+
+    assert report["status"] == "passed"
+    assert report["observed_oe"] == "26.03-lts"
+    assert report["fields"]["ID"] == "openEuler"
+    assert [call[:2] for call in calls] == [
+        ["docker", "create"],
+        ["docker", "cp"],
+        ["docker", "rm"],
+    ]
+    assert not any("/bin/sh" in call or "/bin/bash" in call for call in calls)
+
+
+def test_image_os_identity_rejects_source_release(tmp_path):
+    from scripts.lib.native_validation import (
+        NativeValidationError,
+        inspect_image_os_identity,
+    )
+
+    def runner(command, cwd, env, timeout):
+        command = list(command)
+        if command[:2] == ["docker", "cp"]:
+            Path(command[-1]).write_text(
+                "ID=openEuler\nVERSION_ID='24.03 (LTS-SP4)'\n"
+            )
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    with pytest.raises(NativeValidationError, match="expected 26.03-lts"):
+        inspect_image_os_identity(
+            runner=runner,
+            workspace=tmp_path,
+            image_id="sha256:candidate",
+            target_oe="26.03-lts",
+            container="oe-os-identity",
+            report_dir=tmp_path / "evidence",
+        )
 
 
 def test_infrastructure_failure_evidence_preserves_clone_error(tmp_path):
@@ -255,6 +349,20 @@ class RuntimeStateRunner:
                 command, self.test_returncode, "test output\n", ""
             )
         return subprocess.CompletedProcess(command, 0, "", "")
+
+
+class OEUpgradeRunner(RuntimeStateRunner):
+    def __call__(self, command, cwd, env, timeout):
+        command = list(command)
+        if command[:2] == ["docker", "cp"]:
+            self.calls.append(command)
+            Path(command[-1]).write_text(
+                "ID=openEuler\n"
+                "VERSION_ID='26.03 (LTS)'\n"
+                "PRETTY_NAME='openEuler 26.03 (LTS)'\n"
+            )
+            return subprocess.CompletedProcess(command, 0, "", "")
+        return super().__call__(command, cwd, env, timeout)
 
 
 def _runtime_paths(tmp_path):
@@ -1052,6 +1160,53 @@ def test_native_validation_reports_only_build_and_runtime_test(tmp_path):
     assert len(
         [call for call in runner.calls if "/opt/oe-tests/test.sh" in call]
     ) == 1
+
+
+def test_oe_upgrade_validation_uses_nested_mdu_os_gate_and_task_namespace(
+    tmp_path,
+):
+    from scripts.lib.native_validation import validate_native_image
+
+    task = _oe_task(architectures=("x86_64",))
+    runner = OEUpgradeRunner(
+        wait_status="RUNNING_NO_PROBE",
+        states=[
+            {
+                "Status": "running",
+                "ExitCode": 0,
+                "OOMKilled": False,
+                "Error": "",
+            },
+            {
+                "Status": "running",
+                "ExitCode": 0,
+                "OOMKilled": False,
+                "Error": "",
+            },
+        ],
+    )
+
+    report = validate_native_image(
+        workspace=_oe_workspace(tmp_path),
+        task=task,
+        architecture="x86_64",
+        run_id="123456",
+        report_path=tmp_path / "reports/x86_64.json",
+        junit_path=tmp_path / "reports/x86_64.junit.xml",
+        runner=runner,
+    )
+
+    assert report["status"] == "passed"
+    assert report["task_key"] == task.task_key
+    assert report["image_os_identity"]["observed_oe"] == "26.03-lts"
+    commands = [" ".join(command) for command in runner.calls]
+    assert any(task.task_key in command for command in commands)
+    test_call = next(
+        command for command in runner.calls if "/opt/oe-tests/test.sh" in command
+    )
+    assert "EXPECTED_VERSION=8.2.1" in test_call
+    assert "EXPECTED_OS_VERSION=26.03-lts" in test_call
+    assert "TARGET_ARCH=x86_64" in test_call
 
 
 def test_native_validation_reports_each_runtime_substage_failure(tmp_path):

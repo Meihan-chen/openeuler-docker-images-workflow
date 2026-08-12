@@ -57,6 +57,10 @@ _GUIDANCE = {
         "The image did not build. Fix the build definition; runtime "
         "assertions were never reached."
     ),
+    "os-identity": (
+        "The built image does not identify as the requested openEuler "
+        "release. Repair only the candidate image definition."
+    ),
     "runtime-error": (
         "The image built but did not behave as the tests expect. Decide "
         "whether the image or the assertion is wrong before editing either."
@@ -190,6 +194,9 @@ def classify_failure(
             category = "test-contract"
         elif stage == "native_build":
             category = "build-error"
+        elif stage == "os_identity":
+            category = "os-identity"
+            owner = "image_creator"
         elif stage in _RUNTIME_STAGES:
             category = "runtime-error"
 

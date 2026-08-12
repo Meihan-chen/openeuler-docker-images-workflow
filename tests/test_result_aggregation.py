@@ -21,6 +21,26 @@ def _task():
     )
 
 
+def _oe_task():
+    from scripts.lib.task_spec import TaskSpec
+
+    return TaskSpec.from_workflow_dispatch(
+        {
+            "schema_version": 2,
+            "scenario": "oe-upgrade",
+            "app": "redis",
+            "image_name": "redis",
+            "version": "8.2.1",
+            "os_version": "26.03-lts",
+            "domain": "Database",
+            "source_url": "",
+            "mdu_path": "Database/stacks/redis",
+            "derive_from": "8.2.1/24.03-lts-sp1",
+            "architectures": ["x86_64"],
+        }
+    )
+
+
 def _workspace(tmp_path):
     workspace = tmp_path / "target"
     (workspace / "Database" / "kvrocks").mkdir(parents=True)
@@ -135,6 +155,65 @@ def test_keeps_schema_v1_results_in_production_output(tmp_path):
     assert set(results["architectures"]) == {"x86_64", "aarch64"}
     assert results["artifact_url"].endswith("/123456")
     assert summary["results_file"] == str(production_results)
+
+
+def test_oe_upgrade_aggregates_only_declared_architectures_at_nested_mdu(
+    tmp_path,
+):
+    from scripts.utils.artifacts import aggregate_native_results
+
+    task = _oe_task()
+    workspace = tmp_path / "target"
+    (workspace / task.mdu_path).mkdir(parents=True)
+    reports = tmp_path / "native-reports"
+    reports.mkdir()
+    environment = _environment("x86_64")
+    environment["software_name"] = "redis"
+    environment["software_version"] = "8.2.1"
+    report = {
+        "status": "passed",
+        "task_id": task.task_id,
+        "task_key": task.task_key,
+        "architecture": "x86_64",
+        "platform": "linux/amd64",
+        "image_id": "sha256:x86",
+        "validated_patch_sha256": CANDIDATE_DIGEST,
+        "duration_seconds": 10.5,
+        "environment": environment,
+        "checks": {
+            "native_build": True,
+            "os_identity": True,
+            "runtime_test": True,
+        },
+        "image_os_identity": {
+            "status": "passed",
+            "observed_oe": "26.03-lts",
+        },
+    }
+    (reports / "x86_64.json").write_text(json.dumps(report))
+    (reports / "x86_64.junit.xml").write_text(
+        '<testsuite tests="1" failures="0" errors="0"><testcase/></testsuite>'
+    )
+
+    summary = aggregate_native_results(
+        workspace=workspace,
+        task=task,
+        run_id="123456",
+        run_url="https://example.test/actions/runs/123456",
+        report_dir=reports,
+        results_output=tmp_path / "candidate/reports/results.json",
+    )
+
+    result_dir = workspace / task.mdu_path / "results/8.2.1/26.03-lts"
+    assert summary["files"] == ["version_info.json", "x86_64.junit.xml"]
+    assert not (result_dir / "aarch64.junit.xml").exists()
+    version_info = json.loads((result_dir / "version_info.json").read_text())
+    assert version_info["architecture"] == "x86_64"
+    results = json.loads(
+        (tmp_path / "candidate/reports/results.json").read_text()
+    )
+    assert results["task_key"] == task.task_key
+    assert set(results["architectures"]) == {"x86_64"}
 
 
 def test_aggregate_cli_routes_results_to_production_output(tmp_path):

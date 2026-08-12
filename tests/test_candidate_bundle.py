@@ -21,6 +21,26 @@ def _task():
     )
 
 
+def _oe_task():
+    from scripts.lib.task_spec import TaskSpec
+
+    return TaskSpec.from_workflow_dispatch(
+        {
+            "schema_version": 2,
+            "scenario": "oe-upgrade",
+            "app": "redis",
+            "image_name": "redis",
+            "version": "8.2.1",
+            "os_version": "26.03-lts",
+            "domain": "Database",
+            "source_url": "",
+            "mdu_path": "Database/redis",
+            "derive_from": "8.2.1/24.03-lts-sp1",
+            "architectures": ["x86_64"],
+        }
+    )
+
+
 def _payload(root: Path):
     (root / "reports" / "agents").mkdir(parents=True)
     (root / "changes.patch").write_text("diff --git a/a b/a\n")
@@ -105,6 +125,37 @@ def test_candidate_bundle_verifies_untouched_payload(tmp_path):
     verified = CandidateBundle.verify(tmp_path, expected_run_id="123456")
 
     assert verified.manifest.task_id == _task().task_id
+
+
+def test_oe_upgrade_candidate_requires_only_declared_architecture(tmp_path):
+    from scripts.lib.candidate_bundle import CandidateBundle
+
+    task = _oe_task()
+    _payload(tmp_path)
+    (tmp_path / "reports/aarch64.json").unlink()
+    (tmp_path / "reports/aarch64.junit.xml").unlink()
+    native = json.loads((tmp_path / "reports/x86_64.json").read_text())
+    native["task_key"] = task.task_key
+    native["checks"]["os_identity"] = True
+    (tmp_path / "reports/x86_64.json").write_text(json.dumps(native))
+    results_path = tmp_path / "reports/results.json"
+    results = json.loads(results_path.read_text())
+    results["task_id"] = task.task_id
+    results["task_key"] = task.task_key
+    results["architectures"] = {"x86_64": results["architectures"]["x86_64"]}
+    results["architectures"]["x86_64"]["checks"]["os_identity"] = True
+    results_path.write_text(json.dumps(results))
+
+    bundle = CandidateBundle.create(
+        tmp_path,
+        task=task,
+        base_sha=BASE_SHA,
+        validated_run_id="123456",
+    )
+
+    assert bundle.manifest.task_key == task.task_key
+    assert bundle.manifest.architectures == ("x86_64",)
+    assert CandidateBundle.verify(tmp_path).task == task
 
 
 def test_candidate_bundle_rejects_modified_file(tmp_path):

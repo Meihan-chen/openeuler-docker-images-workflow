@@ -69,6 +69,21 @@ def test_failed_stage_separates_build_from_runtime(stage, category):
     assert classify_failure(report=report)["category"] == category
 
 
+def test_os_identity_failure_is_actionable_image_evidence():
+    from scripts.lib.failure_classification import classify_failure
+
+    result = classify_failure(
+        report={
+            "status": "failed",
+            "failed_stage": "os_identity",
+            "failure": "expected 26.03-lts but found 24.03-lts-sp4",
+        }
+    )
+
+    assert result["category"] == "os-identity"
+    assert result["owner"] == "image_creator"
+
+
 def test_invalid_generated_tests_are_returned_to_testcase_creator():
     from scripts.lib.failure_classification import classify_failure
 

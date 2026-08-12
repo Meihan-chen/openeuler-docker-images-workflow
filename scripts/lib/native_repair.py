@@ -14,12 +14,18 @@ from scripts.lib.native_validation import (
     NativeValidationError,
     validate_native_image,
 )
+from scripts.lib.oe_upgrade_sanitizer import (
+    create_checkpoint,
+    sanitize_agent_changes,
+)
 from scripts.lib.progress import log
 from scripts.lib.task_spec import TaskSpec
 from scripts.lib.target_contract import (
     TargetContractError,
     native_checks_pass,
+    validate_add_version_target,
     validate_generated_target,
+    validate_test_contract,
 )
 
 
@@ -87,7 +93,37 @@ def _target_gate_report(
     base_sha: str,
 ) -> Mapping[str, object]:
     try:
-        return target_validator(
+        validator = target_validator
+        if task.scenario == "oe-upgrade" and validator is validate_generated_target:
+            add_version = validate_add_version_target(
+                repo=workspace,
+                task=task,
+                base_sha=base_sha,
+            )
+            tests = validate_test_contract(repo=workspace, task=task)
+            return {
+                **add_version,
+                "status": (
+                    "passed"
+                    if tests.get("status") == "passed"
+                    else "failed"
+                ),
+                "test_allowed": tests.get("test_allowed"),
+                "runtime_test_allowed": tests.get("runtime_test_allowed"),
+                "delivery_allowed": (
+                    add_version.get("delivery_allowed") is True
+                    and tests.get("status") == "passed"
+                ),
+                "findings": [
+                    *list(add_version.get("findings") or []),
+                    *list(tests.get("findings") or []),
+                ],
+                "errors": [
+                    *list(add_version.get("errors") or []),
+                    *list(tests.get("errors") or []),
+                ],
+            }
+        return validator(
             repo=workspace,
             task=task,
             base_sha=base_sha,
@@ -133,6 +169,16 @@ def _passed(report: Mapping[str, object]) -> bool:
     return (
         report.get("status") == "passed"
         and native_checks_pass(report.get("checks"))
+    )
+
+
+def _task_passed(task: TaskSpec, report: Mapping[str, object]) -> bool:
+    return (
+        report.get("status") == "passed"
+        and native_checks_pass(
+            report.get("checks"),
+            oe_upgrade=task.scenario == "oe-upgrade",
+        )
     )
 
 
@@ -202,6 +248,7 @@ def _needs_human_decision(
     reports: Mapping[str, Mapping[str, object]],
     api_key: str,
     reason: str,
+    architectures: tuple[str, ...] = _ARCHITECTURES,
     gate: Mapping[str, object] | None = None,
 ) -> RoundDecision:
     terminal: dict[str, object] = {
@@ -211,7 +258,7 @@ def _needs_human_decision(
         "round": round_number,
         "architectures": {
             name: _redact(dict(reports[name]), api_key)
-            for name in _ARCHITECTURES
+            for name in architectures
         },
     }
     if gate is not None:
@@ -237,6 +284,7 @@ def _hard_stop_decision(
     reports: Mapping[str, Mapping[str, object]],
     api_key: str,
     gate: Mapping[str, object],
+    architectures: tuple[str, ...] = _ARCHITECTURES,
 ) -> RoundDecision:
     terminal = {
         "status": "hard-stop",
@@ -245,7 +293,7 @@ def _hard_stop_decision(
         "round": round_number,
         "architectures": {
             name: _redact(dict(reports[name]), api_key)
-            for name in _ARCHITECTURES
+            for name in architectures
         },
         "gate": _redact(dict(gate), api_key),
     }
@@ -366,6 +414,41 @@ def _all_failures_are_infra(classification: Mapping[str, object]) -> bool:
     return classification.get("category") == "infra"
 
 
+def aggregate_round_classifications(
+    per_architecture: Mapping[str, Mapping[str, object]],
+) -> dict[str, bool]:
+    """Reduce deterministic per-architecture ownership into a round route."""
+    categories: list[str] = []
+    for result in per_architecture.values():
+        failures = result.get("failures")
+        if isinstance(failures, list) and failures:
+            categories.extend(
+                str(failure.get("category", "unclassified"))
+                for failure in failures
+                if isinstance(failure, Mapping)
+            )
+        else:
+            categories.append(str(result.get("category", "unclassified")))
+    actionable = {
+        "image-contract",
+        "test-contract",
+        "build-error",
+        "runtime-error",
+        "os-identity",
+    }
+    dependency = {"dependency-unavailable"}
+    return {
+        "infrastructure_only": bool(categories)
+        and all(category == "infra" for category in categories),
+        "dependency_unavailable": any(
+            category in dependency for category in categories
+        ),
+        "has_actionable_candidate_evidence": any(
+            category in actionable for category in categories
+        ),
+    }
+
+
 def _resolve_full_evidence(
     evidence_roots: Mapping[str, Path] | None,
     *,
@@ -425,6 +508,8 @@ def decide_round(
     target_validator: Callable[..., Mapping[str, object]] = (
         validate_generated_target
     ),
+    checkpoint_factory: Callable[..., object] = create_checkpoint,
+    sanitizer: Callable[..., object] = sanitize_agent_changes,
 ) -> RoundDecision:
     """Converge one parallel round, or repair once for the next one.
 
@@ -438,12 +523,38 @@ def decide_round(
         raise NativeRepairError(
             "native repair evidence must remain outside target workspace"
         )
-    missing = [name for name in _ARCHITECTURES if name not in reports]
+    architectures = (
+        task.architectures
+        if task.schema_version == 2
+        else _ARCHITECTURES
+    )
+    missing = [name for name in architectures if name not in reports]
     if missing:
         raise NativeRepairError(
-            "round decision needs both architectures: missing "
+            "round decision is missing required architectures: "
             + ", ".join(missing)
         )
+    if task.schema_version == 2:
+        wrong_tasks = [
+            name
+            for name in architectures
+            if reports[name].get("task_key") != task.task_key
+        ]
+        if wrong_tasks:
+            raise NativeRepairError(
+                "native reports have a mismatched task_key: "
+                + ", ".join(wrong_tasks)
+            )
+        wrong_architectures = [
+            name
+            for name in architectures
+            if reports[name].get("architecture") != name
+        ]
+        if wrong_architectures:
+            raise NativeRepairError(
+                "native reports have a mismatched architecture: "
+                + ", ".join(wrong_architectures)
+            )
     report_dir.mkdir(parents=True, exist_ok=True)
     stage = f"round:{round_number}"
     full_evidence, external_read_dirs = _resolve_full_evidence(
@@ -453,9 +564,12 @@ def decide_round(
 
     invalid_passed = [
         name
-        for name in _ARCHITECTURES
+        for name in architectures
         if reports[name].get("status") == "passed"
-        and not native_checks_pass(reports[name].get("checks"))
+        and not native_checks_pass(
+            reports[name].get("checks"),
+            oe_upgrade=task.scenario == "oe-upgrade",
+        )
     ]
     if invalid_passed:
         raise NativeRepairError(
@@ -464,7 +578,7 @@ def decide_round(
         )
 
     format_commits = [
-        _format_checker_commit(reports[name]) for name in _ARCHITECTURES
+        _format_checker_commit(reports[name]) for name in architectures
     ]
     if all(format_commits) and len(set(format_commits)) != 1:
         if max_rounds == 0 or round_number > max_rounds:
@@ -479,10 +593,10 @@ def decide_round(
             validated_patch_sha256="",
         )
 
-    if all(_passed(reports[name]) for name in _ARCHITECTURES):
+    if all(_task_passed(task, reports[name]) for name in architectures):
         digests = {
             str(reports[name].get("validated_patch_sha256", ""))
-            for name in _ARCHITECTURES
+            for name in architectures
         }
         if len(digests) != 1 or not digests.pop():
             raise NativeRepairError(
@@ -495,7 +609,7 @@ def decide_round(
             round_number=round_number,
             repair_attempts=0,
             validated_patch_sha256=str(
-                reports["x86_64"]["validated_patch_sha256"]
+                reports[architectures[0]]["validated_patch_sha256"]
             ),
         )
 
@@ -504,9 +618,43 @@ def decide_round(
             reports[name],
             allowed_roots=(task.domain,),
         )
-        for name in _ARCHITECTURES
-        if not _passed(reports[name])
+        for name in architectures
+        if not _task_passed(task, reports[name])
     }
+    round_classification = aggregate_round_classifications(per_architecture)
+    if task.scenario == "oe-upgrade":
+        if round_classification["infrastructure_only"]:
+            return RoundDecision(
+                converged=False,
+                round_number=round_number,
+                repair_attempts=0,
+                validated_patch_sha256="",
+                terminal_status="failed:infrastructure",
+            )
+        if round_classification["dependency_unavailable"]:
+            return RoundDecision(
+                converged=False,
+                round_number=round_number,
+                repair_attempts=0,
+                validated_patch_sha256="",
+                terminal_status="failed:dependency",
+            )
+        if not round_classification["has_actionable_candidate_evidence"]:
+            return RoundDecision(
+                converged=False,
+                round_number=round_number,
+                repair_attempts=0,
+                validated_patch_sha256="",
+                terminal_status="failed:evidence-insufficient",
+            )
+        if round_number > max_rounds:
+            return RoundDecision(
+                converged=False,
+                round_number=round_number,
+                repair_attempts=max_rounds,
+                validated_patch_sha256="",
+                terminal_status="failed:repair-exhausted",
+            )
     if max_rounds == 0:
         raise NativeRepairError("zero-repair validation failed")
     if round_number > max_rounds:
@@ -525,6 +673,7 @@ def decide_round(
             reports=reports,
             api_key=api_key,
             reason="native-repair-budget-exhausted",
+            architectures=architectures,
         )
 
     if not api_key:
@@ -553,12 +702,33 @@ def decide_round(
         "classification": per_architecture,
         "architectures": {
             name: _redact(dict(reports[name]), api_key)
-            for name in _ARCHITECTURES
+            for name in architectures
         },
     }
     if full_evidence:
         review["full_evidence"] = full_evidence
     for attempt in range(1, _GATE_REPAIR_ATTEMPTS + 1):
+        checkpoint = None
+        if task.scenario == "oe-upgrade":
+            checkpoint = checkpoint_factory(
+                workspace=workspace,
+                base_sha=base_sha,
+                task=task,
+                destination=(
+                    report_dir
+                    / "checkpoints"
+                    / f"round{round_number}-attempt{attempt}"
+                ),
+                round_number=round_number,
+                agent_role="code-fixer",
+            )
+            review = {
+                **review,
+                "checkpoint_id": getattr(checkpoint, "checkpoint_id", ""),
+                "allowed_paths": list(
+                    getattr(checkpoint, "allowed_paths", ())
+                ),
+            }
         log(stage, f"START fixer attempt={attempt}")
         fixed = agent_runner(
             executable=executable,
@@ -586,6 +756,35 @@ def decide_round(
             api_key=api_key,
             attempt=attempt,
         )
+        if checkpoint is not None:
+            try:
+                sanitization = sanitizer(
+                    workspace=workspace,
+                    base_sha=base_sha,
+                    task=task,
+                    checkpoint=checkpoint,
+                    report_path=(
+                        report_dir
+                        / f"sanitization-round{round_number}-attempt{attempt}.json"
+                    ),
+                )
+            except Exception as error:
+                log(stage, f"HARD_STOP sanitization: {error}")
+                return RoundDecision(
+                    converged=False,
+                    round_number=round_number,
+                    repair_attempts=attempt,
+                    validated_patch_sha256="",
+                    terminal_status="failed:contract",
+                )
+            if getattr(sanitization, "clean", False) is not True:
+                return RoundDecision(
+                    converged=False,
+                    round_number=round_number,
+                    repair_attempts=attempt,
+                    validated_patch_sha256="",
+                    terminal_status="failed:contract",
+                )
         gate = _target_gate_report(
             target_validator=target_validator,
             workspace=workspace,
@@ -606,6 +805,7 @@ def decide_round(
                 reports=reports,
                 api_key=api_key,
                 gate=gate,
+                architectures=architectures,
             )
         _raise_for_invalid_gate(gate)
         if fixed.payload.get("success") is not True:
@@ -631,6 +831,7 @@ def decide_round(
         reports=reports,
         api_key=api_key,
         reason="target-contract-repair-exhausted",
+        architectures=architectures,
         gate=gate,
     )
 
