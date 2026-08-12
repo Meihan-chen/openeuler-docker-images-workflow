@@ -78,7 +78,6 @@ _SMOKE_CHECKS = _E2E_CHECKS
 _WAIT_STATUSES = frozenset(
     {
         "READY_HEALTH",
-        "READY_TCP",
         "TERMINAL",
         "RUNNING_NO_PROBE",
         "PROBE_TIMEOUT",
@@ -671,12 +670,12 @@ def _environment_evidence(task: TaskSpec, architecture: str) -> dict[str, object
     }
 
 
-def _image_runtime_probes(
+def _image_has_healthcheck(
     runner: CommandRunner,
     *,
     workspace: Path,
     image_id: str,
-) -> tuple[bool, tuple[int, ...]]:
+) -> bool:
     inspected = _run(
         runner,
         ["docker", "image", "inspect", image_id],
@@ -687,19 +686,12 @@ def _image_runtime_probes(
         healthcheck = config.get("Healthcheck")
         test = healthcheck.get("Test", []) if isinstance(healthcheck, dict) else []
         has_healthcheck = bool(test) and test != ["NONE"]
-        ports = tuple(
-            sorted(
-                int(port.partition("/")[0])
-                for port in (config.get("ExposedPorts") or {})
-                if port.endswith("/tcp") and port.partition("/")[0].isdigit()
-            )
-        )
     except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
         raise NativeValidationError(
             "docker image inspect returned invalid runtime configuration",
             details={"stage": "default_start", "error": str(error)},
         ) from error
-    return has_healthcheck, ports
+    return has_healthcheck
 
 
 def _supports_health_start_interval(
@@ -786,11 +778,10 @@ def _wait_for_runtime_event(
     waiter: Path,
     container: str,
     mode: str,
-    ports: Sequence[int],
     wait_timeout: int,
-) -> tuple[str, dict[str, object] | None]:
+) -> tuple[str, dict[str, object] | None, int | None]:
     command = [str(waiter), container, str(wait_timeout), mode]
-    command.extend(str(port) for port in ports)
+    waiter_stderr = ""
     try:
         waited = _run(
             runner,
@@ -805,6 +796,7 @@ def _wait_for_runtime_event(
         returncode = 124 if isinstance(error, subprocess.TimeoutExpired) else 1
     else:
         output = _merged_output(waited)
+        waiter_stderr = str(waited.stderr or "")
         returncode = waited.returncode
         status = next(
             (
@@ -819,27 +811,42 @@ def _wait_for_runtime_event(
     if returncode != _WAIT_RETURN_CODES.get(status, 0):
         status = "RUNTIME_ERROR"
 
-    stage = {
-        "health": "wait_healthcheck",
-        "tcp": "wait_tcp",
-    }.get(mode, "default_start")
+    time_to_healthy = None
+    if status == "READY_HEALTH":
+        elapsed = re.search(
+            r"^time_to_healthy_seconds=([0-9]+)$",
+            waiter_stderr,
+            flags=re.MULTILINE,
+        )
+        if elapsed is not None:
+            time_to_healthy = int(elapsed.group(1))
+
+    stage = "wait_healthcheck" if mode == "health" else "default_start"
     if status == "PROBE_TIMEOUT":
-        return status, _runtime_failure(
-            stage,
-            f"explicit {mode} probe did not become ready within "
-            f"{wait_timeout} seconds",
-            wait_status=status,
-            output=output,
+        return (
+            status,
+            _runtime_failure(
+                stage,
+                f"explicit {mode} probe did not become ready within "
+                f"{wait_timeout} seconds",
+                wait_status=status,
+                output=output,
+            ),
+            time_to_healthy,
         )
     if status == "RUNTIME_ERROR":
-        return status, _runtime_failure(
-            stage,
-            "runtime readiness observation failed",
-            wait_status=status,
-            output=output,
-            returncode=returncode,
+        return (
+            status,
+            _runtime_failure(
+                stage,
+                "runtime readiness observation failed",
+                wait_status=status,
+                output=output,
+                returncode=returncode,
+            ),
+            time_to_healthy,
         )
-    return status, None
+    return status, None, time_to_healthy
 
 
 def _runtime_test_command(
@@ -892,11 +899,10 @@ def _runtime_post_failure(
             state=dict(state),
         )
     health = state.get("Health") or {}
-    if wait_status in {"READY_HEALTH", "READY_TCP"} and (
+    if wait_status == "READY_HEALTH" and (
         state.get("Status") != "running"
         or (
-            wait_status == "READY_HEALTH"
-            and isinstance(health, Mapping)
+            isinstance(health, Mapping)
             and health.get("Status") == "unhealthy"
         )
     ):
@@ -928,9 +934,9 @@ def _run_runtime_test(
     test_container: str,
     run_id: str,
     waiter: Path,
-    wait_timeout: int = 90,
+    wait_timeout: int = 120,
 ) -> dict[str, object]:
-    """Run the generated Bash test once after the default container is ready."""
+    """Run test.sh once after readiness or lifecycle observation completes."""
     failures: list[dict[str, object]] = []
 
     def fail(
@@ -942,14 +948,14 @@ def _run_runtime_test(
 
     runtime_config_available = True
     try:
-        has_healthcheck, ports = _image_runtime_probes(
+        has_healthcheck = _image_has_healthcheck(
             runner,
             workspace=workspace,
             image_id=image_id,
         )
     except NativeValidationError as error:
         runtime_config_available = False
-        has_healthcheck, ports = False, ()
+        has_healthcheck = False
         fail(
             "default_start",
             str(error),
@@ -970,8 +976,9 @@ def _run_runtime_test(
         if _supports_health_start_interval(runner, workspace=workspace):
             create.append("--health-start-interval=1s")
     create.append(image_id)
-    mode = "health" if has_healthcheck else "tcp" if ports else "none"
+    mode = "health" if has_healthcheck else "none"
     wait_status = "RUNTIME_ERROR"
+    time_to_healthy = None
     default_started = False
     created = (
         _run(
@@ -1008,13 +1015,12 @@ def _run_runtime_test(
                 )
             else:
                 default_started = True
-                wait_status, wait_failure = _wait_for_runtime_event(
+                wait_status, wait_failure, time_to_healthy = _wait_for_runtime_event(
                     runner,
                     workspace=workspace,
                     waiter=waiter,
                     container=container,
                     mode=mode,
-                    ports=ports,
                     wait_timeout=wait_timeout,
                 )
                 if wait_failure is not None:
@@ -1084,20 +1090,30 @@ def _run_runtime_test(
         summary = "; ".join(
             f"{failure['stage']}: {failure['failure']}" for failure in failures
         )
+        details: dict[str, object] = {
+            "failures": failures,
+            "wait_status": wait_status,
+            "carrier": carrier,
+            "test_attempted": True,
+            "readiness_mode": mode,
+            "has_healthcheck": has_healthcheck,
+        }
+        if time_to_healthy is not None:
+            details["time_to_healthy"] = time_to_healthy
         raise NativeValidationError(
             summary,
-            details={
-                "failures": failures,
-                "wait_status": wait_status,
-                "carrier": carrier,
-                "test_attempted": True,
-            },
+            details=details,
         )
-    return {
+    outcome: dict[str, object] = {
         "wait_status": wait_status,
         "carrier": carrier,
         "state": post_state,
+        "readiness_mode": mode,
+        "has_healthcheck": has_healthcheck,
     }
+    if time_to_healthy is not None:
+        outcome["time_to_healthy"] = time_to_healthy
+    return outcome
 
 
 def validate_native_image(
@@ -1154,6 +1170,7 @@ def validate_native_image(
     image_id = ""
     failures: list[dict[str, object]] = []
     container_evidence: dict[str, object] = {}
+    runtime_observation: dict[str, object] = {}
     # None distinguishes a check that was never reached from a failed check.
     checks: dict[str, bool | None] = {name: None for name in _E2E_CHECKS}
     stage = f"native:{architecture}"
@@ -1166,6 +1183,14 @@ def validate_native_image(
         failed_stage: str | None = None,
     ) -> None:
         checks[check] = False
+        if check == "runtime_test":
+            for key in (
+                "readiness_mode",
+                "has_healthcheck",
+                "time_to_healthy",
+            ):
+                if key in error.details:
+                    runtime_observation[key] = error.details[key]
         substage_failures = error.details.get("failures")
         if check == "runtime_test" and isinstance(substage_failures, list):
             for substage in substage_failures:
@@ -1279,13 +1304,20 @@ def validate_native_image(
                         ).strip()
                     else:
                         state_summary = ""
-                    container_evidence[container] = {
+                    runtime_evidence: dict[str, object] = {
                         "state": state_summary,
                         "probe": (
                             f"wait_status={runtime_outcome.get('wait_status')} "
                             f"carrier={runtime_outcome.get('carrier')}"
                         ),
+                        "readiness_mode": runtime_outcome.get("readiness_mode"),
+                        "has_healthcheck": runtime_outcome.get("has_healthcheck"),
                     }
+                    if runtime_outcome.get("time_to_healthy") is not None:
+                        runtime_evidence["time_to_healthy"] = runtime_outcome[
+                            "time_to_healthy"
+                        ]
+                    container_evidence[container] = runtime_evidence
             else:
                 record_failure(
                     "runtime_test",
@@ -1305,6 +1337,10 @@ def validate_native_image(
                 capture_error = str(error) or error.__class__.__name__
                 container_evidence = {"capture_error": capture_error}
                 log(stage, f"WARN container evidence: {capture_error}")
+            if runtime_observation:
+                evidence = container_evidence.setdefault(container, {})
+                if isinstance(evidence, dict):
+                    evidence.update(runtime_observation)
     finally:
         # The builder outlives this call on purpose: repair rounds re-enter
         # validation and must keep the cached builder stage. It is released
@@ -1417,6 +1453,7 @@ def validate_native_smoke(
             'CMD ["sleep", "300"]\n'
         ),
         "terminal": 'CMD ["/bin/bash", "-c", "exit 7"]\n',
+        "exposed-no-health": 'EXPOSE 8080\nCMD ["sleep", "300"]\n',
         "no-probe": 'CMD ["sleep", "300"]\n',
         "probe-timeout": (
             'HEALTHCHECK CMD test -f /never-ready\n'

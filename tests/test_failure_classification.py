@@ -196,7 +196,6 @@ def test_missing_evidence_is_reported_rather_than_guessed():
         "runtime_test",
         "default_start",
         "wait_healthcheck",
-        "wait_tcp",
         "test_sh",
         "post_inspect",
     ),
@@ -214,6 +213,21 @@ def test_runtime_test_substages_route_to_runtime_repair(stage):
     )
 
     assert result["category"] == "runtime-error"
+
+
+def test_removed_tcp_wait_stage_is_not_a_current_runtime_substage():
+    from scripts.lib.failure_classification import classify_failure
+
+    result = classify_failure(
+        report={
+            "status": "failed",
+            "failed_stage": "wait_tcp",
+            "failure": "legacy TCP readiness failure",
+            "failure_details": {"returncode": 1},
+        }
+    )
+
+    assert result["category"] == "unclassified"
 
 
 def test_a_modified_tracked_file_is_scope_not_research_junk():

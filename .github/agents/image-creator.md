@@ -88,6 +88,7 @@ RUN dnf install -y shadow-utils && \
     groupadd -r <user> && useradd -r -g <user> <user>
 ```
 - **前台阻塞**：ENTRYPOINT/CMD 启动的服务必须前台运行。若上游 CLI 默认 daemonize（如 `--daemon`、后台启动），须在源码中确认并添加对应的前台/block 参数（如 `--block`、`--foreground`、`f`），否则容器启动后立即退出。
+- **应用级健康检查**：常驻前台服务必须提供应用级 `HEALTHCHECK`，命令须由固定版本上游源码或官方文档确认能够反映“应用已可对外服务”。禁止恒真判据、`sleep` 类判据、仅探测进程存活或仅探测端口可连。确实无法从上游获得可靠判据时省略 `HEALTHCHECK`，并把原因写入 `assumptions`。
 - **简单直接**：遵循第一性原理，构建命令以最简单直接的方式达到目的，不要过度设计。
 - **🚫 禁止添加任何注释**：Dockerfile 中**禁止使用 `#` 注释**（包括行尾注释和独立注释行）。保持 Dockerfile 简洁干净，不要添加说明性文字。
 - **🚫 禁止使用 dnf update**：Dockerfile 中**禁止使用 `dnf update` 或 `yum update` 命令**。这会导致镜像体积膨胀且构建不可复现（每次构建可能得到不同的基础包版本）。直接使用 `dnf install -y` 安装所需依赖即可。
@@ -225,6 +226,7 @@ RUN pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple <pack
 - [ ] 不硬编码架构，两个原生架构使用同一 Dockerfile
 - [ ] `dnf remove` 仅限实际安装的构建依赖
 - [ ] 运行用户、端口、持久化、健康检查、LICENSE 和 NOTICE 符合上游官方的运行模型；只有任务输入明确提出额外要求时才把它作为应用约束
+- [ ] 常驻前台服务已提供来自固定版本上游证据的应用级 `HEALTHCHECK`，或已在 `assumptions` 中说明为何没有可靠判据
 
 ### ✅ 文档与元数据
 

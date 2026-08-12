@@ -46,7 +46,7 @@ Harness 在 `## Review report to resolve` 下附一个 JSON 对象，字段如�
 和 `failure_details` 保留为第一项失败的兼容视图。报告还可能包含独立的
 `format_check`（上游格式检查的版本、类别和原始输出）及 `container_evidence`
 （容器 `state`、`logs` 与 `probe`）。
-`runtime_test` 的子阶段包括 `default_start`、`wait_healthcheck`、`wait_tcp`、
+`runtime_test` 的子阶段包括 `default_start`、`wait_healthcheck`、
 `test_sh` 和 `post_inspect`。`wait_no_probe` 只是无显式探针的运行证据，不是失败，
 不得据此修改 Dockerfile。
 `probe` 是在容器内部采集的:进程表,以及镜像自己写下、`docker logs` 看不到的日志
@@ -102,7 +102,7 @@ Harness 在 `## Review report to resolve` 下附一个 JSON 对象，字段如�
 - 实现有 bug → 修复实现
 - 不要同时修改测试和实现来掩盖问题
 - 不得通过 fallback、忽略退出码或删除断言制造假通过
-- `default_start`、显式 health/port readiness、OOM、`State.Error` 和
+- `default_start`、显式 health readiness、OOM、`State.Error` 和
   `post_inspect` 失败通常属于镜像运行行为；只有 Harness 证据和固定版本上游事实
   支持时才修改 Dockerfile
 - `test_sh` 中的 Bash、错误命令、版本或断言问题属于测试；协议失败若来自镜像行为，

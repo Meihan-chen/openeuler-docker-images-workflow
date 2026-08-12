@@ -169,7 +169,7 @@ def test_shipped_knowledge_is_small_verified_and_application_neutral():
     ("failed_stage", "check", "failure", "native_build", "runtime_test"),
     (
         ("native_build", "native_build", "compiler exited 2", False, None),
-        ("wait_tcp", "runtime_test", "PROBE_TIMEOUT", True, False),
+        ("wait_healthcheck", "runtime_test", "PROBE_TIMEOUT", True, False),
         (
             "test_sh",
             "runtime_test",

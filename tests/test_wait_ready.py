@@ -80,18 +80,31 @@ def test_waiter_reports_event_race_outcome(tmp_path, scenario, mode, expected):
     assert result.returncode == (2 if expected == "PROBE_TIMEOUT" else 0)
 
 
-def test_waiter_accepts_any_exposed_tcp_port(tmp_path):
+def test_waiter_reports_health_readiness_elapsed_time(tmp_path):
+    result = _run_waiter(tmp_path, "healthy", 0, "health")
+
+    assert result.returncode == 0
+    elapsed = next(
+        line.partition("=")[2]
+        for line in result.stderr.splitlines()
+        if line.startswith("time_to_healthy_seconds=")
+    )
+    assert elapsed.isdigit()
+
+
+def test_waiter_rejects_tcp_readiness_mode(tmp_path):
     result = _run_waiter(tmp_path, "tcp", 0, "tcp", 8080, 8443)
 
-    assert result.returncode == 0
-    assert result.stdout.splitlines()[0] == "READY_TCP"
+    assert result.returncode == 3
+    assert result.stdout.splitlines()[0] == "RUNTIME_ERROR"
+    assert "health|none" in result.stderr
 
 
-def test_waiter_prefers_terminal_event_when_tcp_probe_loses_the_race(tmp_path):
-    result = _run_waiter(tmp_path, "tcp_exit_race", 0, "tcp", 8080)
+def test_waiter_rejects_probe_arguments_in_no_probe_mode(tmp_path):
+    result = _run_waiter(tmp_path, "running", 0, "none", 8080)
 
-    assert result.returncode == 0
-    assert result.stdout.splitlines()[0] == "TERMINAL"
+    assert result.returncode == 3
+    assert result.stdout.splitlines()[0] == "RUNTIME_ERROR"
 
 
 @pytest.mark.parametrize("scenario", ["oom", "state_error", "inspect_error"])

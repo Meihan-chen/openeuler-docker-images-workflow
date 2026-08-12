@@ -22,7 +22,6 @@ _RUNTIME_STAGES = (
     "runtime_test",
     "default_start",
     "wait_healthcheck",
-    "wait_tcp",
     "test_sh",
     "post_inspect",
 )

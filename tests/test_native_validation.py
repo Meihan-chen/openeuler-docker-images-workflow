@@ -87,6 +87,7 @@ class RuntimeStateRunner:
         healthcheck=None,
         exposed_ports=None,
         wait_status="READY_HEALTH",
+        wait_stderr="",
         states=None,
         test_returncode=0,
         create_returncode=0,
@@ -107,6 +108,7 @@ class RuntimeStateRunner:
         self.healthcheck = healthcheck
         self.exposed_ports = exposed_ports or {}
         self.wait_status = wait_status
+        self.wait_stderr = wait_stderr
         self.states = list(
             states
             or [
@@ -221,7 +223,7 @@ class RuntimeStateRunner:
                 )
             )
             return subprocess.CompletedProcess(
-                command, returncode, self.wait_status + "\n", ""
+                command, returncode, self.wait_status + "\n", self.wait_stderr
             )
         if command[:2] == ["docker", "create"]:
             return subprocess.CompletedProcess(
@@ -275,6 +277,7 @@ def test_runtime_health_api_144_uses_temporary_fast_health_and_tests_once(tmp_pa
     runner = RuntimeStateRunner(
         healthcheck={"Test": ["CMD", "true"]},
         wait_status="READY_HEALTH",
+        wait_stderr="time_to_healthy_seconds=2\n",
     )
 
     result = _run_runtime_test(
@@ -293,6 +296,9 @@ def test_runtime_health_api_144_uses_temporary_fast_health_and_tests_once(tmp_pa
     assert result == {
         "wait_status": "READY_HEALTH",
         "carrier": "default",
+        "readiness_mode": "health",
+        "has_healthcheck": True,
+        "time_to_healthy": 2,
         "state": {
             "Status": "running",
             "ExitCode": 0,
@@ -785,11 +791,8 @@ def test_runtime_create_error_still_attempts_one_fresh_test(tmp_path):
     assert test_calls[0][:2] == ["docker", "run"]
 
 
-def test_runtime_tcp_ready_requires_default_container_to_remain_running(tmp_path):
-    from scripts.lib.native_validation import (
-        NativeValidationError,
-        _run_runtime_test,
-    )
+def test_runtime_ignores_exposed_ports_and_uses_120_second_budget(tmp_path):
+    from scripts.lib.native_validation import _run_runtime_test
 
     tests_root = tmp_path / "tests"
     tests_root.mkdir()
@@ -798,7 +801,7 @@ def test_runtime_tcp_ready_requires_default_container_to_remain_running(tmp_path
     waiter.chmod(0o755)
     runner = RuntimeStateRunner(
         exposed_ports={"8443/tcp": {}, "8080/tcp": {}, "53/udp": {}},
-        wait_status="READY_TCP",
+        wait_status="RUNNING_NO_PROBE",
         states=[
             {
                 "Status": "running",
@@ -807,7 +810,7 @@ def test_runtime_tcp_ready_requires_default_container_to_remain_running(tmp_path
                 "Error": "",
             },
             {
-                "Status": "exited",
+                "Status": "running",
                 "ExitCode": 0,
                 "OOMKilled": False,
                 "Error": "",
@@ -815,29 +818,35 @@ def test_runtime_tcp_ready_requires_default_container_to_remain_running(tmp_path
         ],
     )
 
-    with pytest.raises(NativeValidationError) as raised:
-        _run_runtime_test(
-            runner,
-            workspace=tmp_path,
-            image_id="sha256:candidate",
-            tests_root=tests_root,
-            version="1.2.3",
-            container="candidate-default",
-            test_container="candidate-test",
-            run_id="123",
-            waiter=waiter,
-        )
+    result = _run_runtime_test(
+        runner,
+        workspace=tmp_path,
+        image_id="sha256:candidate",
+        tests_root=tests_root,
+        version="1.2.3",
+        container="candidate-default",
+        test_container="candidate-test",
+        run_id="123",
+        waiter=waiter,
+    )
 
-    assert raised.value.details["failures"][-1]["stage"] == "post_inspect"
     wait = next(call for call in runner.calls if call[0] == str(waiter))
     assert wait == [
         str(waiter),
         "candidate-default",
-        "90",
-        "tcp",
-        "8080",
-        "8443",
+        "120",
+        "none",
     ]
+    assert result["wait_status"] == "RUNNING_NO_PROBE"
+    assert result["carrier"] == "default"
+    assert result["readiness_mode"] == "none"
+    assert result["has_healthcheck"] is False
+    assert "time_to_healthy" not in result
+    test_calls = [
+        call for call in runner.calls if "/opt/oe-tests/test.sh" in call
+    ]
+    assert len(test_calls) == 1
+    assert test_calls[0][:2] == ["docker", "exec"]
 
 
 def test_runtime_no_probe_rejects_nonzero_exit_after_test(tmp_path):
@@ -1036,6 +1045,9 @@ def test_native_validation_reports_only_build_and_runtime_test(tmp_path):
         "wait_status=RUNNING_NO_PROBE carrier=default"
     )
     assert runtime_evidence["state"] == "running 0"
+    assert runtime_evidence["readiness_mode"] == "none"
+    assert runtime_evidence["has_healthcheck"] is False
+    assert "time_to_healthy" not in runtime_evidence
     assert "failures" not in report
     assert len(
         [call for call in runner.calls if "/opt/oe-tests/test.sh" in call]
@@ -1095,6 +1107,11 @@ def test_native_validation_reports_each_runtime_substage_failure(tmp_path):
     assert all(
         failure["check"] == "runtime_test" for failure in report["failures"]
     )
+    runtime_evidence = report["container_evidence"][
+        "oe-e2e-123456-x86-64-runtime"
+    ]
+    assert runtime_evidence["readiness_mode"] == "health"
+    assert runtime_evidence["has_healthcheck"] is True
 
 
 def test_native_validation_failure_cleans_only_owned_resources(tmp_path):
@@ -1417,7 +1434,11 @@ def test_evidence_capture_failure_does_not_replace_runtime_report(
     assert report["status"] == "failed"
     assert report["failed_stage"] == "wait_healthcheck"
     assert report["container_evidence"] == {
-        "capture_error": "diagnostics unavailable"
+        "capture_error": "diagnostics unavailable",
+        "oe-e2e-123456-x86-64-runtime": {
+            "readiness_mode": "health",
+            "has_healthcheck": True,
+        },
     }
 
 
@@ -1616,6 +1637,7 @@ class RuntimeSmokeRunner:
         for mode in (
             "health-ready",
             "terminal",
+            "exposed-no-health",
             "no-probe",
             "probe-timeout",
         ):
@@ -1645,7 +1667,11 @@ class RuntimeSmokeRunner:
                         {
                             "Config": {
                                 "Healthcheck": healthcheck,
-                                "ExposedPorts": {},
+                                "ExposedPorts": (
+                                    {"8080/tcp": {}}
+                                    if mode == "exposed-no-health"
+                                    else {}
+                                ),
                             }
                         }
                     ]
@@ -1657,6 +1683,7 @@ class RuntimeSmokeRunner:
             status = {
                 "health-ready": "READY_HEALTH",
                 "terminal": "TERMINAL",
+                "exposed-no-health": "RUNNING_NO_PROBE",
                 "no-probe": "RUNNING_NO_PROBE",
                 "probe-timeout": "PROBE_TIMEOUT",
             }[mode]
@@ -1705,6 +1732,7 @@ def test_native_smoke_covers_all_runtime_carriers_without_external_tools(tmp_pat
     assert {RuntimeSmokeRunner._mode(call[1]) for call in waiter_calls} == {
         "health-ready",
         "terminal",
+        "exposed-no-health",
         "no-probe",
         "probe-timeout",
     }
@@ -1713,12 +1741,13 @@ def test_native_smoke_covers_all_runtime_carriers_without_external_tools(tmp_pat
     } == {
         "health-ready": "5",
         "terminal": "5",
+        "exposed-no-health": "0",
         "no-probe": "0",
         "probe-timeout": "0",
     }
     assert len(
         [call for call in runner.calls if "/opt/oe-tests/test.sh" in call]
-    ) == 4
+    ) == 5
 
 
 def test_native_smoke_does_not_accept_waiter_crash_as_expected_timeout(tmp_path):

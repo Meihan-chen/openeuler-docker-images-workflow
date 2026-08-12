@@ -194,6 +194,24 @@ def test_shared_prompts_derive_application_behavior_instead_of_assuming_it():
         assert fragment not in prompts
 
 
+def test_image_creator_requires_evidence_based_service_healthchecks():
+    image_creator = " ".join(
+        (AGENTS_DIR / "image-creator.md").read_text().lower().split()
+    )
+
+    assert "常驻前台服务必须提供应用级 `healthcheck`" in image_creator
+    assert "禁止恒真判据" in image_creator
+    assert "仅探测端口可连" in image_creator
+    assert "`assumptions`" in image_creator
+
+
+def test_fixer_only_describes_current_runtime_wait_substages():
+    fixer = (AGENTS_DIR / "code-fixer.md").read_text().lower()
+
+    assert "`wait_tcp`" not in fixer
+    assert "health/port readiness" not in fixer
+
+
 def test_image_creator_forbids_fixed_numeric_identity_without_semantic_review():
     image_creator = " ".join(
         (AGENTS_DIR / "image-creator.md").read_text().lower().split()
