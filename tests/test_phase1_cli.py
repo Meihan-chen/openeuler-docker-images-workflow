@@ -171,6 +171,78 @@ def _git(repo, *args):
     ).stdout.strip()
 
 
+def _oe_upgrade_gate_fixture(tmp_path):
+    from scripts.lib.task_spec import TaskSpec
+
+    repo = tmp_path / "oe-upgrade-target"
+    mdu = repo / "Database" / "redis"
+    source = mdu / "8.2.1" / "24.03-lts-sp1"
+    source.mkdir(parents=True)
+    (repo / "Database" / "image-list.yml").write_text(
+        "images:\n  redis: redis\n"
+    )
+    (mdu / "meta.yml").write_text(
+        "8.2.1-oe2403sp1:\n"
+        "  path: 8.2.1/24.03-lts-sp1/Dockerfile\n"
+    )
+    (mdu / "README.md").write_text(
+        "| Tags | Currently | Architectures |\n"
+        "|---|---|---|\n"
+        "| [8.2.1-oe2403sp1](8.2.1/24.03-lts-sp1/Dockerfile) | "
+        "redis 8.2.1 on openEuler 24.03-LTS-SP1 | amd64, arm64 |\n"
+    )
+    (source / "Dockerfile").write_text(
+        "ARG BASE=openeuler/openeuler:24.03-lts-sp1\nFROM $BASE\n"
+    )
+    _git(repo, "init", "-b", "master")
+    _git(repo, "config", "user.email", "test@example.com")
+    _git(repo, "config", "user.name", "Test")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "fixture")
+    base_sha = _git(repo, "rev-parse", "HEAD")
+
+    target = mdu / "8.2.1" / "26.03-lts"
+    target.mkdir()
+    (target / "Dockerfile").write_text(
+        "ARG BASE=openeuler/openeuler:26.03-lts\nFROM $BASE\n"
+    )
+    with (mdu / "meta.yml").open("a") as stream:
+        stream.write(
+            "8.2.1-oe2603lts:\n"
+            "  path: 8.2.1/26.03-lts/Dockerfile\n"
+        )
+    lines = (mdu / "README.md").read_text().splitlines(keepends=True)
+    lines.append(
+        "| [8.2.1-oe2603lts](8.2.1/26.03-lts/Dockerfile) | "
+        "redis 8.2.1 on openEuler 26.03-lts | amd64, arm64 |\n"
+    )
+    (mdu / "README.md").write_text("".join(lines))
+    tests = mdu / "tests"
+    tests.mkdir()
+    test_sh = tests / "test.sh"
+    test_sh.write_text("#!/usr/bin/env bash\nset -euo pipefail\nprintf 'ok\\n'\n")
+    test_sh.chmod(0o755)
+
+    task = TaskSpec.from_workflow_dispatch(
+        {
+            "schema_version": 2,
+            "scenario": "oe-upgrade",
+            "app": "redis",
+            "image_name": "redis",
+            "version": "8.2.1",
+            "os_version": "26.03-lts",
+            "domain": "Database",
+            "source_url": "",
+            "mdu_path": "Database/redis",
+            "derive_from": "8.2.1/24.03-lts-sp1",
+            "architectures": ["x86_64", "aarch64"],
+        }
+    )
+    task_path = tmp_path / "oe-upgrade-task.json"
+    task_path.write_text(task.to_json())
+    return repo, base_sha, task_path
+
+
 def _upstream(tmp_path):
     repo = tmp_path / "upstream"
     subprocess.run(
@@ -928,6 +1000,65 @@ def test_oe_upgrade_prepare_cli_derives_candidate_and_runs_scope_gate(tmp_path):
     assert json.loads((report_dir / "add-version-gates.json").read_text())[
         "delivery_allowed"
     ] is True
+
+
+def test_generated_gate_routes_oe_upgrade_to_add_version_and_test_contracts(
+    tmp_path,
+):
+    repo, base_sha, task_path = _oe_upgrade_gate_fixture(tmp_path)
+
+    result = _run_script(
+        GATE_CLI,
+        "task-contract",
+        "--phase",
+        "generated",
+        "--workspace",
+        str(repo),
+        "--task-spec",
+        str(task_path),
+        "--base-sha",
+        base_sha,
+    )
+
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["policy"] == "add-version"
+    assert report["modified_files"] == [
+        "Database/redis/README.md",
+        "Database/redis/meta.yml",
+    ]
+    assert report["runtime_test_allowed"] is True
+    assert report["delivery_allowed"] is True
+
+
+def test_generated_gate_emits_structured_json_when_oe_upgrade_scope_fails(
+    tmp_path,
+):
+    repo, base_sha, task_path = _oe_upgrade_gate_fixture(tmp_path)
+    other = repo / "Database" / "mysql"
+    other.mkdir()
+    (other / "notes.txt").write_text("outside task scope\n")
+
+    result = _run_script(
+        GATE_CLI,
+        "task-contract",
+        "--phase",
+        "generated",
+        "--workspace",
+        str(repo),
+        "--task-spec",
+        str(task_path),
+        "--base-sha",
+        base_sha,
+    )
+
+    assert result.returncode == 2
+    report = json.loads(result.stdout)
+    assert report["status"] == "failed"
+    assert report["build_allowed"] is False
+    assert report["delivery_allowed"] is False
+    assert any("outside add-version scope" in error for error in report["errors"])
+    assert "gate_diff: error:" in result.stderr
 
 
 def test_candidate_create_accepts_request_key_for_oe_upgrade_manifest():

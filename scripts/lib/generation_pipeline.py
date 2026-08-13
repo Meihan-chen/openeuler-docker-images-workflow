@@ -445,7 +445,11 @@ def build_role_prompt(
             "documentation and logo are read-only."
         )
     if role == "fixer":
-        if workspace is None:
+        if task.scenario == "oe-upgrade":
+            from scripts.lib.oe_upgrade_sanitizer import allowed_agent_paths
+
+            fixer_whitelist = allowed_agent_paths(task, "code-fixer")
+        elif workspace is None:
             fixer_whitelist = (
                 f"{task.domain}/image-list.yml",
                 f"{app_root}/meta.yml",
@@ -474,6 +478,23 @@ def build_role_prompt(
                 "weakening tests.",
             )
         )
+        if task.scenario == "oe-upgrade":
+            contract_lines.extend(
+                (
+                    "## openEuler upgrade repair routing",
+                    "- For EulerPublisher or format-check failures, modify only "
+                    "the reported target files under the current MDU, normally "
+                    "meta.yml, README.md, or doc/**.",
+                    "- For native-build or OS-identity failures, modify only the "
+                    "new target openEuler directory.",
+                    "- For runtime-test failures, modify only the new target "
+                    "openEuler directory and tests/**.",
+                    "- Evidence authorizes only the smallest relevant subset of "
+                    "the whitelist; it never authorizes unrelated cleanup.",
+                    "- AGENTS.md, CLAUDE.md, .agents/**, and .codex/** are "
+                    "forbidden even when nested below an allowed directory.",
+                )
+            )
     contract_lines.extend(
         (
             "- Do not install or upgrade host tools or packages with brew, "

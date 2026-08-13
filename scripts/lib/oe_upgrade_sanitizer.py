@@ -14,7 +14,10 @@ from typing import Mapping
 
 from scripts.lib.oe_upgrade_candidate import extract_source_identity
 from scripts.lib.task_spec import TaskSpec
-from scripts.lib.target_contract import validate_add_version_target
+from scripts.lib.target_contract import (
+    is_agent_control_path,
+    validate_add_version_target,
+)
 
 
 class SanitizationError(RuntimeError):
@@ -151,10 +154,17 @@ def _assert_safe_parents(workspace: Path, relative: PurePosixPath) -> None:
             )
 
 
-def _allowed_paths(task: TaskSpec, role: str) -> tuple[str, ...]:
+def allowed_agent_paths(task: TaskSpec, role: str) -> tuple[str, ...]:
+    """Return the only scenario-three paths an Agent role may modify."""
     assert task.mdu_path
     if role == "code-fixer":
-        return (f"{task.mdu_path}/{task.version}/{task.os_version}/**",)
+        return (
+            f"{task.mdu_path}/{task.version}/{task.os_version}/**",
+            f"{task.mdu_path}/tests/**",
+            f"{task.mdu_path}/meta.yml",
+            f"{task.mdu_path}/README.md",
+            f"{task.mdu_path}/doc/**",
+        )
     if role == "testcase-creator":
         return (f"{task.mdu_path}/tests/**",)
     raise SanitizationError(f"unsupported Agent role: {role}")
@@ -162,7 +172,10 @@ def _allowed_paths(task: TaskSpec, role: str) -> tuple[str, ...]:
 
 def _matches_allowed(relative: str, allowed: tuple[str, ...]) -> bool:
     return any(
-        relative.startswith(pattern.removesuffix("**")) for pattern in allowed
+        relative.startswith(pattern.removesuffix("**"))
+        if pattern.endswith("/**")
+        else relative == pattern
+        for pattern in allowed
     )
 
 
@@ -221,7 +234,7 @@ def create_checkpoint(
         "candidate_patch_sha256": _sha256(_candidate_patch(workspace, base_sha)),
         "source_identity_sha256": _sha256(_canonical(identity)),
         "source_identity": identity,
-        "allowed_paths": list(_allowed_paths(task, agent_role)),
+        "allowed_paths": list(allowed_agent_paths(task, agent_role)),
         "files": files,
     }
     checkpoint_id = _sha256(_canonical(draft))
@@ -341,7 +354,7 @@ def sanitize_agent_changes(
         relative = _safe_relative(value)
         _assert_safe_parents(workspace, relative)
         path = workspace / relative
-        if _matches_allowed(value, allowed):
+        if _matches_allowed(value, allowed) and not is_agent_control_path(value):
             if path.is_symlink() or (path.exists() and not path.is_file()):
                 raise SanitizationError(f"allowed path became unsafe: {value}")
             checkpoint_info = checkpoint.files.get(value)

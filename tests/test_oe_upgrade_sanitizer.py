@@ -82,6 +82,10 @@ def test_checkpoint_captures_candidate_files_and_allowed_fixer_scope(tmp_path):
     assert checkpoint.checkpoint_id.startswith("sha256:")
     assert checkpoint.allowed_paths == (
         "Database/redis/8.2.1/26.03-lts/**",
+        "Database/redis/tests/**",
+        "Database/redis/meta.yml",
+        "Database/redis/README.md",
+        "Database/redis/doc/**",
     )
     assert "Database/redis/meta.yml" in checkpoint.files
     assert "Database/redis/8.2.1/26.03-lts/Dockerfile" in checkpoint.files
@@ -91,7 +95,7 @@ def test_checkpoint_captures_candidate_files_and_allowed_fixer_scope(tmp_path):
     ] == checkpoint.checkpoint_id
 
 
-def test_sanitizer_keeps_fixer_target_change_and_restores_everything_else(tmp_path):
+def test_sanitizer_keeps_fixer_mdu_changes_and_restores_everything_else(tmp_path):
     from scripts.lib.oe_upgrade_sanitizer import create_checkpoint, sanitize_agent_changes
 
     repo, base_sha = _candidate(tmp_path)
@@ -106,8 +110,21 @@ def test_sanitizer_keeps_fixer_target_change_and_restores_everything_else(tmp_pa
     target = repo / "Database" / "redis" / "8.2.1" / "26.03-lts" / "Dockerfile"
     target.write_text(target.read_text() + "RUN dnf -y install compat-lib\n")
     meta = repo / "Database" / "redis" / "meta.yml"
-    expected_meta = meta.read_bytes()
-    meta.write_text(meta.read_text() + "forged: {path: forged}\n")
+    meta.write_text("# Publisher-normalized metadata\n" + meta.read_text())
+    readme = repo / "Database" / "redis" / "README.md"
+    readme.write_text(
+        "| Tags | openEuler | Dockerfile |\n"
+        "|---|---|---|\n"
+        "| 8.2.1-oe2603lts | 26.03-lts | "
+        "8.2.1/26.03-lts/Dockerfile |\n"
+    )
+    test = repo / "Database" / "redis" / "tests" / "test.sh"
+    test.parent.mkdir()
+    test.write_text("#!/bin/bash\nset -euo pipefail\nredis-server --version\n")
+    test.chmod(0o755)
+    doc = repo / "Database" / "redis" / "doc" / "image-info.yml"
+    doc.parent.mkdir()
+    doc.write_text("name: redis\n")
     history = repo / "Database" / "redis" / "8.2.1" / "24.03-lts-sp1" / "Dockerfile"
     expected_history = history.read_bytes()
     history.write_text("FROM broken\n")
@@ -125,18 +142,76 @@ def test_sanitizer_keeps_fixer_target_change_and_restores_everything_else(tmp_pa
     )
 
     assert "compat-lib" in target.read_text()
-    assert meta.read_bytes() == expected_meta
+    assert meta.read_text().startswith("# Publisher-normalized metadata\n")
+    assert readme.is_file()
+    assert test.is_file()
+    assert doc.is_file()
     assert history.read_bytes() == expected_history
     assert mysql.read_text() == "FROM scratch\n"
     assert not unauthorized.exists()
     assert report.clean is True
-    assert report.retained_changes == (
-        "Database/redis/8.2.1/26.03-lts/Dockerfile",
+    assert report.retained_changes == tuple(
+        sorted(
+            (
+                "Database/redis/8.2.1/26.03-lts/Dockerfile",
+                "Database/redis/README.md",
+                "Database/redis/doc/image-info.yml",
+                "Database/redis/meta.yml",
+                "Database/redis/tests/test.sh",
+            )
+        )
     )
     actions = {item["path"]: item["action"] for item in report.actions}
-    assert actions["Database/redis/meta.yml"] == "restore-checkpoint"
     assert actions["Database/mysql/Dockerfile"] == "restore-base"
     assert actions["Database/redis/notes.txt"] == "remove-unauthorized"
+
+
+def test_sanitizer_removes_agent_controls_even_inside_fixer_scope(tmp_path):
+    from scripts.lib.oe_upgrade_sanitizer import create_checkpoint, sanitize_agent_changes
+
+    repo, base_sha = _candidate(tmp_path)
+    checkpoint = create_checkpoint(
+        workspace=repo,
+        base_sha=base_sha,
+        task=_task(),
+        destination=tmp_path / "checkpoint",
+        round_number=1,
+        agent_role="code-fixer",
+    )
+    controls = (
+        repo
+        / "Database"
+        / "redis"
+        / "8.2.1"
+        / "26.03-lts"
+        / ".codex"
+        / "config.json",
+        repo / "Database" / "redis" / "doc" / "AGENTS.md",
+        repo / "Database" / "redis" / "tests" / "CLAUDE.md",
+    )
+    for control in controls:
+        control.parent.mkdir(parents=True, exist_ok=True)
+        control.write_text("agent override\n")
+    normal_doc = repo / "Database" / "redis" / "doc" / "usage.md"
+    normal_doc.write_text("# Redis\n")
+
+    report = sanitize_agent_changes(
+        workspace=repo,
+        base_sha=base_sha,
+        task=_task(),
+        checkpoint=checkpoint,
+        report_path=tmp_path / "sanitization.json",
+    )
+
+    assert all(not path.exists() for path in controls)
+    assert normal_doc.is_file()
+    assert report.retained_changes == ("Database/redis/doc/usage.md",)
+    actions = {item["path"]: item["action"] for item in report.actions}
+    assert actions[
+        "Database/redis/8.2.1/26.03-lts/.codex/config.json"
+    ] == "remove-unauthorized"
+    assert actions["Database/redis/doc/AGENTS.md"] == "remove-unauthorized"
+    assert actions["Database/redis/tests/CLAUDE.md"] == "remove-unauthorized"
 
 
 def test_testcase_creator_can_only_add_tests(tmp_path):

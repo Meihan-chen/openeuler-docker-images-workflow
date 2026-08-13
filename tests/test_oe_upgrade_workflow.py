@@ -72,6 +72,28 @@ def test_worker_prepare_outlives_the_doubled_test_agent_chain():
     assert data["jobs"]["prepare"]["timeout-minutes"] == 720
 
 
+def test_worker_reports_preparation_gate_failures_as_contract():
+    data = _load(WORKER)
+    prepare = data["jobs"]["prepare"]
+    gate = next(
+        step
+        for step in prepare["steps"]
+        if step.get("name") == "Gate and lint prepared candidate"
+    )
+    finalize = data["jobs"]["finalize"]
+    result_step = next(
+        step
+        for step in finalize["steps"]
+        if step.get("name") == "Write Issue result and WorkerResult"
+    )
+
+    assert gate["id"] == "gate"
+    assert prepare["outputs"]["failure_reason"] == (
+        "${{ steps.gate.outcome == 'failure' && 'contract' || 'generation' }}"
+    )
+    assert "needs.prepare.outputs.failure_reason" in result_step["env"]["REASON"]
+
+
 def test_legacy_batch_upgrade_workflow_is_disabled_not_parallelized():
     data = _load(LEGACY)
     trigger = _on(data)

@@ -24,6 +24,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from scripts.lib.target_contract import (  # noqa: E402
     TargetContractError,
     validate_final_target,
+    validate_generated_add_version_target,
     validate_generated_target,
 )
 from scripts.lib.task_spec import TaskSpec, TaskSpecError  # noqa: E402
@@ -114,6 +115,12 @@ def _legacy_main() -> None:
 def _validate_task_contract(args: argparse.Namespace) -> dict[str, object]:
     task = TaskSpec.from_json(args.task_spec.read_text())
     if args.phase == "generated":
+        if task.scenario == "oe-upgrade":
+            return validate_generated_add_version_target(
+                repo=args.workspace,
+                task=task,
+                base_sha=args.base_sha,
+            )
         return validate_generated_target(
             repo=args.workspace,
             task=task,
@@ -155,6 +162,15 @@ def main(argv: list[str] | None = None) -> int:
         json.JSONDecodeError,
         OSError,
     ) as error:
+        messages = [line for line in str(error).splitlines() if line.strip()]
+        report = {
+            "status": "failed",
+            "build_allowed": False,
+            "delivery_allowed": False,
+            "findings": list(getattr(error, "findings", ())),
+            "errors": messages or [type(error).__name__],
+        }
+        print(json.dumps(report, ensure_ascii=False, sort_keys=True))
         print(f"gate_diff: error: {error}", file=sys.stderr)
         return 2
     print(json.dumps(report, ensure_ascii=False, sort_keys=True))

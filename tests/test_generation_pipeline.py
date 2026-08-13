@@ -1,4 +1,7 @@
 import json
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -15,6 +18,50 @@ def _task():
             "source_url": "https://github.com/apache/kvrocks/tree/v2.16.0",
         }
     )
+
+
+def _oe_upgrade_task():
+    from scripts.lib.task_spec import TaskSpec
+
+    return TaskSpec.from_workflow_dispatch(
+        {
+            "schema_version": 2,
+            "scenario": "oe-upgrade",
+            "app": "redis",
+            "image_name": "redis",
+            "version": "8.2.1",
+            "os_version": "26.03-lts",
+            "domain": "Database",
+            "source_url": "",
+            "mdu_path": "Database/redis",
+            "derive_from": "8.2.1/24.03-lts-sp1",
+            "architectures": ["x86_64", "aarch64"],
+        }
+    )
+
+
+def test_importing_scenario_one_generation_does_not_load_oe_upgrade_modules():
+    root = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; "
+                "import scripts.lib.generation_pipeline; "
+                "loaded = sorted(name for name in sys.modules "
+                "if name.startswith('scripts.lib.oe_upgrade')); "
+                "print('\\n'.join(loaded)); "
+                "raise SystemExit(bool(loaded))"
+            ),
+        ],
+        cwd=root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 class StubAgent:
@@ -2257,6 +2304,39 @@ def test_fixer_prompt_whitelists_generated_candidate_files(tmp_path):
     assert "Database/kvrocks/tests/test.sh" in prompt
     assert "Database/kvrocks/tests/test_helpers.sh" in prompt
     assert "Database/kvrocks/results/results.json" not in prompt
+
+
+def test_oe_upgrade_fixer_prompt_uses_only_the_sanitizer_scope(tmp_path):
+    from scripts.lib.generation_pipeline import build_role_prompt
+
+    workspace = tmp_path / "target"
+    source = workspace / "Database" / "redis" / "8.2.1" / "24.03-lts-sp1"
+    source.mkdir(parents=True)
+    (source / "Dockerfile").write_text("FROM openEuler\n")
+    (workspace / "Database" / "image-list.yml").write_text("images: {}\n")
+    (workspace / "Database" / "redis" / "meta.yml").write_text("entries: {}\n")
+
+    prompt = build_role_prompt(
+        role="fixer",
+        task=_oe_upgrade_task(),
+        base_sha="1" * 40,
+        workspace=workspace,
+    )
+
+    for path in (
+        "Database/redis/8.2.1/26.03-lts/**",
+        "Database/redis/tests/**",
+        "Database/redis/meta.yml",
+        "Database/redis/README.md",
+        "Database/redis/doc/**",
+    ):
+        assert f"`{path}`" in prompt
+    assert "\n- `Database/image-list.yml`\n" not in prompt
+    assert "\n- `Database/redis/8.2.1/24.03-lts-sp1/Dockerfile`\n" not in prompt
+    assert "For EulerPublisher or format-check failures" in prompt
+    assert "For native-build or OS-identity failures" in prompt
+    assert "For runtime-test failures" in prompt
+    assert "AGENTS.md, CLAUDE.md, .agents/**, and .codex/**" in prompt
 
 
 def test_generation_hard_stops_on_stray_tarball_outside_task_scope(

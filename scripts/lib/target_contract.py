@@ -74,6 +74,34 @@ _AGENT_CONTROL_NAMES = frozenset({"agents.md", "claude.md"})
 _AGENT_CONTROL_DIRECTORIES = frozenset({".agents", ".codex"})
 
 
+def is_agent_control_path(relative: str) -> bool:
+    parts = tuple(part.lower() for part in Path(relative).parts)
+    return (
+        parts[-1] in _AGENT_CONTROL_NAMES
+        or any(part in _AGENT_CONTROL_DIRECTORIES for part in parts)
+    )
+
+
+def _published_readme_rows(
+    content: str,
+    published: dict[object, object],
+) -> set[tuple[str, str]]:
+    """Return meta-backed release rows represented in a Markdown table."""
+    rows = tuple(
+        line for line in content.splitlines() if line.lstrip().startswith("|")
+    )
+    represented: set[tuple[str, str]] = set()
+    for raw_tag, raw_entry in published.items():
+        if not isinstance(raw_tag, str) or not isinstance(raw_entry, dict):
+            continue
+        raw_path = raw_entry.get("path")
+        if not isinstance(raw_path, str):
+            continue
+        if any(raw_tag in row and raw_path in row for row in rows):
+            represented.add((raw_tag, raw_path))
+    return represented
+
+
 def native_checks_pass(checks: object, *, oe_upgrade: bool = False) -> bool:
     if not isinstance(checks, dict) or not all(
         value is True for value in checks.values()
@@ -924,6 +952,7 @@ def validate_add_version_target(
     mdu_root = task.mdu_path
     target_root = f"{mdu_root}/{task.version}/{task.os_version}"
     tests_root = f"{mdu_root}/tests"
+    doc_root = f"{mdu_root}/doc"
     results_root = f"{mdu_root}/results/{task.version}/{task.os_version}"
     meta_relative = f"{mdu_root}/meta.yml"
     readme_relative = f"{mdu_root}/README.md"
@@ -931,19 +960,26 @@ def validate_add_version_target(
     added_files: list[str] = []
     modified_files: list[str] = []
     violations: list[str] = []
-    base_tests = _git(
-        repo, "ls-tree", "--name-only", base_sha, "--", tests_root
-    ).stdout.strip()
 
     for status, relative in changes:
-        if status == "A" and (
-            relative.startswith(f"{target_root}/")
-            or relative.startswith(f"{results_root}/")
-            or (not base_tests and relative.startswith(f"{tests_root}/"))
-        ):
+        if status in {"A", "M"} and is_agent_control_path(relative):
+            violations.append(
+                f"Agent control file is forbidden in add-version scope: {relative}"
+            )
+            continue
+        if status == "A" and relative.startswith(f"{target_root}/"):
             added_files.append(relative)
-        elif status == "M" and relative in {meta_relative, readme_relative}:
+        elif status == "A" and relative.startswith(f"{results_root}/"):
+            added_files.append(relative)
+        elif status in {"A", "M"} and (
+            relative.startswith(f"{tests_root}/")
+            or relative.startswith(f"{doc_root}/")
+        ):
+            (added_files if status == "A" else modified_files).append(relative)
+        elif status == "M" and relative == meta_relative:
             modified_files.append(relative)
+        elif status in {"A", "M"} and relative == readme_relative:
+            (added_files if status == "A" else modified_files).append(relative)
         else:
             violations.append(
                 f"change outside add-version scope: {status} {relative}"
@@ -972,12 +1008,8 @@ def validate_add_version_target(
         raise TargetContractError("meta.yml append-only validation failed") from error
     if not isinstance(before, dict) or not isinstance(after, dict):
         raise TargetContractError("meta.yml append-only validation requires mappings")
-    before_bytes = before_text.encode()
-    after_bytes = after_path.read_bytes()
-    if not after_bytes.startswith(before_bytes) or any(
-        after.get(key) != value for key, value in before.items()
-    ):
-        raise TargetContractError("meta.yml must be append-only")
+    if any(after.get(key) != value for key, value in before.items()):
+        raise TargetContractError("meta.yml must preserve all published entries")
     expected_tag = _image_tag(task.version, task.os_version)
     expected_entry: dict[str, str] = {
         "path": f"{task.version}/{task.os_version}/Dockerfile"
@@ -989,11 +1021,23 @@ def validate_add_version_target(
             "meta.yml must append exactly the TaskSpec target entry"
         )
 
-    if readme_relative in modified_files:
-        before_readme = _git(repo, "show", f"{base_sha}:{readme_relative}").stdout
+    if readme_relative in {*added_files, *modified_files}:
         after_readme = (repo / readme_relative).read_text()
+        if readme_relative in modified_files:
+            before_readme = _git(
+                repo, "show", f"{base_sha}:{readme_relative}"
+            ).stdout
+            historical_rows = _published_readme_rows(before_readme, before)
+            current_rows = _published_readme_rows(after_readme, before)
+            missing_rows = sorted(historical_rows - current_rows)
+            if missing_rows:
+                detail = ", ".join(
+                    f"{tag} -> {path}" for tag, path in missing_rows
+                )
+                raise TargetContractError(
+                    "README.md must preserve published README rows: " + detail
+                )
         expected_path = f"{task.version}/{task.os_version}/Dockerfile"
-        before_lines = before_readme.splitlines(keepends=True)
         after_lines = after_readme.splitlines(keepends=True)
         candidates = [
             index
@@ -1005,12 +1049,7 @@ def validate_add_version_target(
         ]
         if len(candidates) != 1:
             raise TargetContractError(
-                "README.md must add exactly one TaskSpec target table row"
-            )
-        preserved = after_lines[: candidates[0]] + after_lines[candidates[0] + 1 :]
-        if preserved != before_lines:
-            raise TargetContractError(
-                "README.md must preserve every historical byte and add one row"
+                "README.md must contain exactly one TaskSpec target table row"
             )
 
     return {
@@ -1023,6 +1062,37 @@ def validate_add_version_target(
         "added_files": len(added_files),
         "modified_files": sorted(modified_files),
         "findings": [],
+        "errors": [],
+    }
+
+
+def validate_generated_add_version_target(
+    *,
+    repo: Path,
+    task: TaskSpec,
+    base_sha: str,
+) -> dict[str, object]:
+    """Validate scenario-three scope and its shared runtime-test contract."""
+    add_version = validate_add_version_target(
+        repo=repo,
+        task=task,
+        base_sha=base_sha,
+    )
+    tests = validate_test_contract(repo=repo, task=task)
+    if tests["runtime_test_allowed"] is not True:
+        errors = [str(message) for message in tests.get("errors", ())]
+        raise TargetContractError(
+            "generated add-version tests did not pass: " + "; ".join(errors),
+            findings=list(tests.get("findings", ())),
+        )
+    return {
+        **add_version,
+        "test_allowed": True,
+        "runtime_test_allowed": True,
+        "findings": [
+            *add_version.get("findings", ()),
+            *tests.get("findings", ()),
+        ],
         "errors": [],
     }
 

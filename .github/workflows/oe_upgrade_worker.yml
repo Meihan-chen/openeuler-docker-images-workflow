@@ -46,6 +46,8 @@ jobs:
       architectures: ${{ steps.task.outputs.architectures }}
       task_key: ${{ steps.task.outputs.task_key }}
       proceed: ${{ steps.precheck.outputs.proceed }}
+      failure_reason: >-
+        ${{ steps.gate.outcome == 'failure' && 'contract' || 'generation' }}
     steps:
       - name: Check out workflow source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -153,6 +155,7 @@ jobs:
             --opencode "${{ steps.tools.outputs.opencode_path }}"
 
       - name: Gate and lint prepared candidate
+        id: gate
         if: ${{ steps.precheck.outputs.proceed == 'true' }}
         run: |
           dockerfile="$("${RUNNER_TEMP}/phase1-venv/bin/python" - \
@@ -521,7 +524,8 @@ jobs:
           GITCODE_USERNAME: ${{ vars.GITCODE_BOT_USERNAME }}
           OUTCOME: ${{ needs.deliver.result == 'success' && 'pr-created' || 'failed' }}
           REASON: >-
-            ${{ needs.prepare.result == 'failure' && 'generation' ||
+            ${{ needs.prepare.result == 'failure' &&
+                needs.prepare.outputs.failure_reason ||
                 contains(needs.round-1.outputs.terminal_status, 'dependency') && 'dependency' ||
                 contains(needs.round-2.outputs.terminal_status, 'dependency') && 'dependency' ||
                 contains(needs.round-3.outputs.terminal_status, 'dependency') && 'dependency' ||
