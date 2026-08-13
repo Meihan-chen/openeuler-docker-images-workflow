@@ -290,6 +290,8 @@ def test_production_cli_accepts_explicit_delivery_configuration():
             "1",
             "--workspace",
             "/tmp/workspace",
+            "--gitcode-username",
+            "openeuler-bot",
             "--environment",
             "production",
             "--delivery-mode",

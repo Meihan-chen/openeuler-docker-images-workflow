@@ -505,7 +505,7 @@ jobs:
       - package-candidate
       - deliver
     if: ${{ always() }}
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, oe-image-x86]
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
