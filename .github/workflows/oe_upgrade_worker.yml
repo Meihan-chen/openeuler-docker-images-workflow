@@ -1,0 +1,42 @@
+name: openEuler Upgrade Worker
+
+# Registration-only default-branch entry. The controller dispatches the full
+# worker from the selected implementation ref after this path is registered.
+on:
+  workflow_dispatch:
+    inputs:
+      task_spec_json:
+        description: "Canonical TaskSpec v2 JSON from the pinned plan"
+        required: true
+        type: string
+      tracking_issue_number:
+        description: "GitCode tracking Issue number"
+        required: true
+        type: string
+      request_key:
+        description: "Stable upgrade activity key"
+        required: true
+        type: string
+      base_sha:
+        description: "Pinned target repository base SHA"
+        required: true
+        type: string
+      task_display:
+        description: "request_key / task_key / mdu_path"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  registration-only:
+    name: Refuse execution from the registration stub
+    runs-on: [self-hosted, Linux, X64, oe-image-x86]
+    timeout-minutes: 2
+    steps:
+      - name: Explain how to select an implementation
+        run: |
+          echo "This default-branch file only registers the workflow path."
+          echo "Dispatch the worker with ref set to an implementation branch."
+          exit 2

@@ -1,0 +1,42 @@
+name: Monitor openEuler Upgrade Issues
+
+# Registration-only default-branch entry. Feature branches can provide the
+# implementation at this stable path and select it with workflow_dispatch ref.
+on:
+  workflow_dispatch:
+    inputs:
+      tracking_issue_number:
+        description: "Tracking GitCode Issue number"
+        required: true
+        type: string
+      oe_version:
+        description: "Target openEuler version"
+        required: false
+        type: string
+      scope:
+        description: "all or a comma-separated domain list"
+        required: false
+        type: string
+      mode:
+        description: "Plan only, or establish/continue delivery"
+        required: true
+        type: choice
+        default: plan
+        options:
+          - plan
+          - deliver
+
+permissions:
+  contents: read
+
+jobs:
+  registration-only:
+    name: Refuse execution from the registration stub
+    runs-on: [self-hosted, Linux, X64, oe-image-x86]
+    timeout-minutes: 2
+    steps:
+      - name: Explain how to select an implementation
+        run: |
+          echo "This default-branch file only registers the workflow path."
+          echo "Run the workflow with --ref pointing to an implementation branch."
+          exit 2
