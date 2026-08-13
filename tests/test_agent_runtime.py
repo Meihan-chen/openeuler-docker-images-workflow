@@ -170,7 +170,7 @@ def test_default_agent_runner_streams_safe_progress(tmp_path, capsys):
     assert result.payload["success"] is True
     assert (
         "[flow][agent:image_creator] START "
-        "model=deepseek/deepseek-v4-flash timeout=1800s"
+        "model=deepseek/deepseek-v4-flash timeout=3600s"
     ) in output
     assert (
         "[flow][agent:image_creator] ACTION tool=write "

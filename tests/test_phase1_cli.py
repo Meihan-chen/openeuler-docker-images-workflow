@@ -796,6 +796,8 @@ def test_fork_delivery_reads_token_only_from_environment():
     assert "GITCODE_TOKEN" in result.stdout
     assert "--delivery-run-id" in result.stdout
     assert "--delivery-run-attempt" in result.stdout
+    assert "--gitcode-username" in result.stdout
+    assert "qq_42020325" not in result.stdout
 
 
 def test_issue_contract_test_is_explicit_and_reads_environment_token():
@@ -805,6 +807,7 @@ def test_issue_contract_test_is_explicit_and_reads_environment_token():
     assert "--token" not in result.stdout
     assert "GITCODE_TOKEN" in result.stdout
     assert "create, update, comment and close" in result.stdout
+    assert "--github-run-url" in result.stdout
 
 
 def test_shared_agent_cli_reports_contract_errors_without_traceback(tmp_path):

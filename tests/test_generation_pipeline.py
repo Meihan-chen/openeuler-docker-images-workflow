@@ -719,11 +719,11 @@ def test_generation_runs_testcase_review_pair_and_records_evidence(
         "testcase_qa",
     ]
     assert [call["timeout"] for call in agent.calls] == [
-        3600,
-        3600,
-        1200,
-        3600,
-        1200,
+        7200,
+        7200,
+        2400,
+        7200,
+        2400,
     ]
     assert "Review report to resolve" in agent.calls[3]["prompt"]
     assert "fix version" in agent.calls[3]["prompt"]
@@ -2108,13 +2108,10 @@ def test_phase1_prompts_pin_task_paths_without_injecting_app_implementation():
     ):
         assert fragment not in prompt
     assert "Do not install or upgrade host tools or packages" in prompt
-    assert "Do not compile or build the target application" in prompt
-    assert "directly on the Runner or inside `docker run`" in prompt
-    assert "bounded, read-only inspection of the TaskSpec base image" in prompt
-    assert (
-        "Write the minimum complete candidate before optional research" in prompt
-    )
-    assert "leave uncertain facts to `native_build` and `runtime_test`" in prompt
+    assert "Do not run Docker builds or invoke linters" in prompt
+    assert "Do not compile or build the target application" not in prompt
+    assert "bounded, read-only inspection of the TaskSpec base image" not in prompt
+    assert "Write the minimum complete candidate before optional research" not in prompt
     # Run 30567356119 unpacked an upstream tarball into the target repo, so
     # every role must be told where research output belongs instead.
     assert ".oe-scratch" in prompt

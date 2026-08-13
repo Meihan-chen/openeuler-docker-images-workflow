@@ -5,6 +5,10 @@ import pytest
 
 
 TARGET_REPO = "openeuler/openeuler-docker-images"
+GITHUB_RUN_URL = (
+    "https://github.com/opensourceways/openeuler-docker-autopilot/"
+    "actions/runs/123456"
+)
 
 
 def _task():
@@ -196,6 +200,7 @@ def test_controlled_probe_is_explicit_idempotent_commented_and_closed():
         environment="test",
         operation="failure_issue_contract_test",
         github_run_id="123456",
+        github_run_url=GITHUB_RUN_URL,
         failure_stage="aarch64-build",
     )
 
@@ -215,6 +220,10 @@ def test_controlled_probe_is_explicit_idempotent_commented_and_closed():
     assert "aarch64-build" in create_call["title"]
     assert "run 123456" in create_call["title"]
     assert "e2e-" in create_call["body"]
+    assert GITHUB_RUN_URL in create_call["body"]
+    assert "Meihan-chen/openeuler-docker-images-workflow" not in (
+        create_call["body"]
+    )
     assert client.calls[-1][1]["state"] == "closed"
     assert "closed automatically" in client.calls[-1][1]["body"]
 
@@ -240,6 +249,7 @@ def test_controlled_probe_never_creates_twice_when_new_issue_is_not_yet_listed()
             environment="test",
             operation="failure_issue_contract_test",
             github_run_id="123456",
+            github_run_url=GITHUB_RUN_URL,
             failure_stage="aarch64-build",
         )
 
@@ -276,6 +286,7 @@ def test_controlled_probe_rejects_non_explicit_or_non_test_invocation(
             environment=environment,
             operation=operation,
             github_run_id="123456",
+            github_run_url=GITHUB_RUN_URL,
             failure_stage="aarch64-build",
         )
 

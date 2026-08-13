@@ -698,6 +698,7 @@ def run_controlled_issue_probe(
     environment: str,
     operation: str,
     github_run_id: str,
+    github_run_url: str,
     failure_stage: str,
 ) -> GitCodeResource | Any:
     """Run the explicit test-only create/update/comment/close contract probe."""
@@ -716,10 +717,6 @@ def run_controlled_issue_probe(
         f"[E2E TEST] {task.app.capitalize()} {task.version} "
         f"{failure_stage} final failure - run {github_run_id}"
     )
-    run_url = (
-        "https://github.com/Meihan-chen/openeuler-docker-images-workflow/"
-        f"actions/runs/{github_run_id}"
-    )
     report = FailureIssueReport(
         task=task,
         failure_stage=failure_stage,
@@ -734,8 +731,8 @@ def run_controlled_issue_probe(
             "round 2: controlled retry recorded",
             "round 3: controlled terminal failure recorded",
         ),
-        run_url=run_url,
-        artifact_url=run_url,
+        run_url=github_run_url,
+        artifact_url=github_run_url,
         suggested_action="No human action is required for this E2E probe.",
     )
 

@@ -42,7 +42,9 @@ Harness 在 `## Review report to resolve` 下附一个 JSON 对象，字段如�
 从未执行）。捕获到 Native 检查失败时，
 `failures` 是可选字段，按顺序保存每项失败的 `stage`、`check`、`failure` 与
 `failure_details`；后者的结构取决于失败类型：命令失败包含 `command`、`returncode`、
-`stdout_head`、`stdout_tail`，测试契约失败包含 `findings`。`failed_stage`、`failure`
+`stdout_head`、`stdout_tail`；`native_build` 还包含 `full_log` 元数据，完整输出位于
+`full_evidence` 列出的 `native_build.buildx.log`。测试契约失败包含
+`findings`。`failed_stage`、`failure`
 和 `failure_details` 保留为第一项失败的兼容视图。报告还可能包含独立的
 `format_check`（上游格式检查的版本、类别和原始输出）及 `container_evidence`
 （容器 `state`、`logs` 与 `probe`）。
@@ -60,8 +62,9 @@ Harness 在 `## Review report to resolve` 下附一个 JSON 对象，字段如�
 ### 0. 前置检查
 
 `failure_details.stdout_head` 是日志开头，`stdout_tail` 是结尾；两者之间被省略的
-部分不可假设。若证据不足以定位根因，判定为 `insufficient_evidence`，不得猜测或
-修改文件。
+部分不可假设。`native_build` 失败时必须先在 `full_evidence` 中读取
+`native_build.buildx.log`，再检索最早的编译或下载错误；只有该文件缺失、未完整
+采集或仍无法定位根因时，才判定为 `insufficient_evidence`，不得猜测或修改文件。
 
 ### 1. 读取 Harness 分类
 

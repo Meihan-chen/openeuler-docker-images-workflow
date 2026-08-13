@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -37,6 +38,16 @@ def test_preflight_accepts_ready_native_runner(tmp_path):
     assert report["resources"]["disk_free_bytes"] == 32 * GIB
 
 
+def test_preflight_accepts_five_gibibytes_of_free_disk(tmp_path):
+    from scripts.lib.toolchain import evaluate_preflight
+
+    snapshot = replace(_snapshot(tmp_path), disk_free_bytes=5 * GIB)
+
+    report = evaluate_preflight(snapshot, expected_arch="x86_64")
+
+    assert report["status"] == "passed"
+
+
 def test_preflight_rejects_cross_architecture_runner(tmp_path):
     from scripts.lib.toolchain import PreflightError, evaluate_preflight
 
@@ -57,7 +68,7 @@ def test_preflight_reports_all_missing_capabilities(tmp_path):
         architecture="x86_64",
         cpu_count=2,
         memory_available_bytes=4 * GIB,
-        disk_free_bytes=5 * GIB,
+        disk_free_bytes=4 * GIB,
         docker_server_version="",
         buildx_version="",
         tools={},
@@ -70,7 +81,7 @@ def test_preflight_reports_all_missing_capabilities(tmp_path):
     for expected in (
         "at least 4 CPUs",
         "at least 8 GiB",
-        "at least 10 GiB",
+        "at least 5 GiB",
         "Docker daemon",
         "Buildx",
         "hadolint",

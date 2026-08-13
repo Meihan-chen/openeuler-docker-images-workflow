@@ -574,7 +574,7 @@ def decide_round(
             api_key=api_key,
             required_keys=("success", "changes"),
             response_keys=_FIXER_RESPONSE_KEYS,
-            timeout=3600,
+            timeout=7200,
             external_read_dirs=external_read_dirs,
         )
         _write_fixer_report(

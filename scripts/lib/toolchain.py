@@ -28,7 +28,7 @@ MIN_MEMORY_AVAILABLE = 8 * GIB
 # The floor a native build needs for image layers and the BuildKit cache. It
 # doubles as the reserve the Agent scratch watchdog refuses to eat into, so
 # lowering it hands that headroom to the Agent rather than to the build.
-MIN_DISK_FREE = 10 * GIB
+MIN_DISK_FREE = 5 * GIB
 REQUIRED_TOOLS = ("hadolint", "jq", "opencode")
 
 

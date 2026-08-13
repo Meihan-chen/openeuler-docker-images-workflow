@@ -51,17 +51,17 @@
 | 模式 | easysoftware 的实现 | 本系统的采用 |
 |------|--------------------|-------------|
 | 一次性执行 | `Application.main()` 调用任务后 `System.exit(0)`，由 cron 容器定时拉起 | 每个 GitHub Actions Workflow 独立运行，编排器执行完毕后退出。由 anitya webhook 或 `workflow_dispatch` 触发 |
-| 上游版本监控 | easysoftware 的 `projectsInfoUrl` 数据来自 anitya，覆盖 GitHub / PyPI / npm / Rubygems / CPAN 等生态的上游版本跟踪 | **直接复用**。应用名作为 anitya 查找 key（`projectsInfoUrl + appName`），新应用在 `doc/image-info.yml` 中增加 `upstream` 字段声明 `backend` 和 `homepage`（见 2.3 节），新版本由 webhook 触发，无需轮询 |
+| 上游版本监控 | easysoftware 的 `projectsInfoUrl` 数据来自 anitya，覆盖 GitHub / PyPI / npm / Rubygems / CPAN 等生态的上游版本跟踪 | **直接复用**。应用名作为 anitya 查找 key（`projectsInfoUrl + appName`），新应用在 `doc/image-info.yml` 中补齐 `upstream` 块与顶层 `homepage`（见 2.3 节），新版本由 webhook 触发，无需轮询 |
 | PR 去重 | `checkHasCreatePR()` 遍历已有 open PR，按 title 精确匹配，命中则跳过 | 同样按 title 匹配去重，PR 生成前检查，防止重复提交 |
 | 批量更新 | `batchUpdatePremiumApp()` 遍历 DockerHub 上所有 openEuler OS 版本，对缺最新镜像的版本生成 Dockerfile | oe-upgrade 场景的 Matrix 并行策略直接借鉴此模式 |
 | 差异化 Dockerfile | 复制已有版本的目录树，替换 Dockerfile 中的版本字符串，更新 meta.yml | Creator Agent 在版本更新场景下的标准操作：复制 → 替换 → 追加 |
+| 分支策略 | Fork 到 bot 账号 → 跨仓库 PR | **按凭据权限二选一**：无目标仓写权限时推 fork、提跨仓 PR；有写权限时直推目标仓、提同仓 PR。两者只差一个配置项（见 8.3 节） |
 
 **调整的决策：**
 
 | 维度 | easysoftware | 本系统选择 | 原因 |
 |------|-------------|-----------|------|
 | 文件操作 | easysoftware 通过 Git Data API 直接操作 tree/blob，不 clone | **Git clone → modify → commit → push** | 我们需要 build + test 验证，必须有本地文件系统；API 模式适合纯文本替换，不适合构建验证 |
-| 分支策略 | Fork 到 bot 账号 → 跨仓库 PR | **Bot token 直接推分支 → PR** | GitCode 兼容 GitHub API v3，bot token 有直接写权限时不需要 fork 链路 |
 | 构建验证 | 无（由仓库 CI 单独处理） | **PR 生成前在 Runner 上完成** | 这是需求的硬要求：提 PR 前必须证明 Dockerfile 可构建且通过测试 |
 | 运行载体 | SpringBoot 独立部署 | **GitHub Actions** | 这是系统部署约束：必须通过 GitHub Actions 部署 |
 
@@ -84,13 +84,25 @@
 
 **下游操作：**
 
-easysoftware 通过 API 完成 fork → branch → tree API → commit → PR 的调用链。本系统操作 GitCode 仓库，通过 GitCode API（兼容 GitHub API v3）实现对应操作，核心差异在于：
+easysoftware 通过 API 完成 fork → branch → tree API → commit → PR 的调用链。本系统操作 GitCode 仓库，通过 GitCode API 实现对应操作，核心差异在于：
 
-- **不 fork**：GitCode 的 bot token 可直接推分支到目标仓库，无需 fork 链路
+- **分支去向随凭据权限变化**：有目标仓写权限则直推，无则推 fork 后提跨仓 PR。PR 与 Issue 始终落在目标仓
 - **clone 而非 API 操作文件**：本系统需要 build + test 验证，必须有完整本地文件系统
 - **PR 去重后创建**：逻辑与 easysoftware 一致，但调用 GitCode PR API
 
 easysoftware 的 SMTP 邮件通知改为 GitHub Actions workflow 通知 + PR/Issue 描述。
+
+### 1.5 实施阶段
+
+三个场景共享同一套编排、生成、验证、交付能力，差异只在触发输入与调度方式。因此按场景分阶段交付，每阶段以一条可独立验证的能力收口：
+
+| 阶段 | 范围 | 完成判据 |
+|------|------|---------|
+| 一 | 场景一：新增应用镜像 | 创建带 `new-image` 标签的 Issue 后，无人工介入即产出通过全部门禁、双架构构建与测试均有证据的 PR |
+| 二 | 场景二：应用版本更新 | 上游发布新版本后自动产出 PR，新版本目录完整继承既有版本的附属文件 |
+| 三 | 场景三：openEuler 大版本升级 | 批量补齐缺失的 oe 版本，成功项汇总为批量 PR、失败项汇总为 Issue |
+
+**写入目标的分级。** 阶段一的写入目标限定为测试仓，生产仓需显式配置开启。配置缺失、为空或错误时一律解析为测试仓，任何情况下都不得回退到生产仓——自动化对目标仓持有 push 权限，误写的代价由社区承担。
 
 ---
 
@@ -132,39 +144,54 @@ openeuler-docker-images/
 
 ### 2.3 doc/image-info.yml
 
-目标仓库当前的 `doc/image-info.yml` 包含 `name`、`category`、`description`、`environment`、`tags`、`download`、`usage`、`license`、`similar_packages`、`dependency` 等字段，**不含版本监控配置**。
-
-easysoftware 通过应用名直接查询 `projectsInfoUrl`（`projectsInfoUrl + appName`），anitya 内部以项目名作为查找 key。因此无需引入 `project_id`——应用名即是监控查找的天然键。
-
-新增 `upstream` 字段用于声明上游信息。对已有应用可选（anitya 已注册），对新应用必填（Creator Agent 需要这些字段在 anitya 中注册项目）：
+包含两类内容：软件中心的展示字段（`name`、`category`、`description`、`environment`、`tags`、`download`、`usage`、`license`、`similar_packages`、`dependency`），以及版本监控配置（`upstream` 块与顶层 `homepage`）。
 
 ```yaml
-# ... 已有字段 (name, category, description, 等) ...
-
-upstream:                    # 版本监控信息
-  backend: GitHub            # anitya backend: GitHub / PyPI / npm / Rubygems / CPAN / custom
-  homepage: https://github.com/apache/spark
+name: mariadb
+category: database
+# ... 展示字段 ...
+upstream:
+  version_url: MariaDB/server                  # 上游项目标识，非完整 URL
+  version_prefix: mariadb-                     # 上游 tag 的版本前缀，剥离后为版本号
+  backend: GitHub                              # anitya backend
+  version_scheme: RPM                          # 版本比较方案
+  version_filter: alpha;rc;candidate;beta;pre  # 预发布过滤
+homepage: https://github.com/MariaDB/server
 ```
 
-**`upstream` 字段说明：**
+`homepage` 与 `upstream` **平级**，不在 `upstream` 内部。
 
 | 字段 | 必填 | 说明 |
 |------|------|------|
-| `backend` | 新应用必填 | 版本获取后端：`GitHub`、`PyPI`、`npm`、`Rubygems`、`CPAN`、`custom`。对应 anitya `Project.backend` |
-| `homepage` | 新应用必填 | 上游项目主页 URL。Creator Agent 可从 Issue 的 `source_repo_url` 推导 |
+| `upstream.version_url` | 是 | 上游项目标识，GitHub backend 下形如 `owner/repo` |
+| `upstream.backend` | 是 | `GitHub` / `PyPI` / `npm` / `Rubygems` / `CPAN` 等，对应 anitya `Project.backend` |
+| `upstream.version_scheme` | 是 | 版本比较方案，如 `RPM` |
+| `upstream.version_filter` | 是 | 预发布过滤，惯例值 `alpha;rc;candidate;beta;pre` |
+| `upstream.version_prefix` | 上游 tag 带前缀时必填 | 如 `mariadb-` |
+| `upstream.regex` | 否 | 上述字段无法表达时，用正则自定义版本抽取 |
+| `homepage` | 是 | 上游主页 URL |
 
-**版本查找逻辑：** 系统以 `doc/image-info.yml` 的 `name` 字段作为 key 查询 `projectsInfoUrl`。如果 anitya 中该项目不存在（新应用），Creator Agent 用 `upstream` 中的 `backend` 和 `homepage` 在 anitya 中注册项目，注册后即可通过 name 查询版本。
+生成器**读时宽容**（缺失字段不阻断）、**写时严格**（按上表产出，字段顺序固定）。
+
+**版本查找逻辑：** 以 `name` 字段为 key 查询 `projectsInfoUrl`。anitya 内部以项目名作为查找 key，因此无需引入 `project_id`——应用名即是监控查找的天然键。项目在 anitya 中不存在时（新应用），用 `backend` 与 `version_url` 完成注册。
 
 ### 2.4 meta.yml
 
+`path` 为 **MDU 相对路径**（相对 `meta.yml` 所在目录），不带应用名前缀：
+
 ```yaml
+# Bigdata/kylin/meta.yml
 # Tag: <app-ver>-oe<oe-ver-short>
-3.3.1-oe2203lts:
-  path: spark/3.3.1/22.03-lts/Dockerfile
-3.3.2-oe2203lts:
-  path: spark/3.3.2/22.03-lts/Dockerfile
+5.0.2-oe2403sp1:
+  path: 5.0.2/24.03-lts-sp1/Dockerfile
   arch: aarch64          # 可选；省略 = 双架构
+5.0.3-oe2403sp4:
+  path: 5.0.3/24.03-lts-sp4/Dockerfile
 ```
+
+目标仓存量数据中另有两种少数写法：仓库根相对（`Database/redis/8.0.2/...`）与带前导斜杠（`/7.4.1/...`）。解析器按 MDU 相对 → 仓库根相对 → 去前导斜杠依次尝试，生成一律产出 MDU 相对。
+
+`meta.yml` 校验只针对本次变更的 MDU；范围外的存量问题记为 warning，不阻断本次变更。
 
 ### 2.5 Dockerfile 规范
 
@@ -314,7 +341,7 @@ anitya 检测到上游新版本
 | | Testcase Creator（生成者） | Testcase QA（挑战者） |
 |------|------|------|
 | 职责 | 独立编写功能测试用例 | 审查测试用例质量，挑战其充分性与有效性 |
-| 输入 | package_name, version, dockerfile_path, binary_name, category（不读 Creator 推理链） | Testcase Creator 的全部输出：goss.yaml、goss_wait.yaml、test.sh |
+| 输入 | package_name, version, dockerfile_path, binary_name, category（不读 Creator 推理链） | Testcase Creator 的全部输出：test.sh、可选 helper 和结构化证据 |
 | 输出 | tests/ 目录 + test-ai-result.json | 审查报告（覆盖缺口 + 误报风险 + 遗漏的攻击面） |
 | 对抗方式 | 根据 QA 反馈补充测试用例 | 从以下角度挑战：是否覆盖所有攻击面（依赖、端口、权限、启动、边界）？是否有误报风险？是否遗漏关键功能验证？ |
 | 禁止 | 读取 Creator 推理链 | 直接修改文件 |
@@ -324,7 +351,7 @@ anitya 检测到上游新版本
 | 属性 | 说明 |
 |------|------|
 | 职责 | 本地验证失败后介入：分析日志、诊断根因、实施最小化修复 |
-| 修复对象 | Dockerfile、meta.yml、README.md、doc/image-info.yml、goss.yaml、test.sh |
+| 修复对象 | Dockerfile、meta.yml、README.md、doc/image-info.yml、test.sh 和可选 helper |
 | 输入 | 构建日志、测试输出、PR 文件清单（白名单）、fix_branch、故障模式知识库 |
 | 输出 | 代码/文档变更 + 修复摘要（含根因分析） |
 | 禁止 | 创建新文件、修改白名单外文件、禁用 lint 规则、删除测试 |
@@ -371,8 +398,22 @@ Testcase QA 不认可不代表阻塞——复核的任务是尽可能提高测�
 第 2 次本地验证失败 → Fixer 分析 + 修复 → 重新验证
 第 3 次本地验证失败 → 标记 needs-human-review，附完整诊断记录
 ```
-- Fixer 参考 `docs/failure-patterns.md` 历史故障模式
+- Fixer 只接收 `docs/failure-patterns.yml` 中与本轮证据匹配的 verified 通用模式
 - 日志不足时标注 "insufficient evidence"，不得猜测
+
+### 4.3.1 证据所有权与生成期门禁
+
+以下契约在数据结构和 legacy 入口上与场景无关，差异只体现在
+`TaskSpec.scenario`。当前生产接线只完成阶段一；场景二、三的旧 workflow 尚未准备目标仓
+工作区和完整 TaskSpec，不得把接口兼容性表述为流水线已经接通。
+
+1. Creator 直接提交结构化 `evidence`，并在 `command_evidence` 中通过 evidence ID 引用；Creator 提供的 URL 和摘录只构成待固定的输入，不等于已经验证。
+2. Harness 仅从受支持的官方代码托管域解析证据；证据 URL 必须与 TaskSpec 同仓且 ref 精确等于固定 revision。Harness 固定原文件、摘录和 SHA-256，并把结果交给 QA。证据不可用不阻断，不单独触发 Creator 修复。
+3. QA 始终收到最后一次 Creator 完整结构化输出和对应的 Harness resolved evidence bundle。第二轮仍为 `needs_fix` 时记录分歧并进入本地验证，不把模型意见升级为工作流 veto。
+4. 生成期门禁确定性检查 `test.sh` 的存在性、可执行位、Bash 语法和修改范围，并拒绝候选引入目标仓等待、mode 或 Agent 控制文件；真实运行断言统一由 Native Validation 的 `runtime_test` 执行。
+5. Native Fixer 修改候选后不插入另一套测试预检查；下一轮完整 Native Validation 会重新执行同一个 `runtime_test`，并由既有 Fixer 循环处理失败。
+
+Agent Markdown 只保存长期稳定的角色规则。单次日志和应用特例放在运行证据中；可复用根因经验证和泛化后写入结构化知识库，禁止把截断 PR 摘要或未经验证的猜测追加到角色提示。
 
 ### 4.4 置信度评分
 
@@ -402,8 +443,8 @@ Testcase QA 不认可不代表阻塞——复核的任务是尽可能提高测�
 ### 5.2 测试分层
 
 ```
-第 3 层：运行时测试 (Goss/dgoss)
-  · 端口监听  · 进程运行  · HTTP 端点  · 文件内容断言
+第 3 层：运行时测试 (Harness + test.sh)
+  · 容器生命周期与就绪调度  · 版本验证  · 真实协议或核心数据路径
 
 第 2 层：静态分析 (Hadolint + Dockle)
   · Dockerfile 最佳实践  · 镜像标签合规
@@ -411,6 +452,8 @@ Testcase QA 不认可不代表阻塞——复核的任务是尽可能提高测�
 第 1 层：预构建检查
   · meta.yml schema  · "只能新增" 差分检查
 ```
+
+场景一的 Native Validation 只保留 `native_build/runtime_test`。Harness 在最长 120 秒内观察默认容器终止事件；镜像有有效 `HEALTHCHECK` 时等待 `healthy`，没有时完整观察 120 秒。随后按容器是否仍在运行选择原容器或同一 image ID 的一次性测试容器，并且一次验证只执行一次共享 `test.sh`。`EXPOSE` 端口不参与就绪调度，最终由脚本中的真实功能断言和 Harness 的 post-inspect 共同裁决。
 
 > openEuler 目前不支持 Trivy CVE 扫描，未纳入测试流水线。
 
@@ -429,19 +472,17 @@ openeuler-docker-images/
 │       ├── doc/
 │       │   └── image-info.yml
 │       ├── tests/                         # 应用级共享测试用例
-│       │   ├── goss.yaml                  # 运行时断言
-│       │   ├── goss_wait.yaml             # 就绪等待条件
-│       │   └── test_helpers.sh            # 辅助函数
+│       │   ├── test_helpers.sh            # 可选辅助函数
+│       │   └── test.sh                    # 唯一功能测试入口
 │       ├── results/                       # 测试结果归档
 │       │   └── 5.0.3/                     # 按应用版本归档
 │       │       └── 24.03-lts-sp4/         # 按 oe 版本归档
 │       │           ├── x86_64.junit.xml   # x86_64 测试结果
 │       │           ├── aarch64.junit.xml  # ARM64 测试结果
-│       │           └── build.log          # 构建日志
+│       │           └── version_info.json  # 运行环境摘要
 │       └── 5.0.3/                         # 应用版本
 │           └── 24.03-lts-sp4/             # oe 版本
-│               ├── Dockerfile
-│               └── test.sh                # CI 入口（调用 tests/ 下的共享用例）
+│               └── Dockerfile
 └── tests/                                 # 废弃（不再使用）
 ```
 
@@ -451,9 +492,28 @@ openeuler-docker-images/
 |------|------|
 | 测试用例放在 `<app>/tests/` | 与 Dockerfile 同目录，应用级共享，所有版本复用 |
 | 测试结果放在 `<app>/results/` | 按 `<app-ver>/<oe-ver>/` 双层归档，与 Dockerfile 路径一一对应 |
-| 每个 Dockerfile 同级有 `test.sh` | 轻量入口，负责调用 `tests/` 下的共享用例，传入版本参数 |
+| `<app>/tests/test.sh` 是唯一入口 | Harness 向共享测试注入当前版本并在已启动容器内执行 |
 | 结果按架构独立存储 | `x86_64.junit.xml` 和 `aarch64.junit.xml`，一一对应，一个架构通过不代表另一个 |
 | 不修改顶层 `tests/` 目录 | 已有内容保留不动，新应用不再使用顶层目录 |
+
+**共享用例的版本参数化。** 用例在应用级共享，而断言中的版本号随版本变化，因此 `<app>/tests/` 下的断言必须支持 Harness 通过环境变量注入当前版本。版本号一旦硬编码进共享用例，该用例就退化为"每版本独有"，与共享结论矛盾。
+
+**共享用例的修改。** 修改 `<app>/tests/` 会影响该应用的所有历史版本，因此允许修改，但 PR 正文必须声明受影响的版本范围。
+
+**结果归档内容。**
+
+```
+<app>/results/<app-ver>/<oe-ver>/
+├── x86_64.junit.xml      # 双架构独立
+├── aarch64.junit.xml
+└── version_info.json     # 运行环境：test_time / Model / architecture / kernel / os /
+                          #   cpu_model / cpu_cores / software_name / software_version /
+                          #   python_version / numpy_version
+```
+
+字段沿用目标仓 `tests/` 下既有的归档格式。schema v1 的聚合 `results.json` 和完整构建日志只进入生产 candidate/artifact，不写入目标仓，避免内部证据扩大目标 patch 或让仓库体积随构建次数增长。
+
+**`results/` 只增不改。** 同一 `(app-ver, oe-ver)` 组合的结果一经写入不得覆盖。重复触发由幂等检查（§2.6）在构建前短路，不进入构建与归档环节。
 
 **与当前仓库的对比：**
 
@@ -523,6 +583,17 @@ Phase 2: Manifest 合并
 - `push-by-digest=true` — 按 digest 推送，不直接打 tag
 - 每架构独立 `type=registry` cache scope，避免并行碰撞
 
+**Runner 前提。** Runner 预装 Docker 与 buildx，workflow 不引入 `docker/setup-qemu-action` 与 `docker/setup-buildx-action`。前者的跨架构模拟会掩盖架构差异——包在某架构不可用、二进制不兼容这类问题在模拟环境下不会暴露，而它们正是双架构验证要发现的目标，用模拟构建做架构验证等于没做；后者在预装环境下冗余，且会让实际生效的构建栈变得不可观测。
+
+替代手段是 Job 启动时的能力自检：校验 Docker daemon、buildx、Hadolint、磁盘水位与工作区可写，任一不满足即失败退出并给出可操作提示，**不做临时安装**。某架构 Runner 不可用时明确失败；需要发布单架构镜像时通过 `meta.yml` 的 `arch` 字段声明。
+
+**并发隔离。** 同一 Runner 上会有并发 Job，镜像 tag 与容器名必须携带唯一标识，否则并发 Job 之间会互相覆盖镜像、互相删除容器：
+
+- 镜像 tag：`openeuler/<app>:ci-<run-id>-<run-attempt>-<arch>`
+- 容器名：`oe-<app>-<run-id>-<arch>`
+
+Job 收尾（含失败路径）只清理本 Job 创建的资源。
+
 ### 6.3 多阶段 Dockerfile
 
 ```dockerfile
@@ -556,7 +627,7 @@ anitya 检测到上游新版本
   → webhook 触发 version-update workflow
     → 读取 doc/image-info.yml 的 name 字段
       → 调 projectsInfoUrl + name 获取版本对比详情（app_up vs app_openeuler）
-        → 确认需要更新 → 启动 Creator 对抗对 → 构建验证 → 提 PR
+        → 确认需要更新 → 镜像生成与门禁 → 测试用例对抗复核 → 构建验证 → 提 PR
 ```
 
 应用名即是 anitya 中的项目查找 key（与 easysoftware 的 `projectsInfoUrl + appName` 一致）。新应用创建时若 anitya 中不存在，Creator Agent 用 `upstream` 中的 `backend` 和 `homepage` 完成注册。
@@ -654,6 +725,34 @@ QA 审查角度：攻击面覆盖 ✓、误报风险 ✓、关键功能验证 �
 - Testcase Creator + Testcase QA（最多 2 轮）
 ```
 
+### 8.3 分支与 PR 提交方式
+
+**PR 与 Issue 始终提交到目标仓**，不因阶段而变。变的只有分支推到哪——取决于运行账号是否具备目标仓写权限。
+
+```
+clone   目标仓 master                     # 匿名，无需凭据
+push    $PUSH_REPO:auto/<scenario>/<app>/<app-ver>-<oe-ver>
+PR      head = <branch>          （$PUSH_REPO == 目标仓）
+        head = <owner>:<branch>  （$PUSH_REPO != 目标仓，跨仓形式）
+        base = master
+Issue   创建在目标仓
+```
+
+`PUSH_REPO` 是唯一的配置变量，其余全部派生：
+
+| | 无目标仓写权限 | 有目标仓写权限 |
+|---|---|---|
+| `PUSH_REPO` | 运行账号名下的目标仓 fork | 目标仓本身 |
+| PR 形态 | 跨仓（head 带 owner 前缀） | 同仓 |
+| 凭据要求 | 对自己的 fork 可写；在公开仓开 PR/Issue 只需认证，不需目标仓权限 | 对目标仓可写 |
+| 附加要求 | 运行前将 fork 的 `master` 同步到目标仓 | 无 |
+
+**fork 基线同步**（仅前一种形态需要）：fork 与目标仓一旦分叉，PR 的差异视图会掺入无关提交。同步失败即终止，不使用过期基线继续执行。
+
+**分支命名**为 `auto/<scenario>/<app>/<app-ver>-<oe-ver>`，不含时间戳或随机串。同一目标重跑复用同一分支名，配合 PR 去重构成幂等——命名中一旦引入时间戳，每次运行都会产生新分支，失败的运行会持续沉积。流程失败或 PR 创建失败时删除已推分支。
+
+**分级执行。** PR 创建是不可逆的外部动作，因此拆成两段：默认执行到"分支已推、PR 未建"为止并输出 PR 正文供检查，建 PR 由独立开关控制。调试构建、测试、门禁等环节时不会在目标仓产生 PR。
+
 ---
 
 ## 9. 技术选型
@@ -667,10 +766,12 @@ QA 审查角度：攻击面覆盖 ✓、误报风险 ✓、关键功能验证 �
 | 确定性代码 | Python 3 | 主流程编排 + API 封装 |
 | Agent 运行时 | Claude Agent SDK | 不确定性决策 |
 | 容器构建 | Docker BuildKit + buildx | 多架构原生构建 |
-| 测试框架 | Goss/dgoss + shUnit2 | 声明式运行时验证 |
+| 测试框架 | 确定性 Harness + Bash `test.sh` | 生命周期调度与真实功能验证 |
 | Lint | Hadolint + Dockle | Dockerfile + 镜像检查 |
-| Git 平台 | GitCode（主） | 基于 Gitea `/api/v5`，认证用 `PRIVATE-TOKEN` 头（非 GitHub API v3） |
+| Git 平台 | GitCode（主） | GitLab 风格 API（`/api/v5`），同时提供 GitHub 兼容别名；认证用 `PRIVATE-TOKEN` 头 |
 | 版本监控 | anitya（通过 `projectsInfoUrl` 查询） | 上游版本跟踪全部委托给 anitya，系统响应 webhook |
+
+**GitCode API 客户端约定。** 响应同时携带 GitLab 与 GitHub 两套字段名（如 `iid` / `number`、`web_url` / `html_url`），客户端读取时须做别名兜底，不假设任一风味；列表类接口返回 JSON 数组而非对象；PR 的 Web 地址形如 `/merge_requests/<id>`。
 
 ### 9.2 关键约束
 
@@ -680,7 +781,9 @@ QA 审查角度：攻击面覆盖 ✓、误报风险 ✓、关键功能验证 �
 | GitCode API 50 req/min | 合并请求 + 指数退避重试 |
 | anitya webhook 因故漏触发 | `workflow_dispatch` 手动兜底 + idempotency gate |
 | Self-hosted Runner 数量有限 | Matrix 限流 + 队列管理 |
+| 版本监控与 OS 版本端点随部署环境变化 | 端点地址与鉴权作为部署配置注入；启动时做连通性自检，不可达即明确失败，不静默返回空结果 |
 | 只能新增不能修改 | meta.yml 索引 + 本地差分检查 |
+| 运行账号未必具备目标仓写权限 | `PUSH_REPO` 单一配置项切换直推 / fork 跨仓两种形态，其余派生（见 8.3 节） |
 
 ---
 
@@ -693,7 +796,7 @@ QA 审查角度：攻击面覆盖 ✓、误报风险 ✓、关键功能验证 �
 | 批量 oe 升级时资源耗尽 | 中 | Matrix 限流 + fail-fast: false |
 | Agent 幻觉生成错误元数据 | 中 | CI schema 验证 + Testcase Creator 独立检查 |
 | 双架构构建结果不一致 | 低 | 每架构独立测试，全部通过才合并 manifest |
-| 知识库过时 | 低 | Fixer 成功修复后自动回写 |
+| 知识库过时 | 低 | 历史案例先进入候选区，核对日志、diff 与适用条件后再人工提升为 verified 模式 |
 
 ---
 
@@ -717,29 +820,32 @@ openeuler-docker-images-workflow/
 │       └── code-fixer.md              # Fixer（修复者，内置故障分析）
 ├── scripts/
 │   ├── harness/
+│   │   ├── flow.py                    # 阶段一确定性编排入口
+│   │   ├── run.py                     # 场景二、三 legacy Agent/test 入口
 │   │   ├── parse_issue.py             # Issue 解析
-│   │   ├── query_version.py           # 调 projectsInfoUrl 获取版本对比
-│   │   ├── validate_meta.py           # meta.yml schema 验证
+│   │   ├── query_version.py           # 版本对比查询
+│   │   ├── validate_meta.py           # meta.yml schema 校验
 │   │   ├── gate_diff.py               # "只能新增" 差分检查
-│   │   ├── compose_pr.py              # PR 内容组装
-│   │   └── run.py                     # 主编排入口
+│   │   └── compose_pr.py              # PR 内容组装
+│   ├── lib/
+│   │   ├── generation_pipeline.py     # Creator/QA 生成期流水线
+│   │   ├── agent_runtime.py           # Agent 进程与结构化契约
+│   │   ├── evidence_resolver.py       # Harness 受限取证
+│   │   ├── target_contract.py         # 候选目录确定性门禁
+│   │   ├── native_validation.py       # 原生构建、就绪调度、功能测试
+│   │   ├── native_repair.py           # Native Fixer 收敛循环
+│   │   ├── task_spec.py               # 场景无关任务契约
+│   │   └── failure_knowledge.py       # verified 结构化故障知识
 │   └── utils/
-│       ├── gitcode.py                 # GitCode API 封装
-│       ├── scoring.py                 # 置信度计算
-│       └── artifacts.py               # 测试结果归档
+│       └── scoring.py                 # 置信度计算
 ├── docs/
-│   ├── DESIGN.md                      # 本文档
-│   └── failure-patterns.md            # 故障模式知识库
+│   ├── failure-patterns.yml           # verified 结构化故障模式
+│   └── failure-patterns.md            # 知识库维护策略
 ├── templates/
 │   ├── new-image-issue.md             # Issue 模板
-│   ├── pr.md                          # PR 模板
-│   └── test/
-│       ├── goss.yaml.j2
-│       └── test.sh.j2
-├── tests/
-│   ├── test_parse_issue.py
-│   ├── test_gate_diff.py
-│   └── test_validate_meta.py
+│   └── pr.md                          # PR 模板
+├── tests/                             # 本仓单元测试
+├── DESIGN.md
 ├── README.md
 └── REQUIREMENTS.md                     # openeuler-images-requirements.md
 ```

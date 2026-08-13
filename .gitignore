@@ -2,3 +2,6 @@
 # Python bytecode cache
 __pycache__/
 *.pyc
+
+docs/analysis
+docs/runbooks

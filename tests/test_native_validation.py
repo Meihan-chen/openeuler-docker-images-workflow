@@ -1154,10 +1154,19 @@ def test_native_build_failure_keeps_both_ends_of_long_output(tmp_path):
     )
 
     first_error = "CMake Error: could not find libstdc++.a"
+    middle_error = "fatal error: curl/curl.h: No such file or directory"
     root_cause = "groupadd: GID '999' already exists"
     runner = RuntimeStateRunner(
         fail_build=True,
-        failure_text=first_error + "\n" + ("package progress\n" * 500) + root_cause,
+        failure_text=(
+            first_error
+            + "\n"
+            + ("package progress\n" * 300)
+            + middle_error
+            + "\n"
+            + ("compile progress\n" * 300)
+            + root_cause
+        ),
     )
     report_path = tmp_path / "reports/x86_64.json"
 
@@ -1175,7 +1184,17 @@ def test_native_build_failure_keeps_both_ends_of_long_output(tmp_path):
     details = json.loads(report_path.read_text())["failure_details"]
     assert first_error in details["stdout_head"]
     assert root_cause in details["stdout_tail"]
+    assert middle_error not in details["stdout_head"]
+    assert middle_error not in details["stdout_tail"]
     assert details["returncode"] == 1
+    assert details["full_log"] == {
+        "path": "diagnostics/native_build.buildx.log",
+        "size_bytes": len(runner.failure_text.encode()),
+        "capture_status": "failed",
+    }
+    build_log = report_path.parent / details["full_log"]["path"]
+    assert build_log.read_text() == runner.failure_text
+    assert middle_error in build_log.read_text()
 
 
 def test_format_failure_is_recorded_after_runtime_validation_runs(tmp_path):

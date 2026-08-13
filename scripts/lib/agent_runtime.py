@@ -649,7 +649,7 @@ def run_agent(
     required_keys: tuple[str, ...],
     response_keys: tuple[str, ...] | None = None,
     runner: AgentRunner = _default_runner,
-    timeout: int = 1800,
+    timeout: int = 3600,
     external_read_dirs: Sequence[Path] = (),
 ) -> AgentResult:
     executable = Path(executable)

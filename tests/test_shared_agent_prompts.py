@@ -85,24 +85,44 @@ def test_image_creator_bounds_optional_release_artifact_research():
     assert "最低成本手段" in image_creator
 
 
-def test_image_creator_limits_docker_to_read_only_base_image_probes():
-    """Native validation, not Creator research, owns application builds."""
+def test_image_creator_checks_risky_upstream_build_option_overrides():
+    """Option overrides need bounded source review, not blanket preservation."""
+    rule = next(
+        line
+        for line in (AGENTS_DIR / "image-creator.md").read_text().splitlines()
+        if line.startswith("- **上游默认构建选项**")
+    )
+
+    assert "显式偏离固定版本上游的默认构建选项" in rule
+    assert "有界检查" in rule
+    assert "构建目标、源码、依赖或搜索路径" in rule
+    assert "bundled/internal dependency" in rule
+    assert "不得仅因发行版缺少同名外部包" in rule
+    assert "据此作出的候选决策" in rule
+    assert "继续生成候选" in rule
+    assert "不要求证明完整依赖闭包" in rule
+    for downstream in ("Harness", "门禁", "原生构建", "功能测试"):
+        assert downstream not in rule
+
+
+def test_image_creator_does_not_force_research_to_read_only_base_probes():
+    """Creator research must retain the freedom restored from bb22add."""
     image_creator = " ".join(
         (AGENTS_DIR / "image-creator.md").read_text().split()
     )
 
-    assert "Docker 仅用于基础镜像的轻量只读查询" in image_creator
-    assert "禁止在 `docker run` 中构建目标应用" in image_creator
+    assert "Docker 仅用于基础镜像的轻量只读查询" not in image_creator
+    assert "禁止在 `docker run` 中构建目标应用" not in image_creator
 
 
-def test_image_creator_writes_candidate_before_deferring_uncertainty():
-    """An uncertain build fact must not postpone the first candidate."""
+def test_image_creator_does_not_force_candidate_before_research_finishes():
+    """Creator decides when its evidence is sufficient to write the candidate."""
     image_creator = " ".join(
         (AGENTS_DIR / "image-creator.md").read_text().split()
     )
 
-    assert "立即创建最小完整候选" in image_creator
-    assert "由后续 `native_build` 和 `runtime_test` 验证" in image_creator
+    assert "立即创建最小完整候选" not in image_creator
+    assert "由后续 `native_build` 和 `runtime_test` 验证" not in image_creator
 
 
 def test_image_creator_has_no_image_qa_evidence_contract():
@@ -112,7 +132,7 @@ def test_image_creator_has_no_image_qa_evidence_contract():
     assert '"evidence"' not in image_creator
     assert "禁止固定数字身份" in image_creator
     assert "mode: fixed" not in image_creator
-    assert "单次研究网络操作最多 180 秒" in image_creator
+    assert "单次研究网络操作最多 360 秒" in image_creator
     assert "不得加大超时反复重试" in image_creator
     assert "完整下载和校验交给后续原生构建" in image_creator
     assert "docker run --rm <基础镜像>" in image_creator
@@ -120,6 +140,13 @@ def test_image_creator_has_no_image_qa_evidence_contract():
     assert "只获取到足以回答当前问题的程度" in image_creator
     assert "同一产物整轮只下载一次" in image_creator
     assert "不要靠加大下载量换取确定性" in image_creator
+
+
+def test_fixer_reads_the_complete_native_build_log_before_head_and_tail():
+    fixer = (AGENTS_DIR / "code-fixer.md").read_text()
+
+    assert "native_build.buildx.log" in fixer
+    assert "full_evidence" in fixer
 
 
 def test_image_creator_defines_the_existing_root_identity_contract():

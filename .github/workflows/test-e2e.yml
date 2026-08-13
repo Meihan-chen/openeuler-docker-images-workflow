@@ -34,7 +34,7 @@ env:
 jobs:
   check-env:
     name: Check environment and run unit tests
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, oe-image-x86]
     steps:
       - name: Check out workflow source
         uses: actions/checkout@v4
@@ -74,7 +74,7 @@ jobs:
   test-deterministic:
     name: Run deterministic pipeline steps
     needs: check-env
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, oe-image-x86]
     steps:
       - name: Check out workflow source
         uses: actions/checkout@v4
@@ -119,7 +119,7 @@ jobs:
   test-agent:
     name: Run agent generation
     needs: test-deterministic
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, oe-image-x86]
     env:
       ANTHROPIC_BASE_URL: https://api.deepseek.com/anthropic
       ANTHROPIC_AUTH_TOKEN: ${{ secrets.DEEPSEEK_API_KEY }}
@@ -151,7 +151,7 @@ jobs:
   test-build:
     name: Build generated Dockerfile
     needs: test-agent
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, oe-image-x86]
     if: always() && !failure()
     steps:
       - name: Check out workflow source

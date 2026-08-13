@@ -54,6 +54,10 @@ def test_issue_contract_handler_is_fixed_to_explicit_test_operation(
         argparse.Namespace(
             task_spec=_task_file(tmp_path),
             github_run_id="123456",
+            github_run_url=(
+                "https://github.com/opensourceways/"
+                "openeuler-docker-autopilot/actions/runs/123456"
+            ),
             failure_stage="aarch64-build",
         )
     )
@@ -65,6 +69,10 @@ def test_issue_contract_handler_is_fixed_to_explicit_test_operation(
     assert probe["environment"] == "test"
     assert probe["operation"] == "failure_issue_contract_test"
     assert probe["github_run_id"] == "123456"
+    assert probe["github_run_url"] == (
+        "https://github.com/opensourceways/"
+        "openeuler-docker-autopilot/actions/runs/123456"
+    )
     assert json.loads(capsys.readouterr().out) == {
         "number": 19,
         "state": "closed",
@@ -96,6 +104,7 @@ def test_issue_contract_handler_requires_token_before_client_or_probe(
             argparse.Namespace(
                 task_spec=_task_file(tmp_path),
                 github_run_id="123456",
+                github_run_url="https://github.com/example/repo/actions/runs/123456",
                 failure_stage="aarch64-build",
             )
         )

@@ -220,6 +220,7 @@ def _issue_contract_test(args: argparse.Namespace) -> None:
         environment="test",
         operation="failure_issue_contract_test",
         github_run_id=args.github_run_id,
+        github_run_url=args.github_run_url,
         failure_stage=args.failure_stage,
     )
     _print_json(
@@ -657,8 +658,8 @@ def _add_delivery_commands(commands: argparse._SubParsersAction) -> None:
     fork.add_argument("--source-issue-number", type=int)
     fork.add_argument(
         "--gitcode-username",
-        default="qq_42020325",
-        help="GitCode bot username (default: qq_42020325)",
+        required=True,
+        help="GitCode bot username",
     )
     fork.set_defaults(handler=_fork_deliver)
 
@@ -672,6 +673,7 @@ def _add_delivery_commands(commands: argparse._SubParsersAction) -> None:
     )
     issue_probe.add_argument("--task-spec", required=True, type=Path)
     issue_probe.add_argument("--github-run-id", required=True)
+    issue_probe.add_argument("--github-run-url", required=True)
     issue_probe.add_argument("--failure-stage", required=True)
     issue_probe.set_defaults(handler=_issue_contract_test)
 

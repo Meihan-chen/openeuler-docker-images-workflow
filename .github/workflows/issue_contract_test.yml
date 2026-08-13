@@ -79,9 +79,12 @@ jobs:
       - name: Create, update, comment and close controlled Issue
         env:
           GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+          GITHUB_RUN_URL: >-
+            ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           "${RUNNER_TEMP}/phase1-venv/bin/python" scripts/harness/flow.py \
             issue-contract-test \
             --task-spec "${RUNNER_TEMP}/issue-task.json" \
             --github-run-id "${{ github.run_id }}" \
+            --github-run-url "${GITHUB_RUN_URL}" \
             --failure-stage controlled-contract

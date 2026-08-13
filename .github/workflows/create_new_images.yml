@@ -104,7 +104,7 @@ jobs:
     runs-on: [self-hosted, Linux, X64, oe-image-x86]
     # Leaves headroom around the bounded Creator/QA calls for deterministic
     # gates, report writing and candidate packaging.
-    timeout-minutes: 360
+    timeout-minutes: 720
     outputs:
       base_sha: ${{ steps.base.outputs.sha }}
     steps:
@@ -905,9 +905,14 @@ jobs:
         id: delivery
         env:
           GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+          GITCODE_USERNAME: ${{ vars.GITCODE_BOT_USERNAME }}
           SOURCE_RUN_ID: ${{ inputs.source_run_id }}
         run: |
           set -o pipefail
+          if [ -z "${GITCODE_USERNAME}" ]; then
+            echo "GITCODE_BOT_USERNAME repository variable is required" >&2
+            exit 2
+          fi
           source_issue_args=()
           case "${SOURCE_RUN_ID}" in
             issue:*)
@@ -929,7 +934,7 @@ jobs:
             --workspace \
               "${RUNNER_TEMP}/promotion-${{ github.run_id }}-${{ github.run_attempt }}" \
             "${source_issue_args[@]}" \
-            --gitcode-username qq_42020325 | tee "${result_file}"
+            --gitcode-username "${GITCODE_USERNAME}" | tee "${result_file}"
           "${RUNNER_TEMP}/phase1-venv/bin/python" - "${result_file}" \
             >> "${GITHUB_OUTPUT}" <<'PY'
           import json
@@ -965,7 +970,7 @@ jobs:
       - release-x86-builders
       - release-arm-builders
       - deliver-fork-pr
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, oe-image-x86]
     timeout-minutes: 10
     steps:
       - name: Check out workflow source

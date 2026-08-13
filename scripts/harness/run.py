@@ -13,7 +13,7 @@ Usage:
 Environment:
     TARGET_REPO_DIR   - absolute path to the cloned target repo (agent cwd)
     OPENCODE_MODEL    - legacy command model override
-    OPENCODE_TIMEOUT  - per-call timeout seconds (default 2400)
+    OPENCODE_TIMEOUT  - per-call timeout seconds (default 4800)
 """
 
 import argparse
@@ -48,8 +48,8 @@ from scripts.lib.failure_knowledge import (  # noqa: E402
 from scripts.lib.task_spec import TaskSpec, TaskSpecError  # noqa: E402
 
 OPENCODE_MODEL = os.environ.get("OPENCODE_MODEL", MODEL)
-OPENCODE_TIMEOUT = int(os.environ.get("OPENCODE_TIMEOUT", "2400"))
-OPENCODE_STALE_SECONDS = 300
+OPENCODE_TIMEOUT = int(os.environ.get("OPENCODE_TIMEOUT", "4800"))
+OPENCODE_STALE_SECONDS = 600
 MAX_QA_ROUNDS = 2
 _CREATOR_REQUIRED_KEYS = {
     "image": (

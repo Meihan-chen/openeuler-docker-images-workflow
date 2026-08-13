@@ -75,7 +75,13 @@ def test_phase1_is_manual_only_with_explicit_operations():
 
 
 def test_prepare_job_leaves_time_for_the_bounded_adversarial_path():
-    assert _workflow()["jobs"]["prepare"]["timeout-minutes"] == 360
+    assert _workflow()["jobs"]["prepare"]["timeout-minutes"] == 720
+
+
+def test_round_decision_job_outlives_the_two_hour_fixer():
+    jobs = _workflow(ROUND_PATH)["jobs"]
+
+    assert jobs["decide"]["timeout-minutes"] == 360
 
 
 def test_scenario_one_runs_full_validation_chain_and_delivers_same_run():
@@ -198,6 +204,16 @@ def test_issue_trigger_reuses_scenario_one_and_finalizes_the_source_issue():
     assert delivery_step["env"]["SOURCE_RUN_ID"] == (
         "${{ inputs.source_run_id }}"
     )
+    assert delivery_step["env"]["GITCODE_USERNAME"] == (
+        "${{ vars.GITCODE_BOT_USERNAME }}"
+    )
+    assert "GITCODE_BOT_USERNAME repository variable is required" in (
+        delivery_step["run"]
+    )
+    assert '--gitcode-username "${GITCODE_USERNAME}"' in (
+        delivery_step["run"]
+    )
+    assert "--gitcode-username qq_42020325" not in delivery_step["run"]
     assert "--source-issue-number" in delivery_step["run"]
     assert 'case "${SOURCE_RUN_ID}"' in delivery_step["run"]
     assert "case \"${{ inputs.source_run_id }}\"" not in delivery_step["run"]
@@ -302,14 +318,7 @@ def test_round_decision_artifact_is_strict_and_merge_safe():
 
 
 def test_issue_watcher_polls_on_schedule_and_scans_up_to_max_issues():
-    """The watcher fires on its own and claims a bounded scan of new Issues.
-
-    `83173d8` commented the cron out so the watcher could not fire at real
-    GitCode Issues during the testing phase; the P0 autopilot re-enables it.
-    The schedule path ignores the Issue allowlist (no --issue-number), while a
-    manual dispatch keeps the allowlist fail-fast so testers cannot reach real
-    Issues by accident.
-    """
+    """Production schedules scans; both repositories support the same manual run."""
     data = _workflow(WATCH_PATH)
     trigger = _trigger(data)
 
@@ -325,10 +334,23 @@ def test_issue_watcher_polls_on_schedule_and_scans_up_to_max_issues():
 
     job = data["jobs"]["watch"]
     text = _job_text(job)
-    assert job["runs-on"] == "ubuntu-latest"
-    assert "if" not in job
-    assert "github.event_name == 'workflow_dispatch'" in text
-    assert "PHASE1_TEST_ISSUE_NUMBER" in text
+    assert job["runs-on"] == [
+        "self-hosted",
+        "Linux",
+        "X64",
+        "oe-image-x86",
+    ]
+    assert "github.event_name == 'workflow_dispatch'" in job["if"]
+    assert "github.repository_id == '1316941460'" in job["if"]
+    assert "PHASE1_TEST_ISSUE_NUMBER" not in text
+    issue_input = trigger["workflow_dispatch"]["inputs"]["issue_number"]
+    assert issue_input["required"] is False
+    assert "empty scans pending Issues" in issue_input["description"]
+    validation = next(
+        step for step in job["steps"]
+        if step["name"] == "Validate optional Issue number"
+    )
+    assert "inputs.issue_number != ''" in validation["if"]
     assert "issue-watch" in text
     assert "--max-issues" in text
     assert "MAX_ISSUES" in text
@@ -336,7 +358,18 @@ def test_issue_watcher_polls_on_schedule_and_scans_up_to_max_issues():
     assert "GITCODE_TOKEN" in text
     assert "github.token" in text
     assert "DEEPSEEK_API_KEY" not in text
-    assert "self-hosted" not in text
+    assert "oe-image-x86" in text
+
+
+def test_workflows_do_not_use_github_hosted_ubuntu_runners():
+    hosted_runner = "runs-on: ubuntu" + "-latest"
+    offenders = [
+        path.relative_to(ROOT).as_posix()
+        for path in sorted((ROOT / ".github" / "workflows").glob("*.yml"))
+        if hosted_runner in path.read_text()
+    ]
+
+    assert offenders == []
 
 
 def test_phase1_task_defaults_are_the_confirmed_kvrocks_contract():
@@ -812,6 +845,11 @@ def test_issue_probe_is_isolated_and_explicit():
     # Isolation is now structural: it shares no job with the image pipeline.
     assert set(issue_workflow["jobs"]) == {"issue-contract-test"}
     assert "issue-contract-test" in _job_text(issue)
+    assert "--github-run-url" in _job_text(issue)
+    assert "github.server_url" in _job_text(issue)
+    assert "Meihan-chen/openeuler-docker-images-workflow" not in (
+        _job_text(issue)
+    )
     assert "GITCODE_TOKEN" in _job_text(issue)
     assert "issue-contract-test" not in pipeline_text
     assert "GITCODE_TOKEN" in _job_text(_workflow()["jobs"]["deliver-fork-pr"])

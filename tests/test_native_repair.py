@@ -791,7 +791,7 @@ def test_fixer_failure_is_not_replaced_by_evidence_check(tmp_path):
         )
 
 
-def test_dual_architecture_fixer_gets_one_hour_timeout(tmp_path):
+def test_dual_architecture_fixer_gets_two_hour_timeout(tmp_path):
     fixer = Fixer()
 
     _decide(
@@ -803,7 +803,7 @@ def test_dual_architecture_fixer_gets_one_hour_timeout(tmp_path):
         agent_runner=fixer,
     )
 
-    assert fixer.calls[0]["timeout"] == 3600
+    assert fixer.calls[0]["timeout"] == 7200
 
 
 def test_fixer_receives_a_classification_for_every_native_check_failure(

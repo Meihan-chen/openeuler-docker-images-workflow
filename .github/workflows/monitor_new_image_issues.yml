@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       issue_number:
-        description: "Exact GitCode Issue number; defaults to repository variable"
+        description: "Exact GitCode Issue number; empty scans pending Issues"
         required: false
         type: string
       max_issues:
@@ -26,21 +26,25 @@ concurrency:
 jobs:
   watch:
     name: Claim new image requests
-    runs-on: ubuntu-latest
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch' ||
+          github.repository_id == '1316941460' }}
+    runs-on: [self-hosted, Linux, X64, oe-image-x86]
     timeout-minutes: 10
     steps:
       - name: Check out workflow source
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
-      - name: Validate Issue allowlist
-        if: github.event_name == 'workflow_dispatch'
+      - name: Validate optional Issue number
+        if: >-
+          ${{ github.event_name == 'workflow_dispatch' &&
+              inputs.issue_number != '' }}
         env:
-          ISSUE_NUMBER: >-
-            ${{ inputs.issue_number || vars.PHASE1_TEST_ISSUE_NUMBER }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
         run: |
           case "${ISSUE_NUMBER}" in
             ''|*[!0-9]*|0)
-              echo "PHASE1_TEST_ISSUE_NUMBER must be a positive integer" >&2
+              echo "issue_number must be a positive integer" >&2
               exit 2
               ;;
           esac
@@ -49,8 +53,7 @@ jobs:
         env:
           GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
           GITHUB_TOKEN: ${{ github.token }}
-          ISSUE_NUMBER: >-
-            ${{ inputs.issue_number || vars.PHASE1_TEST_ISSUE_NUMBER }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
           MAX_ISSUES: ${{ inputs.max_issues || '3' }}
         run: |
           case "${MAX_ISSUES}" in

@@ -30,6 +30,13 @@ def test_phase_one_has_one_public_cli_without_legacy_delegation():
     assert "phase1-generate" not in run
 
 
+def test_legacy_agent_orchestrator_uses_doubled_liveness_budgets():
+    from scripts.harness import run
+
+    assert run.OPENCODE_TIMEOUT == 4800
+    assert run.OPENCODE_STALE_SECONDS == 600
+
+
 def test_phase_one_candidate_and_delivery_modules_are_consolidated():
     lib = ROOT / "scripts" / "lib"
     candidate = (lib / "candidate_bundle.py").read_text()

@@ -292,6 +292,53 @@ def _run(
     return result
 
 
+def _run_with_full_evidence(
+    runner: CommandRunner,
+    command: Sequence[str],
+    *,
+    cwd: Path,
+    artifact_root: Path,
+    name: str,
+    suffix: str,
+    env: Mapping[str, str] | None = None,
+    timeout: int = 300,
+) -> tuple[subprocess.CompletedProcess, dict[str, object]]:
+    """Run one streamed command and persist its unabridged output for repair."""
+    result = runner(command, cwd, env or {}, timeout)
+    try:
+        metadata = _capture_status(
+            _write_full_evidence(
+                artifact_root=artifact_root,
+                diagnostics_dir=artifact_root / "diagnostics",
+                name=name,
+                suffix=suffix,
+                content=_raw_output(result),
+            ),
+            returncode=result.returncode,
+        )
+    except OSError as error:
+        metadata = {
+            "capture_status": "unavailable",
+            "capture_error": str(error) or error.__class__.__name__,
+        }
+    if result.returncode != 0:
+        output = _merged_output(result) or "command failed"
+        head, tail = _clip(output)
+        omitted = len(output) - len(head) - len(tail)
+        message = head if not tail else f"{head}\n...[{omitted} chars omitted]...\n{tail}"
+        raise NativeValidationError(
+            message,
+            details={
+                "command": list(command),
+                "returncode": result.returncode,
+                "stdout_head": head,
+                "stdout_tail": tail,
+                "full_log": metadata,
+            },
+        )
+    return result, metadata
+
+
 def _probe_script() -> str:
     """Shell that reports what is running and dumps the logs docker never saw.
 
@@ -1168,6 +1215,7 @@ def validate_native_image(
     image = f"oe-autopilot/{task.app}:{task.version}-{run_id}-{slug}"
     validated_patch_sha256 = validated_patch_digest(workspace)
     image_id = ""
+    native_build_evidence: dict[str, object] = {}
     failures: list[dict[str, object]] = []
     container_evidence: dict[str, object] = {}
     runtime_observation: dict[str, object] = {}
@@ -1247,7 +1295,7 @@ def validate_native_image(
         try:
             log(stage, "START build")
             _ensure_builder(runner, builder, cwd=workspace)
-            _run(
+            _, native_build_evidence = _run_with_full_evidence(
                 runner,
                 [
                     "docker",
@@ -1267,6 +1315,9 @@ def validate_native_image(
                     str(image_root),
                 ],
                 cwd=workspace,
+                artifact_root=report_path.parent,
+                name="native_build",
+                suffix="buildx.log",
                 timeout=7200,
             )
             inspected = _run(
@@ -1276,6 +1327,9 @@ def validate_native_image(
             )
             image_id = str(inspected.stdout or "").strip()
         except NativeValidationError as error:
+            full_log = error.details.get("full_log")
+            if isinstance(full_log, Mapping):
+                native_build_evidence = dict(full_log)
             record_failure("native_build", error)
         else:
             checks["native_build"] = True
@@ -1376,6 +1430,8 @@ def validate_native_image(
     }
     if format_check is not None:
         report["format_check"] = format_check
+    if native_build_evidence:
+        report["native_build_evidence"] = native_build_evidence
     if first_failure:
         report["failure"] = failure
         report["failed_stage"] = first_failure["stage"]

@@ -70,8 +70,8 @@ _RUNTIME_REQUIRED_KEYS = {
 # Testcase QA receives a bounded snapshot and Harness-fixed source material.
 # Evidence fetching has its own wall-clock budget and completes before this timeout.
 _QA_ROLES = {"testcase_qa"}
-_QA_TIMEOUT_SECONDS = 1200
-_DEFAULT_AGENT_TIMEOUT_SECONDS = 3600
+_QA_TIMEOUT_SECONDS = 2400
+_DEFAULT_AGENT_TIMEOUT_SECONDS = 7200
 _QA_SNAPSHOT_MAX_CHARS = 64_000
 _QA_PROMPT_MAX_CHARS = 100_000
 _QA_COMPACT_PREVIEW_CHARS = 4_096
@@ -457,23 +457,12 @@ def build_role_prompt(
                 "weakening tests.",
             )
         )
-    if role == "image_creator":
-        contract_lines.extend(
-            (
-                "- Docker may only be used for bounded, read-only inspection "
-                "of the TaskSpec base image.",
-                "- Write the minimum complete candidate before optional "
-                "research; leave uncertain facts to `native_build` and "
-                "`runtime_test` through `assumptions`.",
-            )
-        )
     contract_lines.extend(
         (
             "- Do not install or upgrade host tools or packages with brew, "
             "apt, dnf, yum, pip, or similar commands.",
-            "- Do not compile or build the target application, whether "
-            "directly on the Runner or inside `docker run`. Do not invoke "
-            "linters; the harness runs those validations after your response.",
+            "- Do not run Docker builds or invoke linters; the harness runs "
+            "those validations after your response.",
             f"- Put all downloads, archives and temporary files under "
             f"`{SCRATCH_DIR}/` (also in `$OE_AGENT_SCRATCH`). Never unpack or "
             "write scratch content anywhere else in this repository.",
