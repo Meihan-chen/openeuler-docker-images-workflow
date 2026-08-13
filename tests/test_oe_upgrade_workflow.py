@@ -66,6 +66,12 @@ def test_worker_is_one_task_per_run_with_stable_run_name_and_concurrency():
     assert "oe-upgrade-task-finalize" in text
 
 
+def test_worker_prepare_outlives_the_doubled_test_agent_chain():
+    data = _load(WORKER)
+
+    assert data["jobs"]["prepare"]["timeout-minutes"] == 720
+
+
 def test_legacy_batch_upgrade_workflow_is_disabled_not_parallelized():
     data = _load(LEGACY)
     trigger = _on(data)

@@ -175,9 +175,11 @@ def test_testcase_qa_requests_one_sanitized_creator_repair(tmp_path):
 
     repo, base_sha = _candidate(tmp_path, test=False)
     roles = []
+    timeouts = []
 
     def agent_runner(**kwargs):
         roles.append(kwargs["role"])
+        timeouts.append(kwargs["timeout"])
         test = repo / "AI" / "kserve" / "agent" / "tests" / "test.sh"
         if kwargs["role"] == "testcase_creator":
             test.parent.mkdir(exist_ok=True)
@@ -233,6 +235,7 @@ def test_testcase_qa_requests_one_sanitized_creator_repair(tmp_path):
         "testcase_creator",
         "testcase_qa",
     ]
+    assert timeouts == [7200, 2400, 7200, 2400]
     assert result.qa_payload["status"] == "approved"
     assert (tmp_path / "reports/testcase-sanitization-round2.json").is_file()
 

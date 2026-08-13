@@ -30,6 +30,9 @@ class UpgradeTestPreparationError(RuntimeError):
     """Raised when shared runtime tests cannot be prepared safely."""
 
 
+_TESTCASE_CREATOR_TIMEOUT_SECONDS = 7200
+
+
 @dataclass(frozen=True)
 class UpgradeTestPreparationResult:
     status: str
@@ -100,7 +103,7 @@ def prepare_upgrade_tests(
         api_key=api_key,
         required_keys=("success", "files_created"),
         response_keys=("success", "files_created", "command_evidence"),
-        timeout=3600,
+        timeout=_TESTCASE_CREATOR_TIMEOUT_SECONDS,
     )
     if creator.payload.get("success") is not True:
         raise UpgradeTestPreparationError("testcase_creator did not complete")

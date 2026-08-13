@@ -41,7 +41,7 @@ jobs:
   prepare:
     name: Prepare deterministic upgrade candidate
     runs-on: [self-hosted, Linux, X64, oe-image-x86]
-    timeout-minutes: 360
+    timeout-minutes: 720
     outputs:
       architectures: ${{ steps.task.outputs.architectures }}
       task_key: ${{ steps.task.outputs.task_key }}
