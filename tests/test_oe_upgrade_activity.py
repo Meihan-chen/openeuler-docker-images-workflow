@@ -285,6 +285,74 @@ def test_failure_and_summary_comments_are_bounded_and_machine_readable():
     assert "oe-upgrade-summary:" in summary
 
 
+def test_large_initial_summary_uses_domain_counts_instead_of_full_task_list():
+    from scripts.lib.oe_upgrade_activity import (
+        ResolvedTaskState,
+        render_initial_summary_comment,
+    )
+    from scripts.lib.oe_upgrade_contract import UPGRADE_DOMAINS, UpgradeRequest
+
+    request = UpgradeRequest.create(
+        tracking_issue_number=19,
+        oe_version="26.03-lts",
+        scope=UPGRADE_DOMAINS,
+        base_sha="1" * 40,
+    )
+    tasks = tuple(_task(name=f"app-{index}") for index in range(31))
+    states = tuple(
+        ResolvedTaskState(
+            schema_version=1,
+            request_key=request.request_key,
+            task_key=task.task_key,
+            mdu_path=task.mdu_path,
+            status="running" if index == 0 else "pending",
+            reason="",
+            evidence_source="none",
+            run_id=None,
+            pr_number=None,
+            pr_url="",
+        )
+        for index, task in enumerate(tasks)
+    )
+
+    body = render_initial_summary_comment(
+        request=request,
+        tasks=tasks,
+        states=states,
+        planning_failures=(),
+        warning_count=7,
+        mdu_count=31,
+        run_url="https://github.example/actions/runs/11",
+        artifact_name="oe-upgrade-advance-11",
+    )
+
+    assert "按领域统计" in body
+    assert (
+        "Scope: `all`（AI、Bigdata、Cloud、Database、Distroless、HPC、Others、Storage）"
+        in body
+    )
+    assert "| `Database` | `31` | `31` | `0` | `0` | `0` |" in body
+    assert (
+        "任务明细已省略；完整 TaskSpec、规划失败、Warnings 和状态投影"
+        "请通过上方“查看全量结果”获取。"
+    ) in body
+    assert "请下载下方 Artifact" not in body
+    assert "`Database/app-30`:" not in body
+    assert "已在运行: `1`" in body
+    assert "已有开放 PR:" not in body
+    assert "已合并:" not in body
+    assert "基线后已满足:" not in body
+    assert "已记录任务失败:" not in body
+    assert (
+        "数据质量警告: `7`（[查看全量结果]"
+        "(https://github.example/actions/runs/11)，"
+        "Artifact: `oe-upgrade-advance-11`）"
+    ) in body
+    assert body.count("https://github.example/actions/runs/11") == 1
+    assert "`oe-upgrade-advance-11`" in body
+    assert len(body) < 5000
+
+
 def test_failure_markers_are_parsed_only_from_trusted_comments():
     from scripts.lib.oe_upgrade_activity import parse_failure_reasons
 

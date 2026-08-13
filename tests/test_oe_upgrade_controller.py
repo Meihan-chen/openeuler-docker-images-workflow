@@ -127,6 +127,78 @@ def test_deliver_establishes_request_and_dispatches_only_first_task(tmp_path):
     assert any("oe-upgrade-request:" in item["body"] for item in client.comments)
 
 
+def test_deliver_comments_initial_projection_before_planning_failures(tmp_path):
+    from scripts.lib.oe_upgrade_controller import run_activity
+
+    repo = _repo(tmp_path)
+    target = repo / "Database" / "b" / "1.0.0" / "26.03-lts"
+    target.mkdir(parents=True)
+    (target / "Dockerfile").write_text("FROM openeuler/openeuler:26.03-lts\n")
+    with (repo / "Database" / "b" / "meta.yml").open("a") as stream:
+        stream.write(
+            "1.0.0-oe2603lts:\n"
+            "  path: 1.0.0/26.03-lts/Dockerfile\n"
+        )
+    broken = repo / "Database" / "broken"
+    broken.mkdir()
+    (broken / "meta.yml").write_text(
+        "2.0.0-oe2403sp4:\n"
+        "  path: 2.0.0/24.03-lts-sp4/Dockerfile\n"
+    )
+    with (repo / "Database" / "image-list.yml").open("a") as stream:
+        stream.write("  broken: broken\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "mixed delivery state")
+
+    client = Client()
+    dispatched = []
+    result = run_activity(
+        client=client,
+        target_repo="openeuler/openeuler-docker-images",
+        issue=_issue(),
+        workspace=repo,
+        mode="deliver",
+        expected_oe_version="26.03-lts",
+        expected_scope="Database",
+        trusted_author="oe-bot",
+        run_url="https://github.example/actions/runs/10",
+        artifact_name="oe-upgrade-advance-10",
+        runs=(),
+        dispatch=lambda **kwargs: dispatched.append(kwargs),
+    )
+
+    assert result.next_task.mdu_path == "Database/a"
+    bodies = [item["body"] for item in client.comments]
+    initial_index = next(
+        index for index, body in enumerate(bodies) if "交付活动初始汇总" in body
+    )
+    failure_index = next(
+        index for index, body in enumerate(bodies) if "无法形成安全" in body
+    )
+    assert initial_index < failure_index
+    initial = bodies[initial_index]
+    assert "扫描 MDU: `3`" in initial
+    assert "可形成任务: `2`" in initial
+    assert "规划失败: `1`" in initial
+    assert "基线上已存在: `1`" in initial
+    assert "本次需要执行: `1`" in initial
+    assert "运行中:" not in initial
+    assert "已创建 PR:" not in initial
+    assert "已合并:" not in initial
+    assert "基线后已满足:" not in initial
+    assert "任务失败:" not in initial
+    assert "`Database/a`: `1.0.0`, `24.03-lts-sp4` → `26.03-lts`" in initial
+    assert "`Database/b`" in initial
+    assert (
+        "数据质量警告: `1`（[查看全量结果]"
+        "(https://github.example/actions/runs/10)，"
+        "Artifact: `oe-upgrade-advance-10`）"
+    ) in initial
+    assert initial.count("https://github.example/actions/runs/10") == 1
+    assert "`oe-upgrade-advance-10`" in initial
+    assert "oe-upgrade-initial-summary:" in initial
+
+
 def test_completed_failure_is_commented_then_next_task_is_dispatched(tmp_path):
     from scripts.lib.oe_upgrade_activity import render_request_comment
     from scripts.lib.oe_upgrade_advance import RunView

@@ -13,10 +13,12 @@ from scripts.lib.oe_upgrade_activity import (
     ensure_issue_comment,
     establish_request,
     failure_marker,
+    initial_summary_marker,
     parse_failure_reasons,
     parse_request_comment,
     planning_failure_marker,
     render_failure_comment,
+    render_initial_summary_comment,
     render_planning_failure_comment,
     render_summary_comment,
     state_digest,
@@ -302,22 +304,6 @@ def run_activity(
         )
         return ActivityResult("planned", request, plan, (), None)
 
-    for failure in plan.planning_failures:
-        marker = planning_failure_marker(
-            request.request_key,
-            failure["mdu_path"],
-            request.oe_version,
-        )
-        ensure_issue_comment(
-            client=client,
-            target_repo=target_repo,
-            issue_number=request.tracking_issue_number,
-            body=render_planning_failure_comment(
-                request=request, failure=failure
-            ),
-            marker=marker,
-            trusted_author=trusted_author,
-        )
     comments = client.list_issue_comments(
         target_repo=target_repo,
         number=request.tracking_issue_number,
@@ -346,6 +332,42 @@ def run_activity(
         failure_reasons=failure_reasons,
         runs=runs,
     )
+
+    marker = initial_summary_marker(request.request_key)
+    ensure_issue_comment(
+        client=client,
+        target_repo=target_repo,
+        issue_number=request.tracking_issue_number,
+        body=render_initial_summary_comment(
+            request=request,
+            tasks=plan.tasks,
+            states=projection.states,
+            planning_failures=plan.planning_failures,
+            warning_count=plan.summary["warning_count"],
+            mdu_count=plan.summary["mdu_count"],
+            run_url=run_url,
+            artifact_name=artifact_name,
+        ),
+        marker=marker,
+        trusted_author=trusted_author,
+    )
+
+    for failure in plan.planning_failures:
+        marker = planning_failure_marker(
+            request.request_key,
+            failure["mdu_path"],
+            request.oe_version,
+        )
+        ensure_issue_comment(
+            client=client,
+            target_repo=target_repo,
+            issue_number=request.tracking_issue_number,
+            body=render_planning_failure_comment(
+                request=request, failure=failure
+            ),
+            marker=marker,
+            trusted_author=trusted_author,
+        )
 
     if projection.fallback_failures:
         tasks = {task.task_key: task for task in plan.tasks}

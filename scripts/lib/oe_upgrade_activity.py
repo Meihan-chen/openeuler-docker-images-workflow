@@ -8,7 +8,7 @@ import re
 from dataclasses import asdict, dataclass
 from typing import Any, Mapping, Sequence
 
-from scripts.lib.oe_upgrade_contract import UpgradeRequest
+from scripts.lib.oe_upgrade_contract import UPGRADE_DOMAINS, UpgradeRequest
 from scripts.lib.task_spec import TaskSpec
 
 
@@ -93,6 +93,10 @@ def planning_failure_marker(
 
 def summary_marker(request_key: str, digest: str) -> str:
     return f"<!-- oe-upgrade-summary:{request_key}:{digest} -->"
+
+
+def initial_summary_marker(request_key: str) -> str:
+    return f"<!-- oe-upgrade-initial-summary:{request_key} -->"
 
 
 def render_request_comment(request: UpgradeRequest) -> str:
@@ -181,6 +185,171 @@ def render_planning_failure_comment(
             ),
         )
     )
+
+
+def render_initial_summary_comment(
+    *,
+    request: UpgradeRequest,
+    tasks: Sequence[TaskSpec],
+    states: Sequence["ResolvedTaskState"],
+    planning_failures: Sequence[Mapping[str, object]],
+    warning_count: int,
+    mdu_count: int,
+    run_url: str,
+    artifact_name: str,
+) -> str:
+    """Render one bounded, human-readable projection before delivery starts."""
+    state_by_task = {state.task_key: state for state in states}
+    if len(state_by_task) != len(states) or set(state_by_task) != {
+        task.task_key for task in tasks
+    }:
+        raise ValueError("initial summary requires exactly one state per task")
+
+    counts = {
+        status: sum(state.status == status for state in states)
+        for status in (
+            "pending",
+            "running",
+            "skipped-existing",
+            "pr-created",
+            "merged",
+            "satisfied-after-base",
+            "failed",
+        )
+    }
+    first_pending = next(
+        (
+            task
+            for task in tasks
+            if state_by_task[task.task_key or ""].status == "pending"
+        ),
+        None,
+    )
+    scope_label = (
+        "`all`（" + "、".join(UPGRADE_DOMAINS) + "）"
+        if request.scope == UPGRADE_DOMAINS
+        else f"`{', '.join(request.scope)}`"
+    )
+    lines = [
+        "openEuler 升级交付活动初始汇总已生成；即将按顺序处理待执行任务。",
+        "",
+        f"- Target openEuler: `{request.oe_version}`",
+        f"- Scope: {scope_label}",
+        f"- Base SHA: `{request.base_sha}`",
+        f"- 扫描 MDU: `{mdu_count}`",
+        f"- 可形成任务: `{len(tasks)}`",
+        f"- 规划失败: `{len(planning_failures)}`",
+        f"- 基线上已存在: `{counts['skipped-existing']}`",
+        f"- 本次需要执行: `{counts['pending']}`",
+        f"- 数据质量警告: `{warning_count}`（[查看全量结果]({run_url})，"
+        f"Artifact: `{_brief(artifact_name, limit=200)}`）",
+    ]
+    exceptional_counts = (
+        ("已在运行", counts["running"]),
+        ("已有开放 PR", counts["pr-created"]),
+        ("已合并", counts["merged"]),
+        ("基线后已满足", counts["satisfied-after-base"]),
+        ("已记录任务失败", counts["failed"]),
+    )
+    lines.extend(
+        f"- {label}: `{count}`" for label, count in exceptional_counts if count
+    )
+    if first_pending is not None:
+        lines.append(f"- 首个待处理任务: `{first_pending.mdu_path}`")
+
+    detail_count = len(tasks) + len(planning_failures)
+    if detail_count <= 30:
+        labels = {
+            "pending": "待处理任务",
+            "running": "运行中任务",
+            "skipped-existing": "基线上已存在",
+            "pr-created": "已创建 PR",
+            "merged": "已合并",
+            "satisfied-after-base": "基线后已满足",
+            "failed": "任务失败",
+        }
+        for status, label in labels.items():
+            selected = [
+                task
+                for task in tasks
+                if state_by_task[task.task_key or ""].status == status
+            ]
+            if not selected:
+                continue
+            lines.extend(("", f"### {label}（{len(selected)}）", ""))
+            for task in selected:
+                source_oe = (task.derive_from or "/").split("/", 1)[1]
+                lines.append(
+                    f"- `{task.mdu_path}`: `{task.version}`, "
+                    f"`{source_oe}` → `{task.os_version}`"
+                )
+        if planning_failures:
+            lines.extend(("", f"### 规划失败（{len(planning_failures)}）", ""))
+            lines.extend(
+                f"- `{failure.get('mdu_path', '')}`: "
+                f"{_brief(failure.get('reason'), limit=300)}"
+                for failure in planning_failures
+            )
+    else:
+        domain_counts: dict[str, dict[str, int]] = {}
+        for domain in request.scope:
+            domain_counts[domain] = {
+                "tasks": 0,
+                "active": 0,
+                "existing": 0,
+                "other": 0,
+                "planning": 0,
+            }
+        for task in tasks:
+            bucket = domain_counts.setdefault(
+                task.domain,
+                {"tasks": 0, "active": 0, "existing": 0, "other": 0, "planning": 0},
+            )
+            bucket["tasks"] += 1
+            status = state_by_task[task.task_key or ""].status
+            if status in {"pending", "running"}:
+                bucket["active"] += 1
+            elif status == "skipped-existing":
+                bucket["existing"] += 1
+            else:
+                bucket["other"] += 1
+        for failure in planning_failures:
+            domain = str(failure.get("mdu_path", "")).split("/", 1)[0]
+            bucket = domain_counts.setdefault(
+                domain,
+                {"tasks": 0, "active": 0, "existing": 0, "other": 0, "planning": 0},
+            )
+            bucket["planning"] += 1
+        lines.extend(
+            (
+                "",
+                "### 按领域统计",
+                "",
+                "| 领域 | 可形成任务 | 待处理/运行 | 基线上已存在 | 其他终态 | 规划失败 |",
+                "|---|---:|---:|---:|---:|---:|",
+            )
+        )
+        lines.extend(
+            f"| `{domain}` | `{bucket['tasks']}` | `{bucket['active']}` | "
+            f"`{bucket['existing']}` | `{bucket['other']}` | `{bucket['planning']}` |"
+            for domain, bucket in domain_counts.items()
+            if any(bucket.values())
+        )
+        lines.extend(
+            (
+                "",
+                "范围较大，任务明细已省略；完整 TaskSpec、规划失败、Warnings "
+                "和状态投影请通过上方“查看全量结果”获取。",
+            )
+        )
+
+    lines.extend(
+        (
+            "",
+            initial_summary_marker(request.request_key),
+        )
+    )
+    return "\n".join(lines)
 
 
 def parse_failure_reasons(
