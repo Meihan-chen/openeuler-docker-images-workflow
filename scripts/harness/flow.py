@@ -555,12 +555,26 @@ def _fork_deliver(args: argparse.Namespace) -> None:
     token = os.environ.get("GITCODE_TOKEN", "")
     if not token:
         raise ForkPRPipelineError("GITCODE_TOKEN is required")
+    push_repo = args.push_repo
+    if args.delivery_mode == "fork_pr":
+        try:
+            _, repository_name = args.target_repo.split("/", maxsplit=1)
+        except ValueError as error:
+            raise ForkPRPipelineError(
+                "target repository must be owner/name"
+            ) from error
+        derived_push_repo = f"{args.gitcode_username}/{repository_name}"
+        if push_repo and push_repo != derived_push_repo:
+            raise ForkPRPipelineError(
+                "fork push repository must match the GitCode bot username"
+            )
+        push_repo = derived_push_repo
     config = DeliveryConfig.from_mapping(
         {
             "environment": args.environment,
             "delivery_mode": args.delivery_mode,
             "target_repo": args.target_repo,
-            "push_repo": args.push_repo,
+            "push_repo": push_repo,
             "target_branch": args.target_branch,
             "duplicate_pr_guard": args.duplicate_pr_guard,
         }
@@ -1182,9 +1196,7 @@ def _add_delivery_commands(commands: argparse._SubParsersAction) -> None:
     fork.add_argument(
         "--target-repo", default="openeuler/openeuler-docker-images"
     )
-    fork.add_argument(
-        "--push-repo", default="qq_42020325/openeuler-docker-images"
-    )
+    fork.add_argument("--push-repo", default="")
     fork.add_argument("--target-branch", default="master")
     fork.add_argument("--duplicate-pr-guard", default="")
     fork.set_defaults(handler=_fork_deliver)

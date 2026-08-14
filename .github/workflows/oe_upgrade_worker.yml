@@ -478,9 +478,8 @@ jobs:
             --source-issue-number "${{ inputs.tracking_issue_number }}" \
             --gitcode-username "${GITCODE_USERNAME}" \
             --environment production \
-            --delivery-mode direct_branch_pr \
+            --delivery-mode fork_pr \
             --target-repo openeuler/openeuler-docker-images \
-            --push-repo openeuler/openeuler-docker-images \
             --target-branch master | tee "${result}"
           python3 - "${result}" "${RUNNER_TEMP}/candidate/manifest.json" \
             >> "${GITHUB_OUTPUT}" <<'PY'

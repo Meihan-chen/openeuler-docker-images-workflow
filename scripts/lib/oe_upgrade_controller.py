@@ -122,6 +122,14 @@ def _plan_preview_body(
 def _update_issue_status(
     *, client: Any, target_repo: str, issue: Mapping[str, object], status: str
 ) -> None:
+    detail = issue.get("issue_state_detail")
+    current_status = (
+        str(detail.get("title", "")).strip()
+        if isinstance(detail, Mapping)
+        else str(issue.get("issue_state", "") or "").strip()
+    )
+    if current_status == status:
+        return
     client.update_issue(
         target_repo=target_repo,
         number=int(issue.get("number", issue.get("iid", 0))),

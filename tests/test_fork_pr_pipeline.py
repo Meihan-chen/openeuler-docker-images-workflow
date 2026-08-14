@@ -113,6 +113,20 @@ def _production_config():
     )
 
 
+def _production_fork_config():
+    from scripts.lib.gitcode_client import DeliveryConfig
+
+    return DeliveryConfig.from_mapping(
+        {
+            "environment": "production",
+            "delivery_mode": "fork_pr",
+            "target_repo": "openeuler/openeuler-docker-images",
+            "push_repo": "build-bot/openeuler-docker-images",
+            "target_branch": "master",
+        }
+    )
+
+
 @dataclass(frozen=True)
 class Workspace:
     path: object
@@ -272,6 +286,78 @@ def test_production_delivery_uses_stable_task_branch(tmp_path):
 
     assert events[0][1]["branch"] == bundle.task.branch
     assert not events[0][1]["branch"].endswith("-e2e-654321-a2")
+
+
+def test_production_fork_delivery_uses_stable_task_branch(tmp_path):
+    from scripts.lib.pr_delivery import deliver_validated_candidate
+
+    bundle = _candidate(tmp_path)
+    events = []
+
+    deliver_validated_candidate(
+        candidate_dir=bundle.root,
+        expected_run_id="123456",
+        workspace_dir=tmp_path / "promotion",
+        target_source="https://gitcode.com/upstream.git",
+        config=_production_fork_config(),
+        username="build-bot",
+        token="secret",
+        delivery_run_id="654321",
+        delivery_run_attempt="2",
+        clone=lambda *args, **kwargs: Workspace(tmp_path / "promotion"),
+        promote=lambda **kwargs: events.append(("promote", kwargs))
+        or Promotion(branch=kwargs["branch"]),
+        client_factory=lambda **kwargs: object(),
+        deliver=lambda **kwargs: events.append(("deliver", kwargs)) or Resource(),
+    )
+
+    assert events[0][1]["branch"] == bundle.task.branch
+    assert events[1][1]["config"].pr_head(bundle.task.branch) == (
+        f"build-bot:{bundle.task.branch}"
+    )
+
+
+def test_fork_deliver_derives_push_repo_from_bot_username(monkeypatch, tmp_path):
+    from scripts.harness import flow
+
+    captured = {}
+    monkeypatch.setenv("GITCODE_TOKEN", "secret")
+    monkeypatch.setattr(
+        flow,
+        "deliver_validated_candidate",
+        lambda **kwargs: captured.update(kwargs) or Resource(),
+    )
+    args = flow._parser().parse_args(
+        [
+            "fork-deliver",
+            "--candidate-dir",
+            str(tmp_path / "candidate"),
+            "--expected-run-id",
+            "1",
+            "--delivery-run-id",
+            "2",
+            "--delivery-run-attempt",
+            "1",
+            "--workspace",
+            str(tmp_path / "workspace"),
+            "--gitcode-username",
+            "build-bot",
+            "--environment",
+            "production",
+            "--delivery-mode",
+            "fork_pr",
+            "--target-repo",
+            "openeuler/openeuler-docker-images",
+            "--target-branch",
+            "master",
+        ]
+    )
+
+    flow._fork_deliver(args)
+
+    assert captured["config"].push_repo == (
+        "build-bot/openeuler-docker-images"
+    )
 
 
 def test_production_cli_accepts_explicit_delivery_configuration():

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -12,8 +13,8 @@ from typing import Callable, Mapping
 
 
 TARGET_REPO = "openeuler/openeuler-docker-images"
-TEST_PUSH_REPO = "qq_42020325/openeuler-docker-images"
 TARGET_BRANCH = "master"
+_REPO_OWNER_RE = re.compile(r"[A-Za-z0-9._-]+")
 
 
 class DeliveryConfigError(ValueError):
@@ -25,6 +26,17 @@ def _required(raw: Mapping[str, object], field_name: str) -> str:
     if not value:
         raise DeliveryConfigError(f"{field_name} is required")
     return value
+
+
+def _is_target_fork(push_repo: str) -> bool:
+    target_owner, target_name = TARGET_REPO.split("/", maxsplit=1)
+    parts = push_repo.split("/")
+    return (
+        len(parts) == 2
+        and bool(_REPO_OWNER_RE.fullmatch(parts[0]))
+        and parts[0] != target_owner
+        and parts[1] == target_name
+    )
 
 
 @dataclass(frozen=True)
@@ -55,23 +67,27 @@ class DeliveryConfig:
                 raise DeliveryConfigError(
                     "test delivery_mode must be validate_only or fork_pr"
                 )
-            if push_repo != TEST_PUSH_REPO:
+            if not _is_target_fork(push_repo):
                 raise DeliveryConfigError(
-                    "test push_repo must be the configured GitCode fork"
+                    "test push_repo must be a fork of target_repo"
                 )
             if guard_setting not in {"", "disabled"}:
                 raise DeliveryConfigError("duplicate PR guard is disabled in test")
             duplicate_pr_guard_enabled = False
-        # NOTE(production-delivery): this branch is fully implemented but
-        # currently unreachable. No workflow can select it, because
-        # flow.py _fork_deliver hard-codes the test pair above. Keep it in
-        # sync when the delivery config becomes a parameter.
         elif environment == "production":
-            if delivery_mode != "direct_branch_pr":
-                raise DeliveryConfigError("production requires direct_branch_pr")
-            if push_repo != TARGET_REPO:
+            if delivery_mode not in {"direct_branch_pr", "fork_pr"}:
                 raise DeliveryConfigError(
-                    "production push_repo must equal target_repo"
+                    "production delivery_mode must be direct_branch_pr or fork_pr"
+                )
+            valid_push_repo = (
+                push_repo == TARGET_REPO
+                if delivery_mode == "direct_branch_pr"
+                else _is_target_fork(push_repo)
+            )
+            if not valid_push_repo:
+                raise DeliveryConfigError(
+                    "production push_repo must match the direct target or "
+                    "a fork of target_repo"
                 )
             if guard_setting == "disabled":
                 raise DeliveryConfigError(

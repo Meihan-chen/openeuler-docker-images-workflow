@@ -341,6 +341,26 @@ def test_all_terminal_tasks_write_one_summary_and_suspend_issue(tmp_path):
     assert client.updates[-1]["issue_status"] == "已挂起"
     assert sum("oe-upgrade-summary:" in item["body"] for item in client.comments) == 1
 
+    client.updates.clear()
+    repeated = run_activity(
+        client=client,
+        target_repo="openeuler/openeuler-docker-images",
+        issue={**_issue(), "issue_state_detail": {"title": "已挂起"}},
+        workspace=repo,
+        mode="deliver",
+        expected_oe_version="26.03-lts",
+        expected_scope="Database",
+        trusted_author="oe-bot",
+        run_url="https://github.example/actions/runs/4",
+        artifact_name="oe-upgrade-final-4",
+        runs=(),
+        dispatch=lambda **_: (_ for _ in ()).throw(AssertionError("dispatch")),
+    )
+
+    assert repeated.action == "finalized"
+    assert client.updates == []
+    assert sum("oe-upgrade-summary:" in item["body"] for item in client.comments) == 1
+
 
 def test_worker_precheck_replans_task_and_self_retires_for_open_pr(tmp_path):
     from scripts.lib.oe_upgrade_activity import render_request_comment, task_marker

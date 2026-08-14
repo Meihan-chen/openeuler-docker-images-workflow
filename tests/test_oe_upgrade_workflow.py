@@ -62,7 +62,9 @@ def test_worker_is_one_task_per_run_with_stable_run_name_and_concurrency():
     assert "architectures:" in text
     assert "task_key:" in text
     assert "--environment production" in text
-    assert "--delivery-mode direct_branch_pr" in text
+    assert "--delivery-mode fork_pr" in text
+    assert "--push-repo" not in text
+    assert "qq_42020325" not in text
     assert "oe-upgrade-task-finalize" in text
 
 

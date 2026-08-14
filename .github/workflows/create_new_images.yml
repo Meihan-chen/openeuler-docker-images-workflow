@@ -84,15 +84,10 @@ env:
   PYTHONUNBUFFERED: "1"
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
 
-# TODO(production-duplicate-pr-guard): delivery is still test-mode only.
-# `flow.py fork-deliver` hard-codes environment=test / delivery_mode=fork_pr /
-# push_repo=qq_42020325 (scripts/harness/flow.py), and that mode intentionally
-# skips duplicate PR handling. The production pair defined in
-# scripts/lib/gitcode_client.py (environment=production with
-# delivery_mode=direct_branch_pr) is currently unreachable from any workflow.
-# Before production rollout: lift DeliveryConfig out of _fork_deliver into
-# parameters, re-enable the duplicate PR guard, and wire direct_branch_pr.
-# Deliberately left as-is while phase-one testing continues.
+# TODO(production-duplicate-pr-guard): scenario one keeps its explicit
+# test-mode fork delivery and therefore does not enable the production
+# duplicate PR guard. The fork owner is derived from GITCODE_BOT_USERNAME; it
+# is not embedded in this workflow or flow.py.
 
 jobs:
   prepare:

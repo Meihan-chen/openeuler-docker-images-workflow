@@ -53,6 +53,39 @@ def test_production_direct_mode_requires_target_repository_push():
     assert config.duplicate_pr_guard_enabled is True
 
 
+def test_production_fork_mode_uses_allowlisted_cross_repository_head():
+    from scripts.lib.gitcode_client import DeliveryConfig
+
+    config = DeliveryConfig.from_mapping(
+        {
+            "environment": "production",
+            "delivery_mode": "fork_pr",
+            "target_repo": "openeuler/openeuler-docker-images",
+            "push_repo": "build-bot/openeuler-docker-images",
+            "target_branch": "master",
+        }
+    )
+
+    branch = "auto/oe-upgrade/Database/redis/8.2.1-oe2403sp4"
+    assert config.pr_head(branch) == f"build-bot:{branch}"
+    assert config.duplicate_pr_guard_enabled is True
+
+
+def test_production_fork_mode_rejects_a_different_repository_name():
+    from scripts.lib.gitcode_client import DeliveryConfig, DeliveryConfigError
+
+    with pytest.raises(DeliveryConfigError, match="fork"):
+        DeliveryConfig.from_mapping(
+            {
+                "environment": "production",
+                "delivery_mode": "fork_pr",
+                "target_repo": "openeuler/openeuler-docker-images",
+                "push_repo": "build-bot/another-repository",
+                "target_branch": "master",
+            }
+        )
+
+
 @pytest.mark.parametrize(
     "overrides",
     [

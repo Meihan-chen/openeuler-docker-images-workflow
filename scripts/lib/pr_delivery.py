@@ -895,12 +895,12 @@ def deliver_validated_candidate(
         config.environment == "test" and config.delivery_mode == "fork_pr"
     ) or (
         config.environment == "production"
-        and config.delivery_mode == "direct_branch_pr"
+        and config.delivery_mode in {"direct_branch_pr", "fork_pr"}
     )
     if not supported_delivery:
         raise ForkPRPipelineError(
-            "validated candidate delivery requires test fork_pr or "
-            "production direct_branch_pr mode"
+            "validated candidate delivery requires fork_pr or production "
+            "direct_branch_pr mode"
         )
     if not token:
         raise ForkPRPipelineError("GitCode token is required")
